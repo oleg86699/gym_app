@@ -2,18 +2,21 @@
 # В этапе 1 используется только target `dev`. `prod` подъедет в 1.5.
 
 # ─── deps ──────────────────────────────────────────────────────────────
-FROM node:22-alpine AS deps
+# node:22-slim (Debian/glibc), НЕ alpine/musl: на musl нативный парсер rollup
+# капризничает с детектом libc. Лок коммитнут и содержит ВСЕ платформенные
+# optional'ы rollup + рабочие версии svelte/vite — поэтому npm ci (детерминизм).
+FROM node:22-slim AS deps
 
 WORKDIR /app
 COPY ui/package.json ui/package-lock.json* /app/
 
-# npm имеет давний баг: lockfile, сгенерённый на одной OS/arch, не содержит
-# OPTIONAL-зависимости других платформ (например @rollup/rollup-linux-x64-gnu).
-# Тогда `vite build` в CI падает с "Cannot find module .../rollup/dist/native.js".
-# Поэтому НЕ используем `npm ci` со «своим» локом — сносим лок и ставим свежо
-# под платформу сборки (linux/amd64 в CI). Чуть теряем детерминизм, зато
-# кросс-платформенно надёжно.
-RUN rm -f package-lock.json && npm install --no-audit --no-fund
+RUN npm ci --no-audit --no-fund
+# Обход бага npm (npm/cli#4828): `npm ci` пропускает platform-specific optional-
+# зависимости даже когда они есть в локе. rollup без нативного бинаря падает с
+# "Cannot find module .../rollup/dist/native.js". Доустанавливаем нативный rollup
+# РОВНО под арку текущей сборки (glibc): x64-gnu в CI (amd64), arm64-gnu локально.
+RUN ARCH="$(node -p 'process.arch')" \
+ && npm install --no-save "@rollup/rollup-linux-${ARCH}-gnu@$(node -p "require('rollup/package.json').version")"
 
 # ─── dev ───────────────────────────────────────────────────────────────
 FROM deps AS dev
