@@ -1,0 +1,75 @@
+# ──────────────────────────────────────────────────────────────────────
+# PROD DEPLOY overlay. Накладывается поверх docker-compose.yaml на сервере
+# через GitHub Actions. Пинит образы на конкретные GHCR-теги (через *_IMAGE_REF),
+# открывает наружу ТОЛЬКО публичный nginx-порт, монтирует prod-конфиг nginx.
+#
+# Запуск на сервере (что делает workflow), из /opt/gym_app:
+#   APP_IMAGE_REF=ghcr.io/oleg86699/gym_app-app:v1.2.3 \
+#   UI_IMAGE_REF=ghcr.io/oleg86699/gym_app-ui:v1.2.3 \
+#   BACKUP_IMAGE_REF=ghcr.io/oleg86699/gym_app-backup:v1.2.3 \
+#   PUBLIC_PORT=8090 NGINX_BIND_IP=0.0.0.0 \
+#   docker compose -f docker-compose.yaml -f deploy/docker-compose.deploy.yaml \
+#                  --project-name gym_app up -d
+#
+# Project dir = каталог ПЕРВОГО compose-файла (docker-compose.yaml), т.е.
+# /opt/gym_app — все относительные пути (./data, ./docker/nginx, ./.env)
+# резолвятся туда.
+#
+# Переменные:
+#   APP_IMAGE_REF / UI_IMAGE_REF / BACKUP_IMAGE_REF — GHCR-рефы, REQUIRED
+#   PUBLIC_PORT    — публичный HTTP-порт хоста (по умолчанию 8090). НЕ путать с
+#                    APP_PORT (внутренний порт FastAPI = 8080).
+#   NGINX_BIND_IP  — адрес прослушивания (по умолчанию 0.0.0.0)
+#
+# DB / Redis / MinIO / PgBouncer — без host-биндинга (docker-internal). Доступ:
+#   docker compose --project-name gym_app exec db psql ... (по SSH на сервере)
+# ──────────────────────────────────────────────────────────────────────
+
+services:
+  app:
+    image: ${APP_IMAGE_REF:?APP_IMAGE_REF is required for deploy}
+    build: !reset null
+    volumes:
+      - ./.env:/app/.env:ro
+
+  celery-worker:
+    image: ${APP_IMAGE_REF:?APP_IMAGE_REF is required for deploy}
+    build: !reset null
+    volumes:
+      - ./.env:/app/.env:ro
+
+  taskiq-worker:
+    image: ${APP_IMAGE_REF:?APP_IMAGE_REF is required for deploy}
+    build: !reset null
+    volumes:
+      - ./.env:/app/.env:ro
+
+  taskiq-scheduler:
+    image: ${APP_IMAGE_REF:?APP_IMAGE_REF is required for deploy}
+    build: !reset null
+    volumes:
+      - ./.env:/app/.env:ro
+
+  ui:
+    image: ${UI_IMAGE_REF:?UI_IMAGE_REF is required for deploy}
+    build: !reset null
+    # prod UI = nginx со статикой SvelteKit, слушает :80 (не vite :5173).
+    expose:
+      - "80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1/ >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  backup:
+    image: ${BACKUP_IMAGE_REF:?BACKUP_IMAGE_REF is required for deploy}
+    build: !reset null
+
+  nginx:
+    # Публичный вход. ЕДИНСТВЕННЫЙ порт наружу.
+    ports:
+      - "${NGINX_BIND_IP:-0.0.0.0}:${PUBLIC_PORT:-8090}:80"
+    volumes:
+      - ./docker/nginx/conf.d/default.prod.conf:/etc/nginx/conf.d/default.conf:ro

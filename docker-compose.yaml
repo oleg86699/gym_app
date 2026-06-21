@@ -278,7 +278,10 @@ services:
       TZ: ${TZ:-Europe/Kyiv}
     volumes:
       - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
+      # default.conf монтируется в env-override:
+      #   dev  → conf.d/default.dev.conf  (UI = vite dev :5173, HMR)
+      #   prod → conf.d/default.prod.conf (UI = prod-контейнер :80)
+      # Так в каждом окружении ровно один server-блок (без конфликтов на :80).
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1/health >/dev/null 2>&1 || exit 1"]
       interval: 10s

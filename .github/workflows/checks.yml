@@ -1,0 +1,68 @@
+name: Checks
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── PR governance: conventional-commit title + branch flow ─────────
+  pr-governance:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PR title (Conventional Commits)
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          re='^(feat|fix|chore|docs|style|refactor|perf|test|build|ci|revert)(\([a-z0-9_-]+\))?!?: .+'
+          if ! [[ "${TITLE}" =~ $re ]]; then
+            echo "::error::PR title must follow Conventional Commits, e.g. 'feat(batches): add export'."
+            echo "Got: ${TITLE}"
+            exit 1
+          fi
+
+      - name: Validate branch flow
+        env:
+          BASE: ${{ github.event.pull_request.base.ref }}
+          HEAD: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "${BASE}" == "main" && "${HEAD}" != "develop" ]]; then
+            echo "::error::PRs into main only from develop (got ${HEAD})."
+            exit 1
+          fi
+
+  # ── Python syntax: AST-parse every .py (catches breakage fast) ─────
+  py-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile all backend .py
+        run: |
+          set -euo pipefail
+          python -m compileall -q backend/src
+
+  # ── Ruff lint (non-blocking style gate) ────────────────────────────
+  lint:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Ruff
+        run: |
+          pip install ruff
+          ruff check backend/src || true
