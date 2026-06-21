@@ -7,9 +7,13 @@ FROM node:22-alpine AS deps
 WORKDIR /app
 COPY ui/package.json ui/package-lock.json* /app/
 
-# package-lock.json при первом запуске может отсутствовать — npm install
-# его создаст. После первого успешного билда положи в репо.
-RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+# npm имеет давний баг: lockfile, сгенерённый на одной OS/arch, не содержит
+# OPTIONAL-зависимости других платформ (например @rollup/rollup-linux-x64-gnu).
+# Тогда `vite build` в CI падает с "Cannot find module .../rollup/dist/native.js".
+# Поэтому НЕ используем `npm ci` со «своим» локом — сносим лок и ставим свежо
+# под платформу сборки (linux/amd64 в CI). Чуть теряем детерминизм, зато
+# кросс-платформенно надёжно.
+RUN rm -f package-lock.json && npm install --no-audit --no-fund
 
 # ─── dev ───────────────────────────────────────────────────────────────
 FROM deps AS dev
