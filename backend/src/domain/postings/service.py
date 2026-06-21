@@ -1,0 +1,443 @@
+"""
+Posting runs service: создание прогона, листинг, контроль статусов.
+
+Сам постинг (status=running) подъедет в блоке 4 (Celery worker). Сейчас
+прогон создаётся → загружаемый zip распаковывается TaskIQ-таской в text_items
+→ статус scheduled/queued.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, date, datetime
+
+from sqlalchemy import BigInteger, case, func, literal, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from infrastructure.db.models import (
+    AdminUser,
+    PostingRun,
+    PostingRunStatus,
+    Project,
+    TextItem,
+    TextItemStatus,
+)
+
+
+# ─── Access / scope ───────────────────────────────────────────────────
+
+
+def can_view_run(viewer: AdminUser, run: PostingRun, project: Project) -> bool:
+    """Прогон видит тот, кто видит проект."""
+    from domain.projects.service import can_view_project
+
+    return can_view_project(viewer, project)
+
+
+def can_manage_run(viewer: AdminUser, run: PostingRun, project: Project) -> bool:
+    """Управлять прогоном может owner проекта / group_admin его группы / super_admin."""
+    from domain.projects.service import can_manage_project
+
+    return can_manage_project(viewer, project)
+
+
+# ─── Backpressure ─────────────────────────────────────────────────────
+
+
+async def count_active_runs_for_user(session: AsyncSession, user_id: int) -> int:
+    """Сколько прогонов сейчас в активных статусах у юзера."""
+    active_statuses = {
+        PostingRunStatus.UNPACKING.value,
+        PostingRunStatus.SCHEDULED.value,
+        PostingRunStatus.QUEUED.value,
+        PostingRunStatus.RUNNING.value,
+        PostingRunStatus.PAUSED.value,
+    }
+    stmt = select(func.count(PostingRun.id)).where(
+        PostingRun.created_by == user_id,
+        PostingRun.deleted_at.is_(None),
+        PostingRun.status.in_(active_statuses),
+    )
+    return (await session.execute(stmt)).scalar_one()
+
+
+# ─── Queries ──────────────────────────────────────────────────────────
+
+
+def _run_load_opts():
+    return (
+        selectinload(PostingRun.project),
+        selectinload(PostingRun.creator),
+    )
+
+
+async def list_runs_for_viewer(
+    session: AsyncSession,
+    *,
+    viewer: AdminUser,
+    after_id: int | None = None,
+    limit: int = 50,
+    statuses: list[str] | None = None,
+    project_id: int | None = None,
+    created_by: int | None = None,
+    search: str | None = None,
+) -> list[PostingRun]:
+    """
+    Все runs которые viewer может видеть.
+
+    Scope наследуется от Project (через _visible_projects_filter):
+    - super_admin → все
+    - group_admin → runs в проектах своей группы
+    - user → runs в своих/расшаренных проектах
+    """
+    from domain.projects.service import _visible_projects_filter
+
+    stmt = (
+        select(PostingRun)
+        .where(PostingRun.deleted_at.is_(None))
+        .options(*_run_load_opts())
+        .order_by(PostingRun.id.desc())
+        .limit(limit + 1)
+    )
+
+    project_filter = _visible_projects_filter(viewer)
+    if project_filter is not None:
+        stmt = stmt.join(Project, Project.id == PostingRun.project_id).where(project_filter)
+
+    if project_id is not None:
+        stmt = stmt.where(PostingRun.project_id == project_id)
+    if created_by is not None:
+        stmt = stmt.where(PostingRun.created_by == created_by)
+    if statuses:
+        stmt = stmt.where(PostingRun.status.in_(statuses))
+    if search:
+        stmt = stmt.where(PostingRun.name.ilike(f"%{search.strip()}%"))
+    if after_id:
+        stmt = stmt.where(PostingRun.id < after_id)
+
+    return list((await session.execute(stmt)).scalars().unique().all())
+
+
+async def list_runs_for_project(
+    session: AsyncSession,
+    *,
+    project_id: int,
+    after_id: int | None = None,
+    limit: int = 100,
+) -> list[PostingRun]:
+    stmt = (
+        select(PostingRun)
+        .where(
+            PostingRun.project_id == project_id,
+            PostingRun.deleted_at.is_(None),
+        )
+        .options(*_run_load_opts())
+        .order_by(PostingRun.id.desc())
+        .limit(limit + 1)
+    )
+    if after_id:
+        stmt = stmt.where(PostingRun.id < after_id)
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def get_run(session: AsyncSession, run_id: int) -> PostingRun | None:
+    stmt = (
+        select(PostingRun)
+        .where(PostingRun.id == run_id, PostingRun.deleted_at.is_(None))
+        .options(*_run_load_opts())
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+# ─── Create ───────────────────────────────────────────────────────────
+
+
+async def create_run(
+    session: AsyncSession,
+    *,
+    project: Project,
+    creator: AdminUser,
+    name: str,
+    publish_from: date | None,
+    publish_to: date | None,
+    concurrency: int,
+    timeout_seconds: int,
+    priority: str,
+    scheduled_for: datetime | None,
+    source_archive_storage_key: str,
+    proxy_id: int | None = None,
+    proxy_selector: str | None = None,
+    posting_method: str = "auto",
+    spread_days: int = 0,
+    max_posts_per_site: int = 1,
+    post_verify: str = "mark",
+) -> PostingRun:
+    run = PostingRun(
+        project_id=project.id,
+        created_by=creator.id,
+        name=name.strip(),
+        status=PostingRunStatus.UNPACKING.value,
+        publish_from=publish_from,
+        publish_to=publish_to,
+        concurrency=concurrency,
+        timeout_seconds=timeout_seconds,
+        priority=priority,
+        scheduled_for=scheduled_for,
+        spread_days=spread_days,
+        source_archive_storage_key=source_archive_storage_key,
+        proxy_id=proxy_id,
+        proxy_selector=proxy_selector,
+        posting_method=posting_method,
+        max_posts_per_site=max_posts_per_site,
+        post_verify=post_verify,
+    )
+    session.add(run)
+    await session.commit()
+    refreshed = await get_run(session, run.id)
+    assert refreshed is not None
+    return refreshed
+
+
+async def set_run_status(
+    session: AsyncSession,
+    *,
+    run_id: int,
+    status: PostingRunStatus,
+    total_texts: int | None = None,
+) -> None:
+    """Атомарный апдейт статуса (используется TaskIQ после распаковки)."""
+    values: dict = {"status": status.value}
+    if total_texts is not None:
+        values["total_texts"] = total_texts
+
+    await session.execute(update(PostingRun).where(PostingRun.id == run_id).values(**values))
+    await session.commit()
+
+
+# ─── Run progress (на основе денорм-счётчиков) ───────────────────────
+
+
+async def run_progress_counts(session: AsyncSession, run_id: int) -> dict[str, int]:
+    """
+    Полный разрез по статусам text_items. Денорм-счётчики на run-е
+    учитывают только posted/failed/skipped; pending/posting считаем
+    отдельным запросом для точного отображения в UI.
+    """
+    stmt = select(TextItem.status, func.count(TextItem.id)).where(
+        TextItem.posting_run_id == run_id
+    ).group_by(TextItem.status)
+    by_status = dict((row[0], int(row[1])) for row in (await session.execute(stmt)).all())
+    # «Сгенерировано» = айтемы с готовым текстом (text_id NOT NULL) — для dual-бара
+    # (красный=генерация, зелёный=постинг). Для не-gen ранов = total (текст уже есть).
+    generated = await session.scalar(select(func.count(TextItem.id)).where(
+        TextItem.posting_run_id == run_id, TextItem.text_id.isnot(None)))
+    return {
+        "total": sum(by_status.values()),
+        "pending": by_status.get(TextItemStatus.PENDING.value, 0),
+        "generating": by_status.get(TextItemStatus.GENERATING.value, 0),
+        "posting": by_status.get(TextItemStatus.POSTING.value, 0),
+        "posted": by_status.get(TextItemStatus.POSTED.value, 0),
+        "failed": by_status.get(TextItemStatus.FAILED.value, 0),
+        "skipped": by_status.get(TextItemStatus.SKIPPED.value, 0),
+        "needs_review": by_status.get(TextItemStatus.NEEDS_REVIEW.value, 0),
+        "generated": int(generated or 0),
+    }
+
+
+# ─── TextItems listing для run detail page ──────────────────────────
+
+
+# Сортировка text_items: айтемы С текстом — выше пустых (gen_per_row: оригиналы
+# вверху, чтобы не искать их среди пустых спин-плейсхолдеров). Для обычных ранов
+# (у всех есть text_id) ключ = id → порядок не меняется. Один int → курсор-пагинация.
+_ITEM_SORT_BUMP = 1_000_000_000_000
+# айтемы с текстом (text_id NOT NULL) → 0+id (вверху); пустые → bump+id (внизу).
+# case вместо cast(bool→bigint) — PG не кастит boolean в bigint напрямую.
+_ITEM_SORT_KEY = (
+    case((TextItem.text_id.is_(None), literal(_ITEM_SORT_BUMP, BigInteger)), else_=literal(0))
+    + TextItem.id
+)
+
+
+def item_sort_key(it: TextItem) -> int:
+    """Питон-версия _ITEM_SORT_KEY — для вычисления next_cursor в эндпоинте."""
+    return (_ITEM_SORT_BUMP if it.text_id is None else 0) + it.id
+
+
+async def list_text_items_for_run(
+    session: AsyncSession,
+    *,
+    run_id: int,
+    status: str | None = None,
+    after_id: int | None = None,
+    limit: int = 50,
+) -> list[TextItem]:
+    """Список text_items с подгруженными site/credential для UI таблицы.
+    Айтемы с текстом — вверху (см. _ITEM_SORT_KEY). `after_id` тут = sort_key-курсор."""
+    stmt = (
+        select(TextItem)
+        .where(TextItem.posting_run_id == run_id)
+        .options(
+            selectinload(TextItem.credential),
+            selectinload(TextItem.site),
+        )
+        .order_by(_ITEM_SORT_KEY)
+        .limit(limit + 1)
+    )
+    if status:
+        # поддержка нескольких статусов через запятую («in-progress» = pending,posting)
+        statuses = [s for s in status.split(",") if s]
+        stmt = stmt.where(TextItem.status == statuses[0] if len(statuses) == 1
+                          else TextItem.status.in_(statuses))
+    if after_id:
+        stmt = stmt.where(_ITEM_SORT_KEY > after_id)
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def get_text_item(session: AsyncSession, item_id: int) -> TextItem | None:
+    stmt = (
+        select(TextItem)
+        .where(TextItem.id == item_id)
+        .options(
+            selectinload(TextItem.credential),
+            selectinload(TextItem.site),
+        )
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+# Статусы, в которых разрешено редактировать содержимое.
+# Запрещаем только POSTING (воркер прямо сейчас использует этот контент).
+# Для POSTED правки сохраняются локально; для синка с WP нужна отдельная фича
+# (wp.editPost), которой пока нет — UI это явно предупреждает.
+EDITABLE_TEXT_STATUSES: frozenset[str] = frozenset(
+    s.value for s in TextItemStatus if s != TextItemStatus.POSTING
+)
+
+
+async def update_text_item_meta(
+    session: AsyncSession,
+    *,
+    item_id: int,
+    title: str | None,
+    byte_size: int,
+    content_hash: str,
+) -> None:
+    """Обновить метаданные text_item после загрузки нового контента в MinIO."""
+    await session.execute(
+        update(TextItem)
+        .where(TextItem.id == item_id)
+        .values(title=(title or None) and title[:1000], byte_size=byte_size, content_hash=content_hash)
+    )
+    await session.commit()
+
+
+# ─── Управление run-ом (pause / resume / cancel / retry) ─────────────
+
+
+async def request_pause(session: AsyncSession, run_id: int) -> None:
+    await session.execute(
+        update(PostingRun).where(PostingRun.id == run_id).values(pause_requested=True)
+    )
+    await session.commit()
+
+
+async def request_cancel(session: AsyncSession, run_id: int) -> None:
+    await session.execute(
+        update(PostingRun).where(PostingRun.id == run_id).values(cancel_requested=True)
+    )
+    await session.commit()
+
+
+async def soft_delete_run(session: AsyncSession, run_id: int) -> None:
+    """Архивируем run — `deleted_at = now()`. Списки runs фильтруют по NULL."""
+    await session.execute(
+        update(PostingRun)
+        .where(PostingRun.id == run_id)
+        .values(deleted_at=datetime.now(UTC))
+    )
+    await session.commit()
+
+
+async def request_resume(session: AsyncSession, run_id: int) -> bool:
+    """
+    Снимаем pause_requested. Если run в PAUSED или INTERRUPTED — возвращаем
+    в QUEUED, чтобы caller перепослал в Celery. True = нужно re-enqueue.
+
+    INTERRUPTED уже имеет text_items сброшенные posting→pending recovery-job-ом,
+    так что воркер просто продолжит с того места, где остановился (state в БД,
+    не в памяти — ADR-001).
+    """
+    run = await session.scalar(select(PostingRun).where(PostingRun.id == run_id))
+    if run is None:
+        return False
+    resumable = {PostingRunStatus.PAUSED.value, PostingRunStatus.INTERRUPTED.value}
+    needs_enqueue = run.status in resumable
+    values: dict = {"pause_requested": False}
+    if needs_enqueue:
+        values["status"] = PostingRunStatus.QUEUED.value
+        # Если резюмим из interrupted — сбрасываем finished_at чтобы run снова
+        # считался активным, и подчищаем cancel_requested на всякий случай.
+        if run.status == PostingRunStatus.INTERRUPTED.value:
+            values["finished_at"] = None
+            values["cancel_requested"] = False
+    await session.execute(update(PostingRun).where(PostingRun.id == run_id).values(**values))
+    await session.commit()
+    return needs_enqueue
+
+
+async def retry_failed_items(session: AsyncSession, run_id: int) -> tuple[int, bool]:
+    """
+    Перевести все failed text_items этого run-а обратно в pending.
+    Если сам run в финальном статусе (done/failed/cancelled/interrupted/
+    need_more_admins) — поднимаем его в queued.
+    Возвращаем (сколько перезапустили, нужно_ли_re-enqueue).
+    """
+    result = await session.execute(
+        update(TextItem)
+        .where(
+            TextItem.posting_run_id == run_id,
+            TextItem.status == TextItemStatus.FAILED.value,
+        )
+        .values(status=TextItemStatus.PENDING.value, last_error=None)
+    )
+    retried = int(result.rowcount or 0)
+    if retried == 0:
+        await session.commit()
+        return (0, False)
+
+    run = await session.scalar(select(PostingRun).where(PostingRun.id == run_id))
+    if run is None:
+        await session.commit()
+        return (retried, False)
+
+    finalized = {
+        PostingRunStatus.DONE.value,
+        PostingRunStatus.FAILED.value,
+        PostingRunStatus.CANCELLED.value,
+        PostingRunStatus.INTERRUPTED.value,
+        PostingRunStatus.NEED_MORE_ADMINS.value,
+    }
+    needs_enqueue = run.status in finalized
+    if needs_enqueue:
+        # Сбрасываем failed_count чтобы счётчик в UI стал корректным после retry.
+        # posted_count оставляем (это валидные публикации).
+        await session.execute(
+            update(PostingRun)
+            .where(PostingRun.id == run_id)
+            .values(
+                status=PostingRunStatus.QUEUED.value,
+                failed_count=PostingRun.failed_count - retried,
+                cancel_requested=False,
+                pause_requested=False,
+                finished_at=None,
+            )
+        )
+    else:
+        await session.execute(
+            update(PostingRun)
+            .where(PostingRun.id == run_id)
+            .values(failed_count=PostingRun.failed_count - retried)
+        )
+    await session.commit()
+    return (retried, needs_enqueue)

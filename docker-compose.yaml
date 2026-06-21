@@ -1,0 +1,336 @@
+# Базовый стек для gym_app.
+#
+# В этом файле — только общая структура и конфигурация для всех окружений.
+# Локальный override (порты на хост, --reload, source bind mounts) — в
+# docker-compose.dev.yaml. Прод-override появится в этапе 1.5.
+#
+# Запуск: см. Makefile. Напрямую не вызывать.
+#
+# Все persistent volumes — через bind mounts в ./data/ (см. ADR-014).
+# Никаких named volumes — это намеренно.
+
+services:
+  # ───────────────────────────────────────────────────────────────────
+  # Postgres + PgBouncer
+  # ───────────────────────────────────────────────────────────────────
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      TZ: ${TZ:-Europe/Kyiv}
+    command: >
+      postgres
+        -c max_connections=200
+        -c shared_buffers=512MB
+        -c effective_cache_size=1536MB
+        -c work_mem=16MB
+        -c maintenance_work_mem=128MB
+        -c wal_compression=on
+        -c log_min_duration_statement=200
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.23.1-p3
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 500
+      DEFAULT_POOL_SIZE: 40
+      MIN_POOL_SIZE: 5
+      RESERVE_POOL_SIZE: 10
+      SERVER_RESET_QUERY: DISCARD ALL
+      AUTH_TYPE: scram-sha-256
+      TZ: ${TZ:-Europe/Kyiv}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "PGPASSWORD=${POSTGRES_PASSWORD} psql -h 127.0.0.1 -p 5432 -U ${POSTGRES_USER} -d ${POSTGRES_DB} -c 'SELECT 1' >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+
+  # ───────────────────────────────────────────────────────────────────
+  # Redis
+  # ───────────────────────────────────────────────────────────────────
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    environment:
+      TZ: ${TZ:-Europe/Kyiv}
+    volumes:
+      - ./data/redis:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ───────────────────────────────────────────────────────────────────
+  # MinIO (object storage для .txt контента и результирующих CSV)
+  # ───────────────────────────────────────────────────────────────────
+
+  minio:
+    image: minio/minio:RELEASE.2025-01-20T14-49-07Z
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin_change_me}
+      TZ: ${TZ:-Europe/Kyiv}
+    command: server /data --console-address ":9001"
+    volumes:
+      - ./data/minio:/data
+    expose:
+      - "9000"   # S3 API
+      - "9001"   # Web console
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+
+  # ───────────────────────────────────────────────────────────────────
+  # FastAPI app
+  # ───────────────────────────────────────────────────────────────────
+
+  app:
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      TZ: ${TZ:-Europe/Kyiv}
+      APP_PORT: ${APP_PORT:-8080}
+    expose:
+      - "8080"
+    command:
+      - sh
+      - -c
+      - alembic upgrade head && python -m scripts.seed && uvicorn main:create_app --factory --host 0.0.0.0 --port 8080
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).status == 200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # ───────────────────────────────────────────────────────────────────
+  # SvelteKit UI
+  # ───────────────────────────────────────────────────────────────────
+
+  ui:
+    build:
+      context: .
+      dockerfile: docker/ui.Dockerfile
+      target: dev          # prod target подъедет в этапе 1.5
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Europe/Kyiv}
+      VITE_API_PROXY_TARGET: http://app:8080
+    expose:
+      - "5173"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:5173/ >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ───────────────────────────────────────────────────────────────────
+  # Celery worker — тяжёлые long-running задачи постинга
+  # ───────────────────────────────────────────────────────────────────
+
+  celery-worker:
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      TZ: ${TZ:-Europe/Kyiv}
+    command:
+      - sh
+      - -c
+      # Xvfb для headful-chromium (CF Tier 3). exec → сигналы доходят до celery.
+      - >
+        Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
+        export DISPLAY=:99;
+        exec celery -A core.celery_app:celery_app worker --loglevel=INFO --concurrency=${CELERY_WORKER_CONCURRENCY:-2}
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A core.celery_app:celery_app inspect ping -t 5 2>&1 | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ───────────────────────────────────────────────────────────────────
+  # TaskIQ worker — лёгкие async-задачи (распаковка, валидация, scheduled)
+  # ───────────────────────────────────────────────────────────────────
+
+  taskiq-worker:
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      TZ: ${TZ:-Europe/Kyiv}
+    command:
+      - sh
+      - -c
+      # Xvfb для headful-chromium (CF Tier 3). exec → сигналы доходят до taskiq.
+      - >
+        Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
+        export DISPLAY=:99;
+        exec taskiq worker workers.taskiq:broker --workers 2
+    healthcheck:
+      # В slim-image нет pgrep/ps — ищем процесс через /proc/*/cmdline
+      test: ["CMD-SHELL", "grep -lZ 'taskiq.worker' /proc/[0-9]*/cmdline >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ───────────────────────────────────────────────────────────────────
+  # TaskIQ scheduler — периодические задачи (dispatch_scheduled_runs,
+  # recover_stalled_runs). Один экземпляр на весь стек.
+  # ───────────────────────────────────────────────────────────────────
+
+  taskiq-scheduler:
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      TZ: ${TZ:-Europe/Kyiv}
+    command:
+      - sh
+      - -c
+      - taskiq scheduler workers.taskiq:scheduler
+    healthcheck:
+      test: ["CMD-SHELL", "grep -lZ 'taskiq.scheduler' /proc/[0-9]*/cmdline >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ───────────────────────────────────────────────────────────────────
+  # Nginx — единая точка входа для UI + API
+  # ───────────────────────────────────────────────────────────────────
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+      ui:
+        condition: service_healthy
+    environment:
+      TZ: ${TZ:-Europe/Kyiv}
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1/health >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  # ───────────────────────────────────────────────────────────────────
+  # Backup + maintenance
+  # ───────────────────────────────────────────────────────────────────
+
+  backup:
+    build:
+      context: .
+      dockerfile: docker/backup.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      TZ: ${TZ:-Europe/Kyiv}
+      POSTGRES_HOST: db
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # MinIO-креды → `mc mirror` бэкапит бакеты (text-items + results) в
+      # ./backups/minio. Без них run.sh не авторизуется и тихо пропускает зеркало.
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin_change_me}
+      BACKUP_CRON: ${BACKUP_CRON:-30 3 */2 * *}
+      PRUNE_CRON: ${PRUNE_CRON:-0 4 * * 0}
+      RETENTION_DAYS: ${RETENTION_DAYS:-7}
+    volumes:
+      # данные read-only — backup не должен ничего записать в боевые папки
+      - ./data/postgres:/var/lib/postgresql/data:ro
+      # bake write только сюда
+      - ./backups:/backups
+      # доступ к docker daemon для prune
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep crond > /dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+# CF Tier 3 теперь — Patchright (реальный браузер) внутри app/worker-образа,
+# отдельный FlareSolverr-контейнер убран (он CF Bot-Fight не проходил).
+
+# Никаких top-level `volumes:` — все persistent данные через bind mounts.
+# Это намеренно. См. ADR-014.
+
+networks:
+  default:
+    name: ${COMPOSE_PROJECT_NAME:-gym_app}_default

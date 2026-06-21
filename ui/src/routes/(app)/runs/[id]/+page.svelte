@@ -1,0 +1,1000 @@
+<script lang="ts">
+  import { ArrowLeft, ArrowRight, Copy, Play, RefreshCw, RotateCw, Send, Wand2 } from 'lucide-svelte'
+  import { goto } from '$app/navigation'
+  import { page } from '$app/state'
+  import { onDestroy, onMount } from 'svelte'
+
+  import { postings as postingsApi } from '$lib/api/admin'
+  import { ApiError } from '$lib/api/client'
+  import DropdownMenu from '$lib/components/ui/DropdownMenu.svelte'
+  import { runModeLabel } from '$lib/runLabels'
+  import type {
+    PostingRun,
+    PostingRunStatus,
+    RunProgress,
+    TextItem,
+    TextItemStatus,
+  } from '$lib/api/types'
+  import { showToast } from '$lib/stores/toast'
+  import { currentUser } from '$lib/stores/user'
+
+  let runId = $derived(Number(page.params.id))
+
+  let run = $state<PostingRun | null>(null)
+  let progress = $state<RunProgress | null>(null)
+  let items = $state<TextItem[]>([])
+  let loading = $state(true)
+
+  // 'in_progress' — виртуальный фильтр карточки Pending (pending + posting in-flight)
+  let filterStatus = $state<TextItemStatus | 'all' | 'in_progress'>('all')
+  let busyAction = $state<'pause' | 'resume' | 'cancel' | 'retry' | 'delete' | null>(null)
+
+  // ─── Inline-edit max_posts_per_site (лимит повторов сайта в задаче) ──
+  let editMpps = $state(false)
+  let mppsValue = $state(1)
+  let mppsBusy = $state(false)
+  function startEditMpps() {
+    if (!run) return
+    mppsValue = run.max_posts_per_site
+    editMpps = true
+  }
+  async function saveMpps() {
+    if (!run || mppsBusy) return
+    mppsBusy = true
+    try {
+      run = await postingsApi.update(runId, { max_posts_per_site: mppsValue })
+      editMpps = false
+      showToast('success', `Лимит сайта = ${run.max_posts_per_site}. Воркер учтёт live; для добора нажми Retry failed / Resume.`)
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    } finally {
+      mppsBusy = false
+    }
+  }
+
+  // SSE + fallback polling
+  let eventSource: EventSource | null = null
+  let pollTimer: ReturnType<typeof setInterval> | null = null
+  let sseConnected = $state(false)
+
+  // Debounced reload text_items на каждый progress-tick — без debounce будем
+  // дёргать /text-items на каждый из 1000 постов и нагружать API.
+  let itemsReloadTimer: ReturnType<typeof setTimeout> | null = null
+  function scheduleItemsReload() {
+    if (itemsReloadTimer) clearTimeout(itemsReloadTimer)
+    itemsReloadTimer = setTimeout(() => loadItems(), 1500)
+  }
+
+  // ─── Loading ───────────────────────────────────────────────────────
+
+  async function loadRun() {
+    try {
+      run = await postingsApi.get(runId)
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    }
+  }
+
+  async function loadProgress() {
+    try {
+      progress = await postingsApi.progress(runId)
+    } catch {
+      progress = null
+    }
+  }
+
+  // Токен против гонок: во время прогона loadItems зовётся из SSE + поллинга;
+  // устаревший (медленный) ответ не должен перетирать свежий (posted → posting флик).
+  let itemsReqToken = 0
+  async function loadItems() {
+    const token = ++itemsReqToken
+    const statusParam = filterStatus === 'all' ? undefined
+      : filterStatus === 'in_progress' ? 'pending,posting'
+      : filterStatus
+    try {
+      const res = await postingsApi.textItems(runId, { limit: 200, status: statusParam })
+      if (token !== itemsReqToken) return  // пришёл устаревший ответ — игнорируем
+      items = res.items
+    } catch (e) {
+      if (token === itemsReqToken) showToast('error', e instanceof ApiError ? e.message : String(e))
+    }
+  }
+
+  async function refresh(initial = false) {
+    if (initial) loading = true
+    await Promise.all([loadRun(), loadProgress(), loadItems()])
+    if (initial) loading = false
+  }
+
+  function isActiveStatus(s: PostingRunStatus | undefined): boolean {
+    return s === 'unpacking' || s === 'queued' || s === 'running' || s === 'paused' || s === 'scheduled'
+  }
+
+  let genTextsBusy = $state(false)
+  async function doGenerateTexts() {
+    if (!run) return
+    genTextsBusy = true
+    try {
+      await postingsApi.generateTexts(runId)
+      showToast('success', 'Генерация текстов запущена (фоном). Постинг — кнопкой Start, когда тексты готовы.')
+      await refresh()
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    } finally {
+      genTextsBusy = false
+    }
+  }
+
+  let fillSpinsBusy = $state(false)
+  async function doFillSpins() {
+    if (!run) return
+    fillSpinsBusy = true
+    try {
+      await postingsApi.fillSpins(runId)
+      showToast('success', 'Заполнение спинов запущено (фоном). Спины появятся в таблице построчно — можно проверить перед постингом.')
+      await refresh()
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    } finally {
+      fillSpinsBusy = false
+    }
+  }
+
+  async function doStart() {
+    if (!run) return
+    const msg = run.status === 'scheduled'
+      ? `Запустить run #${runId} НЕМЕДЛЕННО (не дожидаясь scheduled_for ${run.scheduled_for ? new Date(run.scheduled_for).toLocaleString() : ''})?`
+      : run.status === 'unpacking'
+        ? `Запустить постинг параллельно с генерацией? Будут постаться тексты по мере готовности, генерация продолжится.`
+        : `Запустить run #${runId}? Постинг ${run.total_texts} текстов начнётся немедленно.`
+    if (!confirm(msg)) return
+    try {
+      await postingsApi.start(runId)
+      showToast('success', 'Run started')
+      await refresh()
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    }
+  }
+
+  async function doRestart() {
+    if (!run) return
+    const remaining = run.total_texts - run.posted_count
+    if (!confirm(
+      `Перезапустить run #${runId}?\n\n` +
+      `${run.posted_count} уже опубликованных текстов останутся posted, ` +
+      `${remaining} оставшихся (failed/posting/skipped/pending) сбросятся в pending и попадут в работу снова.`,
+    )) return
+    try {
+      const res = await postingsApi.restart(runId)
+      showToast('success', `Restarted: ${res.items_reset} items reset to pending`)
+      await refresh()
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    }
+  }
+
+  // SSE: подписка на live-события прогресса. На UI обновляем счётчики локально
+  // без запроса к API. text_items перезагружаем debounce-ом.
+  function startSSE() {
+    if (eventSource) return
+    eventSource = new EventSource(`/admin/api/postings/${runId}/events`)
+
+    eventSource.addEventListener('snapshot', (e) => {
+      sseConnected = true
+      try {
+        const d = JSON.parse(e.data)
+        progress = {
+          total: d.total ?? 0,
+          pending: d.pending ?? 0,
+          generating: d.generating ?? progress?.generating ?? 0,
+          posting: d.posting ?? 0,
+          posted: d.posted ?? 0,
+          failed: d.failed ?? 0,
+          skipped: d.skipped ?? 0,
+          needs_review: d.needs_review ?? progress?.needs_review ?? 0,
+          generated: d.generated ?? progress?.generated ?? 0,
+        }
+      } catch { /* ignore */ }
+    })
+
+    eventSource.addEventListener('progress', (e) => {
+      try {
+        const d = JSON.parse(e.data)
+        if (run) {
+          run = {
+            ...run,
+            posted_count: d.posted ?? run.posted_count,
+            failed_count: d.failed ?? run.failed_count,
+            skipped_count: d.skipped ?? run.skipped_count,
+            total_texts: d.total ?? run.total_texts,
+            status: d.status ?? run.status,
+          }
+        }
+        if (progress) {
+          const total = d.total ?? progress.total
+          const pending = Math.max(0, total - (d.posted ?? 0) - (d.failed ?? 0) - (d.skipped ?? 0) - (progress.posting ?? 0))
+          progress = {
+            ...progress,
+            posted: d.posted ?? progress.posted,
+            failed: d.failed ?? progress.failed,
+            skipped: d.skipped ?? progress.skipped,
+            total,
+            pending,
+          }
+        }
+        scheduleItemsReload()
+      } catch { /* ignore */ }
+    })
+
+    eventSource.addEventListener('status', (e) => {
+      try {
+        const d = JSON.parse(e.data)
+        if (run && d.status) {
+          run = { ...run, status: d.status as PostingRunStatus }
+        }
+        // На status-change — полный re-fetch (заехало started_at/finished_at и пр.)
+        loadRun()
+        loadProgress()
+        scheduleItemsReload()
+      } catch { /* ignore */ }
+    })
+
+    eventSource.onerror = () => {
+      // Браузер сам пытается reconnect. Если совсем сломалось — fallback polling
+      // (pollTimer уже запущен).
+      sseConnected = false
+    }
+  }
+
+  function stopSSE() {
+    if (eventSource) {
+      eventSource.close()
+      eventSource = null
+    }
+  }
+
+  // Fallback polling + поддержка dual-бара: progress-событие SSE не несёт
+  // `generated` (счётчик генерации), поэтому для активного рана периодически
+  // подтягиваем progress даже при живом SSE (постинг при этом — live по SSE).
+  function tickPoll() {
+    if (!run || !isActiveStatus(run.status)) return
+    if (!sseConnected) {
+      refresh(false)
+    } else {
+      loadProgress()
+      // Фаза генерации/расшивки (UNPACKING): SSE не шлёт смену статусов айтемов —
+      // подтягиваем строки, чтобы было видно построчное наполнение текстов/спинов.
+      if (run.status === 'unpacking') loadItems()
+    }
+  }
+
+  onMount(async () => {
+    await refresh(true)
+    startSSE()
+    pollTimer = setInterval(tickPoll, 10000)
+  })
+  onDestroy(() => {
+    if (pollTimer) clearInterval(pollTimer)
+    if (itemsReloadTimer) clearTimeout(itemsReloadTimer)
+    stopSSE()
+  })
+
+  // ─── Permissions ───────────────────────────────────────────────────
+
+  let canManage = $derived.by(() => {
+    const u = $currentUser
+    if (!u || !run) return false
+    if (u.is_super_admin) return true
+    // Минимум — creator. Точнее проверяет backend; UI не блокирует кнопки,
+    // если запрос вернёт 403, покажем toast.
+    return run.creator?.id === u.id
+  })
+
+  // ─── Actions ──────────────────────────────────────────────────────
+
+  async function doAction(kind: 'pause' | 'resume' | 'cancel' | 'retry' | 'delete') {
+    busyAction = kind
+    try {
+      if (kind === 'pause') await postingsApi.pause(runId)
+      else if (kind === 'resume') await postingsApi.resume(runId)
+      else if (kind === 'cancel') {
+        if (!confirm('Отменить прогон? Все pending тексты не будут опубликованы.')) {
+          busyAction = null
+          return
+        }
+        await postingsApi.cancel(runId)
+      } else if (kind === 'retry') {
+        const res = await postingsApi.retryFailed(runId)
+        showToast('success', `Retried ${res.retried} failed item(s)`)
+      } else if (kind === 'delete') {
+        if (!confirm('Удалить прогон? Он исчезнет из списков (БД-история сохранится). Если активен — будет отменён.')) {
+          busyAction = null
+          return
+        }
+        await postingsApi.remove(runId)
+        showToast('success', 'Run deleted')
+        goto('/runs')
+        return
+      }
+      await refresh(false)
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    } finally {
+      busyAction = null
+    }
+  }
+
+  function changeStatusFilter(s: TextItemStatus | 'all' | 'in_progress') {
+    filterStatus = s
+    loadItems()
+  }
+
+  // ─── Сортировка колонок таблицы текстов (клиентская, по загруженным) ──
+  let sortKey = $state<string | null>(null)
+  let sortDir = $state<'asc' | 'desc'>('asc')
+  function toggleSort(key: string) {
+    if (sortKey === key) sortDir = sortDir === 'asc' ? 'desc' : 'asc'
+    else { sortKey = key; sortDir = 'asc' }
+  }
+  function itemSortVal(it: TextItem, key: string): string | number {
+    switch (key) {
+      case 'id': return it.id
+      case 'link': return (it.link_url ?? '').toLowerCase()
+      case 'anchor': return (it.link_anchor ?? '').toLowerCase()
+      case 'text': return (it.title ?? '').toLowerCase()
+      case 'status': return it.status
+      case 'posted': return it.posted_at ? new Date(it.posted_at).getTime() : 0
+      default: return 0
+    }
+  }
+  let sortedItems = $derived.by(() => {
+    if (!sortKey) return items
+    const k = sortKey, dir = sortDir === 'asc' ? 1 : -1
+    return [...items].sort((a, b) => {
+      const va = itemSortVal(a, k), vb = itemSortVal(b, k)
+      return va < vb ? -dir : va > vb ? dir : 0
+    })
+  })
+
+  // Контент-фильтр (только gen-задачи, клиентский по загруженным): по наличию
+  // текста и спинам. Спин-айтемы помечены original_filename='(спин)'.
+  let contentFilter = $state<'all' | 'with_text' | 'no_text' | 'spin'>('all')
+  function isSpin(it: TextItem): boolean {
+    return it.original_filename === '(спин)'
+  }
+  let displayedItems = $derived.by(() => {
+    if (contentFilter === 'all') return sortedItems
+    return sortedItems.filter((it) =>
+      contentFilter === 'with_text' ? it.text_id != null
+      : contentFilter === 'no_text' ? it.text_id == null
+      : isSpin(it))
+  })
+
+  const isLinkRun = $derived(
+    run?.task_type === 'sitewide_link' || run?.task_type === 'homepage_link',
+  )
+
+  let removingItem = $state<number | null>(null)
+  async function removeLink(itemId: number) {
+    if (!confirm('Снять размещённую сквозную ссылку с этого сайта?')) return
+    removingItem = itemId
+    try {
+      const res = await postingsApi.removeLink(runId, itemId)
+      if (res.status === 'removed') showToast('success', 'Ссылка снята')
+      else showToast('error', `Не удалось снять (${res.status})`)
+      await loadItems()
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    } finally {
+      removingItem = null
+    }
+  }
+
+  // ─── Пер-айтем действия (generate/regenerate/post/repost) ──────────
+  const isGenRun = $derived(run?.content_source === 'csv_campaign')
+  let itemBusy = $state<number | null>(null)
+
+  // Поллим конкретный айтем, пока он не «осядет»: для генерации — пока не уйдёт
+  // из generating; для постинга — пока не достигнет терминального статуса (увидев
+  // перед этим transient). Так строка обновляется live (статус → готовый текст/URL).
+  async function pollItemSettled(itemId: number, action: string) {
+    const transient: string[] = (action === 'generate' || action === 'regenerate')
+      ? ['generating'] : ['pending', 'posting']
+    let sawTransient = false
+    for (let i = 0; i < 25; i++) {
+      const it = items.find((x) => x.id === itemId)
+      if (it && transient.includes(it.status)) sawTransient = true
+      if (it && sawTransient && !transient.includes(it.status)) return // осел
+      await new Promise((r) => setTimeout(r, 1500))
+      await loadItems()
+    }
+  }
+
+  async function itemAction(itemId: number, action: 'generate' | 'regenerate' | 'post' | 'repost') {
+    if (action === 'repost' &&
+        !confirm('Перезапостить на другой сайт? Текущий сайт исключим, это съест ещё один слот сайта.')) return
+    itemBusy = itemId
+    try {
+      const fn = {
+        generate: postingsApi.generateItem, regenerate: postingsApi.regenerateItem,
+        post: postingsApi.postItem, repost: postingsApi.repostItem,
+      }[action]
+      await fn(runId, itemId)
+      showToast('success', {
+        generate: 'Генерация запущена', regenerate: 'Перегенерация запущена',
+        post: 'Постинг запущен', repost: 'Repost запущен',
+      }[action])
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+      itemBusy = null
+      return
+    }
+    itemBusy = null
+    await loadItems()                       // показать claim (generating) сразу
+    await pollItemSettled(itemId, action)   // обновлять строку до завершения
+  }
+
+  // ─── Display helpers ───────────────────────────────────────────────
+
+  function runStatusClass(s: PostingRunStatus): string {
+    switch (s) {
+      case 'unpacking':
+      case 'scheduled':
+      case 'queued':
+        return 'bg-amber-100 text-amber-700'
+      case 'running':
+        return 'bg-brand-100 text-brand-700'
+      case 'paused':
+        return 'bg-slate-200 text-slate-700'
+      case 'done':
+        return 'bg-emerald-100 text-emerald-700'
+      case 'failed':
+      case 'cancelled':
+      case 'interrupted':
+        return 'bg-red-100 text-red-700'
+      case 'need_more_admins':
+        return 'bg-orange-100 text-orange-700'
+      default:
+        return 'bg-slate-100 text-slate-600'
+    }
+  }
+
+  function itemStatusClass(s: TextItemStatus): string {
+    switch (s) {
+      case 'pending':
+        return 'bg-slate-100 text-slate-600'
+      case 'generating':
+        return 'bg-orange-100 text-orange-700'
+      case 'posting':
+        return 'bg-brand-100 text-brand-700'
+      case 'posted':
+        return 'bg-emerald-100 text-emerald-700'
+      case 'failed':
+        return 'bg-red-100 text-red-700'
+      case 'skipped':
+        return 'bg-amber-100 text-amber-700'
+      case 'needs_review':
+        return 'bg-orange-100 text-orange-700'
+      default:
+        return 'bg-slate-100 text-slate-500'
+    }
+  }
+
+  function pct(n: number, total: number): number {
+    if (!total) return 0
+    return Math.round((n * 100) / total)
+  }
+
+  function fmtBytes(n: number): string {
+    if (n < 1024) return `${n} B`
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+    return `${(n / 1024 / 1024).toFixed(2)} MB`
+  }
+
+  function fmtDuration(start: string | null, end: string | null): string {
+    if (!start) return '—'
+    const s = new Date(start).getTime()
+    const e = (end ? new Date(end) : new Date()).getTime()
+    const sec = Math.max(0, Math.floor((e - s) / 1000))
+    if (sec < 60) return `${sec}s`
+    const m = Math.floor(sec / 60)
+    if (m < 60) return `${m}m ${sec % 60}s`
+    const h = Math.floor(m / 60)
+    return `${h}h ${m % 60}m`
+  }
+
+  function postingMethodLabel(m?: string | null): string {
+    switch (m) {
+      case 'xmlrpc_only': return 'XML-RPC only'
+      case 'admin_only': return 'wp-admin only'
+      default: return 'Auto (XML-RPC → wp-admin)'
+    }
+  }
+
+  // Кнопки которые имеют смысл в текущем статусе
+  let canPause = $derived(run?.status === 'running' || run?.status === 'queued')
+  let canResume = $derived(
+    run?.status === 'paused' || run?.status === 'interrupted' || run?.pause_requested === true,
+  )
+  let canCancel = $derived(
+    !!run && !['done', 'cancelled', 'failed'].includes(run.status),
+  )
+  let canRetry = $derived(!!progress && progress.failed > 0)
+  let canDownload = $derived(!!run && run.total_texts > 0)
+</script>
+
+<div class="space-y-6">
+  <!-- Header -->
+  <div>
+    <a href="/runs" class="text-sm text-slate-500 hover:text-slate-700"><ArrowLeft size={14} class="inline-block align-text-bottom" /> Runs</a>
+    {#if loading}
+      <h1 class="mt-1 text-2xl font-semibold text-slate-900">Loading…</h1>
+    {:else if run}
+      <div class="mt-1 flex items-center gap-3">
+        <h1 class="text-2xl font-semibold text-slate-900">{run.name}</h1>
+        <span class="rounded-full px-2 py-0.5 text-[11px] font-medium uppercase {runStatusClass(run.status)}">
+          {run.status.replace('_', ' ')}
+        </span>
+        <span class="rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-medium text-indigo-700">
+          {runModeLabel(run)}
+        </span>
+        {#if run.pause_requested && run.status === 'running'}
+          <span class="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium uppercase text-amber-700">pause requested</span>
+        {/if}
+      </div>
+      <div class="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
+        <span>Project: <a class="text-brand-600 hover:underline" href={`/projects/${run.project.id}`}>{run.project.name}</a></span>
+        <span>Creator: <strong>@{run.creator?.username ?? '—'}</strong></span>
+        <span>Priority: <strong class="uppercase">{run.priority}</strong></span>
+        <span class="inline-flex items-center gap-1"
+              title="Сколько раз один WP-сайт можно использовать в этой задаче. 1 = «1 сайт = 1 пост». Подними, чтобы добрать сайты из уже использованных.">
+          Max posts/site:
+          {#if editMpps}
+            <input type="number" min="1" max="1000" bind:value={mppsValue}
+                   class="w-16 rounded border border-slate-300 px-1 py-0.5 text-xs" />
+            <button type="button" onclick={saveMpps} disabled={mppsBusy}
+                    class="rounded bg-brand-600 px-1.5 py-0.5 text-[11px] font-medium text-white hover:bg-brand-700 disabled:bg-slate-300">
+              {mppsBusy ? '…' : 'Save'}
+            </button>
+            <button type="button" onclick={() => (editMpps = false)}
+                    class="text-[11px] text-slate-500 hover:text-slate-700">cancel</button>
+          {:else}
+            <strong>{run.max_posts_per_site}</strong>
+            <button type="button" onclick={startEditMpps}
+                    class="text-[11px] text-brand-600 hover:underline">изменить</button>
+          {/if}
+        </span>
+        <span>Created: {new Date(run.created_at).toLocaleString()}</span>
+        {#if run.scheduled_for}<span>Scheduled: {new Date(run.scheduled_for).toLocaleString()}</span>{/if}
+        {#if run.started_at}<span>Started: {new Date(run.started_at).toLocaleString()}</span>{/if}
+        {#if run.finished_at}<span>Finished: {new Date(run.finished_at).toLocaleString()}</span>{/if}
+        <span>Duration: <strong>{fmtDuration(run.started_at, run.finished_at)}</strong></span>
+        {#if run.publish_from && run.publish_to}
+          <span>Publish window: {run.publish_from} <ArrowRight size={14} class="inline-block align-text-bottom" /> {run.publish_to}</span>
+        {/if}
+      </div>
+    {/if}
+  </div>
+
+  {#if run}
+    <div class="flex flex-wrap gap-2">
+      {#if canManage}
+        <!-- Manual gen-задача: пока есть несгенерированные — «Сгенерировать тексты» -->
+        {#if isGenRun && run.run_mode === 'manual' && run.status === 'ready' && (run.gen_total ?? 0) > 0 && (run.gen_done ?? 0) < (run.gen_total ?? 0)}
+          <button onclick={doGenerateTexts} disabled={genTextsBusy}
+                  class="inline-flex items-center gap-1.5 rounded-md bg-orange-500 px-4 py-1.5 text-sm font-medium text-white hover:bg-orange-600 disabled:opacity-50"
+                  title="Сгенерировать все тексты задачи (фоном). Можно и точечно — кнопками в таблице.">
+            <Wand2 size={14} /> {genTextsBusy ? 'Запуск…' : 'Сгенерировать тексты'}
+          </button>
+        {/if}
+        <!-- gen_per_row: расшить готовые оригиналы в спины (без старта постинга) -->
+        {#if isGenRun && run.run_mode === 'manual' && run.status === 'ready' && (run.fillable_spins ?? 0) > 0}
+          <button onclick={doFillSpins} disabled={fillSpinsBusy}
+                  class="inline-flex items-center gap-1.5 rounded-md border border-orange-300 bg-white px-4 py-1.5 text-sm font-medium text-orange-600 hover:bg-orange-50 disabled:opacity-50"
+                  title="Расшить готовые оригиналы в спин-варианты — заполнить все пустые тексты-спины. Без старта постинга: можно проверить спины перед публикацией.">
+            <Copy size={14} /> {fillSpinsBusy ? 'Запуск…' : `Заполнить спины (${run.fillable_spins})`}
+          </button>
+        {/if}
+        <!-- «Старт постинга»: для gen_per_post можно поверх идущей генерации
+             (UNPACKING) — постинг забирает готовые тексты, генерация наполняет
+             остальные параллельно. -->
+        {#if run.status === 'ready' || run.status === 'scheduled' || (run.status === 'unpacking' && run.content_mode === 'gen_per_post')}
+          <button onclick={doStart}
+                  class="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700"
+                  title={run.status === 'scheduled'
+                    ? 'Запустить НЕМЕДЛЕННО, не дожидаясь scheduled_for'
+                    : (run.status === 'unpacking'
+                       ? 'Запустить постинг параллельно с генерацией — постится то, что уже сгенерировано'
+                       : (isGenRun ? 'Запостить готовые тексты' : 'Запустить постинг'))}>
+            <Play size={14} /> {isGenRun ? 'Старт постинга' : 'Start'}{run.status === 'unpacking' ? ' (параллельно)' : ''}
+          </button>
+        {/if}
+        {#if run.status === 'failed' || run.status === 'interrupted' || run.status === 'cancelled' || run.status === 'need_more_admins' || (run.status === 'done' && run.failed_count > 0)}
+          {@const remaining = run.total_texts - run.posted_count}
+          <button onclick={doRestart}
+                  class="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700"
+                  title="Сбросить failed/posting/skipped/pending → pending и запустить заново. Posted останутся как есть.">
+            <Play size={14} /> Restart ({remaining > 0 ? remaining : run.failed_count})
+          </button>
+        {/if}
+        <button onclick={() => doAction('pause')} disabled={!canPause || busyAction !== null}
+                class="rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-sm font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-40">
+          {busyAction === 'pause' ? '…' : 'Pause'}
+        </button>
+        <button onclick={() => doAction('resume')} disabled={!canResume || busyAction !== null}
+                class="rounded-md border border-brand-300 bg-brand-50 px-3 py-1.5 text-sm font-medium text-brand-800 hover:bg-brand-100 disabled:opacity-40">
+          {busyAction === 'resume' ? '…' : 'Resume'}
+        </button>
+        <button onclick={() => doAction('cancel')} disabled={!canCancel || busyAction !== null}
+                class="rounded-md border border-red-300 bg-red-50 px-3 py-1.5 text-sm font-medium text-red-800 hover:bg-red-100 disabled:opacity-40">
+          {busyAction === 'cancel' ? '…' : 'Stop'}
+        </button>
+        <button onclick={() => doAction('retry')} disabled={!canRetry || busyAction !== null}
+                class="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40">
+          {busyAction === 'retry' ? '…' : `Retry failed${progress?.failed ? ` (${progress.failed})` : ''}`}
+        </button>
+        <button onclick={() => doAction('delete')} disabled={busyAction !== null}
+                class="rounded-md border border-red-300 bg-white px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-40"
+                title="Архивировать run (soft-delete). Активный — отменится.">
+          {busyAction === 'delete' ? '…' : 'Delete'}
+        </button>
+      {/if}
+      <div class="ml-auto">
+        <DropdownMenu
+          label="⤓ Download"
+          disabled={!canDownload}
+          title={canDownload ? 'Скачать результаты прогона' : 'Дождись распаковки архива'}
+          items={[
+            {
+              label: 'CSV',
+              description: 'Универсальный, Excel/Numbers/Sheets',
+              href: `/admin/api/postings/${runId}/result?format=csv`,
+              download: `run-${runId}.csv`,
+            },
+            {
+              label: 'XLSX',
+              description: 'Excel native, posted_url как гиперссылка',
+              href: `/admin/api/postings/${runId}/result?format=xlsx`,
+              download: `run-${runId}.xlsx`,
+            },
+            {
+              label: 'JSON',
+              description: 'Массив объектов, для скриптов/API',
+              href: `/admin/api/postings/${runId}/result?format=json`,
+              download: `run-${runId}.json`,
+            },
+            {
+              label: 'TXT (zip)',
+              description: 'Тексты архивом: 1 .txt = постированная версия',
+              href: `/admin/api/postings/${runId}/result?format=txt`,
+              download: `run-${runId}-texts.zip`,
+            },
+          ]}
+        />
+      </div>
+    </div>
+  {/if}
+
+  <!-- Параметры задачи (для постинга: метод, старт, период, генерация) -->
+  {#if run?.content_params?.error}
+    <div class="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+      <span class="font-medium">Ошибка генерации:</span> {run.content_params.error}
+    </div>
+  {/if}
+
+  {#if run && !isLinkRun}
+    <div class="rounded-lg border border-slate-200 bg-white p-4">
+      <h2 class="text-sm font-medium text-slate-700">Параметры</h2>
+      <dl class="mt-2 grid grid-cols-2 gap-x-6 gap-y-3 text-sm sm:grid-cols-3">
+        <div>
+          <dt class="text-xs text-slate-400">Метод постинга</dt>
+          <dd class="text-slate-800">{postingMethodLabel(run.posting_method)}</dd>
+        </div>
+        {#if !isLinkRun}
+          <div>
+            <dt class="text-xs text-slate-400">Валидация ссылки</dt>
+            <dd class="text-slate-800">{run.post_verify === 'auto' ? 'Автовалидация (перепост до подтверждения)' : 'Отметка ✓/✗'}</dd>
+          </div>
+        {/if}
+        <div>
+          <dt class="text-xs text-slate-400">Старт</dt>
+          <dd class="text-slate-800">{run.scheduled_for ? `Отложенный: ${new Date(run.scheduled_for).toLocaleString()}` : 'Сразу после готовности'}</dd>
+        </div>
+        <div>
+          <dt class="text-xs text-slate-400">Период постинга</dt>
+          <dd class="text-slate-800">{run.spread_days && run.spread_days > 0 ? `Размазан на ${run.spread_days} дн.` : 'Всё сразу'}</dd>
+        </div>
+        {#if run.publish_from && run.publish_to}
+          <div>
+            <dt class="text-xs text-slate-400">Окно публикации</dt>
+            <dd class="text-slate-800">{run.publish_from} → {run.publish_to}</dd>
+          </div>
+        {/if}
+        {#if run.content_params}
+          <div>
+            <dt class="text-xs text-slate-400">Язык</dt>
+            <dd class="text-slate-800">{run.content_params.language || '—'}</dd>
+          </div>
+          <div>
+            <dt class="text-xs text-slate-400">AI-модель</dt>
+            <dd class="text-slate-800">{run.content_params.model || '—'}</dd>
+          </div>
+          <div>
+            <dt class="text-xs text-slate-400">Шаблон промпта</dt>
+            <dd class="text-slate-800">{run.content_params.prompt || '— без шаблона —'}</dd>
+          </div>
+        {/if}
+      </dl>
+    </div>
+  {/if}
+
+  <!-- Progress card — одна полоска: зелёный=постинг, красный=генерация (для gen) -->
+  {#if progress && run}
+    {@const done = progress.posted + progress.failed + progress.skipped}
+    {@const totalPct = pct(done, progress.total)}
+    {@const postedPct = pct(progress.posted, progress.total)}
+    {@const failedPct = pct(progress.failed, progress.total)}
+    {@const skippedPct = pct(progress.skipped, progress.total)}
+    {@const genPct = pct(progress.generated, progress.total)}
+    {@const genAheadPct = Math.max(0, genPct - postedPct - failedPct)}
+    <div class="rounded-lg border border-slate-200 bg-white p-4">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <span class="text-sm font-medium text-slate-700">Progress</span>
+          <span class="rounded-full px-2 py-0.5 text-[11px] font-medium uppercase {runStatusClass(run.status)}">
+            {run.status.replace('_', ' ')}
+          </span>
+        </div>
+        <span class="text-sm font-semibold text-slate-700">{totalPct}%</span>
+      </div>
+      {#if isGenRun}
+        <!-- Бар: зелёный=постинг · оранжевый=генерация (ждёт постинга) · красный=ошибки -->
+        <div class="mt-3 flex h-2.5 w-full overflow-hidden rounded-full bg-slate-100">
+          <div class="h-full bg-emerald-500 transition-all" style="width: {postedPct}%"></div>
+          <div class="h-full bg-red-500 transition-all" style="width: {failedPct}%"></div>
+          <div class="h-full bg-orange-400 transition-all" style="width: {genAheadPct}%"></div>
+        </div>
+        <div class="mt-2 flex flex-wrap items-center justify-center gap-x-5 gap-y-1 text-xs">
+          <span class="inline-flex items-center gap-1.5 text-slate-600">
+            <span class="inline-block h-2 w-2 rounded-full bg-orange-400"></span>
+            генерация <strong class="text-orange-600">{progress.generated}</strong>/{progress.total}
+          </span>
+          <span class="inline-flex items-center gap-1.5 text-slate-600">
+            <span class="inline-block h-2 w-2 rounded-full bg-emerald-500"></span>
+            постинг <strong class="text-emerald-600">{progress.posted}</strong>/{progress.total}
+          </span>
+          {#if progress.failed > 0}
+            <span class="inline-flex items-center gap-1.5 text-slate-600">
+              <span class="inline-block h-2 w-2 rounded-full bg-red-500"></span>
+              ошибки <strong class="text-red-600">{progress.failed}</strong>
+            </span>
+          {/if}
+        </div>
+      {:else}
+        <!-- Обычный стек: posted/failed/skipped -->
+        <div class="mt-3 flex h-2 w-full overflow-hidden rounded-full bg-slate-100">
+          <div class="h-full bg-emerald-500" style="width: {postedPct}%"></div>
+          <div class="h-full bg-red-500" style="width: {failedPct}%"></div>
+          <div class="h-full bg-amber-400" style="width: {skippedPct}%"></div>
+        </div>
+      {/if}
+      <!-- Карточки кликабельны: фильтруют таблицу текстов по статусу (как теги) -->
+      <div class="mt-4 grid grid-cols-2 gap-3 text-center sm:grid-cols-5">
+        {#snippet statCard(key: TextItemStatus | 'all' | 'in_progress', value: number, label: string, color: string, sub = '')}
+          <button type="button" onclick={() => changeStatusFilter(key)}
+                  class="rounded-lg border p-2 transition hover:bg-slate-50"
+                  class:border-brand-400={filterStatus === key}
+                  class:bg-brand-50={filterStatus === key}
+                  class:border-slate-200={filterStatus !== key}>
+            <div class="text-2xl font-semibold {color}">{value}</div>
+            <div class="text-[11px] uppercase tracking-wider text-slate-500">
+              {label}{#if sub} · <span class="normal-case text-slate-400">{sub}</span>{/if}
+            </div>
+          </button>
+        {/snippet}
+        {@render statCard('all', progress.total, 'Total', 'text-slate-900')}
+        {@render statCard('posted', progress.posted, 'Posted', 'text-emerald-600', progress.total ? `${postedPct}%` : '')}
+        {@render statCard('failed', progress.failed, 'Failed', 'text-red-600', progress.total ? `${failedPct}%` : '')}
+        {@render statCard('skipped', progress.skipped, 'Skipped', 'text-amber-600', progress.total ? `${skippedPct}%` : '')}
+        {@render statCard('in_progress', progress.pending + progress.posting, 'Pending', 'text-brand-700', progress.posting > 0 ? `${progress.posting} in-flight` : '')}
+      </div>
+    </div>
+  {/if}
+
+  <!-- Text items table -->
+  <section>
+    <div class="mb-3 flex flex-wrap items-center gap-2">
+      <h2 class="mr-2 text-lg font-medium text-slate-900">Texts</h2>
+      {#each ['all', 'needs_review', 'pending', 'generating', 'posting', 'posted', 'failed', 'skipped'] as s}
+        {@const isOn = filterStatus === s}
+        {@const count = s === 'all'
+          ? (progress?.total ?? null)
+          : (progress?.[s as TextItemStatus] ?? null)}
+        <button type="button" onclick={() => changeStatusFilter(s as TextItemStatus | 'all')}
+                class="rounded-full px-3 py-1 text-xs font-medium transition"
+                class:bg-brand-600={isOn}
+                class:text-white={isOn}
+                class:bg-slate-100={!isOn}
+                class:text-slate-700={!isOn}
+                class:hover:bg-slate-200={!isOn}>
+          {s}{#if count !== null} <span class="ml-1 opacity-70">{count}</span>{/if}
+        </button>
+      {/each}
+    </div>
+
+    {#if isGenRun}
+      <!-- Gen-задача: контент-фильтр (по загруженным) — текст/спины -->
+      <div class="mb-3 flex flex-wrap items-center gap-2">
+        <span class="text-xs font-medium uppercase tracking-wider text-slate-400">Контент</span>
+        {#each [['all', 'Все'], ['with_text', 'С текстом'], ['no_text', 'Без текста'], ['spin', 'Спины']] as [val, label]}
+          {@const isOn = contentFilter === val}
+          <button type="button" onclick={() => (contentFilter = val as typeof contentFilter)}
+                  class="rounded-full px-3 py-1 text-xs font-medium transition"
+                  class:bg-orange-500={isOn} class:text-white={isOn}
+                  class:bg-orange-50={!isOn} class:text-orange-700={!isOn} class:hover:bg-orange-100={!isOn}>
+            {label}
+          </button>
+        {/each}
+      </div>
+    {/if}
+
+    {#if displayedItems.length === 0}
+      <div class="rounded-lg border border-slate-200 bg-white p-8 text-center text-sm text-slate-500">
+        Нет текстов в выбранном фильтре.
+      </div>
+    {:else}
+      <div class="overflow-hidden rounded-lg border border-slate-200 bg-white">
+        {#snippet sortHead(key: string, label: string, cls = '')}
+          <th class="px-3 py-2 {cls}">
+            <button type="button" onclick={() => toggleSort(key)}
+                    class="inline-flex items-center gap-0.5 uppercase tracking-wider transition hover:text-slate-700"
+                    class:text-brand-700={sortKey === key}>
+              {label}
+              <span class="text-[10px]">{sortKey === key ? (sortDir === 'asc' ? '↑' : '↓') : '↕'}</span>
+            </button>
+          </th>
+        {/snippet}
+        <table class="min-w-full text-sm">
+          <thead class="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
+            <tr>
+              {@render sortHead('id', 'ID')}
+              {@render sortHead('link', 'Link → домен')}
+              {@render sortHead('anchor', 'Anchor')}
+              {#if !isLinkRun}{@render sortHead('text', 'Text')}{/if}
+              {@render sortHead('status', 'Status')}
+              <th class="px-3 py-2">{isLinkRun ? 'Сайт / результат' : 'Result / Error'}</th>
+              {@render sortHead('posted', 'Posted')}
+              <th class="px-3 py-2 text-right">Действия</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            {#each displayedItems as item (item.id)}
+              <tr class="align-top">
+                <td class="px-3 py-2 text-slate-500">{item.id}</td>
+                <!-- Link → домен, к которому привязана задача -->
+                <td class="px-3 py-2">
+                  <div class="break-all font-mono text-[12px] text-slate-800">{item.link_url || '—'}</div>
+                  {#if item.target_domain}<div class="mt-0.5 text-[11px] text-slate-400">{item.target_domain}</div>{/if}
+                </td>
+                <!-- Anchor -->
+                <td class="px-3 py-2 text-slate-700">{item.link_anchor || '—'}</td>
+                <!-- Text (только постинг) -->
+                {#if !isLinkRun}
+                  <td class="px-3 py-2">
+                    {#if item.text_id != null}
+                      <a href={`/runs/${runId}/texts/${item.id}`} class="block hover:text-brand-600">
+                        <div class="font-medium text-slate-900 hover:text-brand-600">{item.title || '— no title —'}</div>
+                        <div class="mt-0.5 text-[11px] text-slate-400">{item.original_filename} · {fmtBytes(item.byte_size)}</div>
+                      </a>
+                    {:else}
+                      <!-- gen_per_row: пустой item (спин) — текст появится после Start -->
+                      <div class="text-slate-400">—</div>
+                      <div class="mt-0.5 text-[11px] text-slate-400">спин · после Start</div>
+                    {/if}
+                  </td>
+                {/if}
+                <!-- Status -->
+                <td class="px-3 py-2">
+                  <span class="rounded-full px-2 py-0.5 text-[11px] font-medium uppercase {itemStatusClass(item.status)}">
+                    {item.status}
+                  </span>
+                  {#if !isLinkRun && item.status === 'posted' && item.link_verified != null}
+                    {#if item.link_verified}
+                      <span class="ml-1 font-semibold text-emerald-600" title="Ссылка подтверждена на странице поста">✓</span>
+                    {:else}
+                      <span class="ml-1 font-semibold text-red-500" title="Ссылка НЕ найдена на странице поста">✗</span>
+                    {/if}
+                  {/if}
+                </td>
+                <!-- Result / Error (для ссылок — сайт, где проставлено) -->
+                <td class="px-3 py-2">
+                  {#if isLinkRun}
+                    {#if item.site}
+                      <div class="text-slate-700">{item.site.domain}</div>
+                      <div class="mt-0.5 flex items-center gap-1.5">
+                        {#if item.placed_via}<span class="rounded-full bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">{item.placed_via}</span>{/if}
+                        {#if item.verified_at}<span class="text-[11px] text-emerald-600" title="Ссылка подтверждена анонимно">verified ✓</span>{/if}
+                        {#if item.status === 'posted'}
+                          <button onclick={() => removeLink(item.id)} disabled={removingItem === item.id}
+                                  class="text-[11px] text-red-600 hover:underline disabled:opacity-50">
+                            {removingItem === item.id ? '…' : 'снять'}
+                          </button>
+                        {/if}
+                      </div>
+                      {#if item.posted_url}<a href={item.posted_url} target="_blank" rel="noopener noreferrer" class="mt-0.5 block break-all text-[11px] text-brand-600 hover:underline">{item.posted_url}</a>{/if}
+                    {:else if item.last_error}
+                      <span class="text-red-600" title={item.last_error}>{item.last_error.slice(0, 120)}</span>
+                    {:else}<span class="text-slate-400">—</span>{/if}
+                  {:else if item.posted_url}
+                    <a href={item.posted_url} target="_blank" rel="noopener noreferrer"
+                       class="break-all text-brand-600 hover:underline">{item.posted_url}</a>
+                    <div class="mt-0.5 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
+                      {#if item.post_id}<span>post_id: {item.post_id}</span>{/if}
+                      {#if item.link_verified === true}<span class="text-emerald-600" title="Ссылка подтверждена на странице">link ✓</span>
+                      {:else if item.link_verified === false}<span class="text-red-500" title="Ссылка не найдена на странице">link ✗</span>{/if}
+                    </div>
+                  {:else if item.last_error}
+                    <span class="text-red-600" title={item.last_error}>{item.last_error.slice(0, 120)}</span>
+                  {:else}
+                    <span class="text-slate-400">—</span>
+                  {/if}
+                </td>
+                <!-- Posted -->
+                <td class="px-3 py-2 text-xs text-slate-500">
+                  {item.posted_at ? new Date(item.posted_at).toLocaleString() : '—'}
+                </td>
+                <!-- Действия: цветная иконка + рамочка (без заливки), тултип при наведении -->
+                <td class="px-3 py-2">
+                  <div class="flex items-center justify-end gap-1.5">
+                    {#if item.status === 'posted'}
+                      <button type="button" title="Repost — перезапостить на другой сайт (текущий исключим)"
+                              onclick={() => itemAction(item.id, 'repost')} disabled={itemBusy === item.id}
+                              class="inline-flex items-center justify-center rounded-md border border-emerald-300 p-1.5 text-emerald-600 transition hover:bg-emerald-50 disabled:opacity-40">
+                        <RotateCw size={15} />
+                      </button>
+                    {:else if item.status === 'posting' || item.status === 'generating'}
+                      <span class="inline-flex h-7 w-7 items-center justify-center text-slate-400">
+                        <RefreshCw size={14} class="animate-spin" />
+                      </span>
+                    {:else}
+                      {#if isGenRun && item.text_id == null}
+                        <button type="button" title="Сгенерировать текст"
+                                onclick={() => itemAction(item.id, 'generate')} disabled={itemBusy === item.id}
+                                class="inline-flex items-center justify-center rounded-md border border-orange-300 p-1.5 text-orange-600 transition hover:bg-orange-50 disabled:opacity-40">
+                          <Wand2 size={15} />
+                        </button>
+                      {:else}
+                        {#if isGenRun}
+                          <button type="button" title="Перегенерировать текст"
+                                  onclick={() => itemAction(item.id, 'regenerate')} disabled={itemBusy === item.id}
+                                  class="inline-flex items-center justify-center rounded-md border border-orange-300 p-1.5 text-orange-600 transition hover:bg-orange-50 disabled:opacity-40">
+                            <RefreshCw size={15} />
+                          </button>
+                        {/if}
+                        {#if isLinkRun || item.text_id != null}
+                          <button type="button" title="Запостить этот айтем"
+                                  onclick={() => itemAction(item.id, 'post')} disabled={itemBusy === item.id}
+                                  class="inline-flex items-center justify-center rounded-md border border-emerald-300 p-1.5 text-emerald-600 transition hover:bg-emerald-50 disabled:opacity-40">
+                            <Send size={15} />
+                          </button>
+                        {/if}
+                      {/if}
+                    {/if}
+                  </div>
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    {/if}
+  </section>
+
+  {#if run && isActiveStatus(run.status)}
+    <p class="text-xs text-slate-400">
+      {sseConnected ? '🟢 Live (SSE)' : '⚪ Polling…'} — прогресс обновляется в реальном времени.
+    </p>
+  {/if}
+</div>
+

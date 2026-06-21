@@ -1,0 +1,91 @@
+# Override для локальной разработки:
+# - порты на хост (только 127.0.0.1, нестандартные дефолты — см. .env)
+# - app с --reload, bind-mount source для hot edits
+# - ui с vite HMR
+#
+# Применяется автоматически Makefile-ом (-f docker-compose.yaml -f docker-compose.dev.yaml).
+
+services:
+  db:
+    ports:
+      - "127.0.0.1:${DB_PORT_HOST:-25432}:5432"
+
+  pgbouncer:
+    ports:
+      - "127.0.0.1:${PGBOUNCER_PORT_HOST:-26432}:5432"
+
+  redis:
+    ports:
+      - "127.0.0.1:${REDIS_PORT_HOST:-26379}:6379"
+
+  minio:
+    ports:
+      - "127.0.0.1:${MINIO_API_PORT_HOST:-29000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT_HOST:-29001}:9001"
+
+  app:
+    ports:
+      - "127.0.0.1:${APP_PORT_HOST:-28080}:8080"
+    command:
+      - sh
+      - -c
+      - alembic upgrade head && python -m scripts.seed && uvicorn main:create_app --factory --host 0.0.0.0 --port 8080 --reload --reload-dir /app/src
+    volumes:
+      - ./backend/src:/app/src                  # hot reload
+      - ./backend/tests:/app/tests              # для pytest изнутри контейнера
+      - ./backend/alembic.ini:/app/alembic.ini:ro
+      - ./backend/pyproject.toml:/app/pyproject.toml:ro
+      - ./.env:/app/.env:ro
+
+  ui:
+    ports:
+      - "127.0.0.1:${UI_PORT_HOST:-25173}:5173"
+    volumes:
+      - ./ui:/app
+      - /app/node_modules                        # анонимный volume — не оверрайдим из хоста
+
+  celery-worker:
+    volumes:
+      - ./backend/src:/app/src
+      - ./.env:/app/.env:ro
+    # auto-reload в dev: watchfiles перезапускает celery на изменения .py в /app/src
+    # (у Celery нет нативного reload). Healthcheck (celery inspect ping) не ломается —
+    # сам процесс celery остаётся дочерним к watchfiles.
+    command:
+      - sh
+      - -c
+      - Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp >/tmp/xvfb.log 2>&1 & export DISPLAY=:99; exec watchfiles --filter python --target-type command "celery -A core.celery_app:celery_app worker --loglevel=INFO --concurrency=${CELERY_WORKER_CONCURRENCY:-2}" /app/src
+
+  taskiq-worker:
+    volumes:
+      - ./backend/src:/app/src
+      - ./.env:/app/.env:ro
+    # auto-reload в dev: watchfiles (нативный taskiq --reload требует extra
+    # 'taskiq[reload]'/watchdog, которого нет; watchfiles уже стоит — он же у app)
+    command:
+      - sh
+      - -c
+      - Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp >/tmp/xvfb.log 2>&1 & export DISPLAY=:99; exec watchfiles --filter python --target-type command "taskiq worker workers.taskiq:broker --workers 2" /app/src
+
+  taskiq-scheduler:
+    volumes:
+      - ./backend/src:/app/src
+      - ./.env:/app/.env:ro
+    # auto-reload в dev: watchfiles (у taskiq scheduler нет нативного --reload)
+    command:
+      - sh
+      - -c
+      - watchfiles --filter python --target-type command "taskiq scheduler workers.taskiq:scheduler" /app/src
+
+  nginx:
+    ports:
+      - "127.0.0.1:${NGINX_PORT_HOST:-28000}:80"
+
+  backup:
+    # На локальной разработке ничего сверх базы не меняем.
+    # Crond крутится, бэкап раз в 48ч идёт. Запустить вручную:
+    # make backup-now
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data:ro
+      - ./backups:/backups
+      - /var/run/docker.sock:/var/run/docker.sock

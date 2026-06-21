@@ -1,0 +1,96 @@
+[project]
+name = "gym-app-backend"
+version = "0.0.1"
+description = "Альтернатива Zebroid: backend на FastAPI"
+requires-python = ">=3.12"
+dependencies = [
+    # web
+    # Потолок <0.137: FastAPI 0.137 ввёл _IncludedRouter в app.routes, на котором
+    # падает prometheus-fastapi-instrumentator 8.0.0 (route.path → AttributeError,
+    # каждый запрос → 500). 0.136.x ещё без него. Снять, когда инструментатор
+    # зарелизит фикс. Проверено вживую: 0.136.3 → /health 200.
+    "fastapi>=0.115,<0.137",
+    "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",
+    # config & validation
+    "pydantic>=2.7",
+    "pydantic-settings>=2.4",
+    "email-validator>=2.2",
+    # db
+    "sqlalchemy[asyncio]>=2.0.30",
+    "asyncpg>=0.29",
+    "alembic>=1.13",
+    # cache / queue (на следующих чанках)
+    "redis>=5.0",
+    # auth
+    "bcrypt>=4.0",        # без passlib — passlib не обновляется с 2020 и ломается на новых bcrypt
+    "pyjwt>=2.8",
+    # http client (для XML-RPC в этапе 2)
+    "httpx>=0.27",
+    # TLS-impersonation (Chrome JA3/HTTP2) — проходит CF/Akamai фингерпринт-блоки
+    # без браузера, слой между httpx и FlareSolverr
+    "curl_cffi>=0.7",
+    # XML парсинг ответов XML-RPC
+    "lxml>=5.3",
+    # observability
+    "structlog>=24.1",
+    # queues
+    "celery[redis]>=5.4",
+    "taskiq>=0.11",
+    "taskiq-redis>=1.0",
+    # object storage
+    "minio>=7.2",
+    # file utils
+    "python-magic>=0.4.27",
+    # excel export
+    "openpyxl>=3.1",
+    # шифрование паролей WP-credentials (Fernet)
+    "cryptography>=43.0",
+    # observability metrics
+    "prometheus-fastapi-instrumentator>=7.0",
+    # greenlet pinned to 3.1.x — 3.5+ wheels не покрывают aarch64
+    "greenlet>=3.1,<3.2",
+    # WP batch validation
+    "fake-useragent>=1.5",
+    "langdetect>=1.0.9",
+    "beautifulsoup4>=4.12",
+    "patchright>=1.60.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+    "mypy>=1.10",
+    "types-passlib",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "ASYNC"]
+ignore = ["E402"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+asyncio_mode = "auto"
+# Один event loop на всю сессию — иначе глобальный async engine (core.db)
+# привязывается к loop первого теста, а asyncpg-коннекты из «мёртвого» loop
+# падают на cleanup ("Task pending / Connection._cancel never awaited").
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+addopts = "-q --strict-markers"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
+plugins = []
