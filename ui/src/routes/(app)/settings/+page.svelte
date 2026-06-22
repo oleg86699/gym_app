@@ -16,6 +16,9 @@
   let formTimeout = $state(30)
   let formGlobalConcurrency = $state(80)
   let formCfBrowser = $state(3)
+  let formFloor = $state(5)
+  let formSiteDisable = $state(25)
+  let formSiteDisableCf = $state(8)
   let formPublishFrom = $state('')   // "" = окно не задано
   let formPublishTo = $state('')
 
@@ -31,6 +34,9 @@
         formTimeout !== cfg.default_timeout_seconds ||
         formGlobalConcurrency !== cfg.global_posting_concurrency ||
         formCfBrowser !== cfg.cf_browser_concurrency ||
+        formFloor !== cfg.posting_concurrency_floor ||
+        formSiteDisable !== cfg.site_disable_threshold ||
+        formSiteDisableCf !== cfg.site_disable_threshold_cf ||
         formPublishFrom !== (cfg.default_publish_from ?? '') ||
         formPublishTo !== (cfg.default_publish_to ?? '')),
   )
@@ -57,6 +63,9 @@
       formTimeout = cfg.default_timeout_seconds
       formGlobalConcurrency = cfg.global_posting_concurrency
       formCfBrowser = cfg.cf_browser_concurrency
+      formFloor = cfg.posting_concurrency_floor
+      formSiteDisable = cfg.site_disable_threshold
+      formSiteDisableCf = cfg.site_disable_threshold_cf
       formPublishFrom = cfg.default_publish_from ?? ''
       formPublishTo = cfg.default_publish_to ?? ''
     } catch (e) {
@@ -78,6 +87,9 @@
         default_timeout_seconds: formTimeout,
         global_posting_concurrency: formGlobalConcurrency,
         cf_browser_concurrency: formCfBrowser,
+        posting_concurrency_floor: formFloor,
+        site_disable_threshold: formSiteDisable,
+        site_disable_threshold_cf: formSiteDisableCf,
         default_publish_from: formPublishFrom || null,
         default_publish_to: formPublishTo || null,
       })
@@ -95,6 +107,9 @@
     formTimeout = cfg.default_timeout_seconds
     formGlobalConcurrency = cfg.global_posting_concurrency
     formCfBrowser = cfg.cf_browser_concurrency
+    formFloor = cfg.posting_concurrency_floor
+    formSiteDisable = cfg.site_disable_threshold
+    formSiteDisableCf = cfg.site_disable_threshold_cf
     formPublishFrom = cfg.default_publish_from ?? ''
     formPublishTo = cfg.default_publish_to ?? ''
   }
@@ -130,15 +145,17 @@
         <div class="grid grid-cols-2 gap-4">
           <div>
             <label for="cfg_cc" class="block text-sm font-medium text-slate-700">
-              Concurrency <span class="text-slate-400">({cfg.limits.min_concurrency}–{cfg.limits.max_concurrency})</span>
+              Max concurrency / run <span class="text-slate-400">({cfg.limits.min_concurrency}–{cfg.limits.max_concurrency})</span>
             </label>
             <input id="cfg_cc" type="number" bind:value={formConcurrency}
                    min={cfg.limits.min_concurrency} max={cfg.limits.max_concurrency}
                    disabled={!canEdit}
                    class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm disabled:bg-slate-100" />
             <p class="mt-1 text-[11px] text-slate-400">
-              Сколько постов воркер делает одновременно внутри одного прогона.
-              Больше = быстрее, но больше нагрузки и шансов попасть в rate-limit WP.
+              <b>Потолок</b>, до которого один прогон может разогнаться, когда сервер
+              свободен. Реальная конкурентность = <code class="rounded bg-slate-100 px-1">global ÷ активные прогоны</code>,
+              но не выше этого числа и не ниже floor. Чтобы одинокий прогон забивал
+              весь сервер — ставь ≈ Global capacity.
             </p>
           </div>
           <div>
@@ -157,22 +174,36 @@
         </div>
 
         <div class="rounded-md border border-slate-200 bg-slate-50/50 p-4">
-          <label for="cfg_gc" class="block text-sm font-medium text-slate-700">
-            Global posting capacity
-            <span class="text-slate-400">({cfg.limits.min_global_posting_concurrency}–{cfg.limits.max_global_posting_concurrency})</span>
-          </label>
-          <input id="cfg_gc" type="number" bind:value={formGlobalConcurrency}
-                 min={cfg.limits.min_global_posting_concurrency} max={cfg.limits.max_global_posting_concurrency}
-                 disabled={!canEdit}
-                 class="mt-1 w-40 rounded-md border border-slate-300 px-3 py-1.5 text-sm disabled:bg-slate-100" />
-          <p class="mt-1 text-[11px] text-slate-400">
-            Жёсткий потолок <b>одновременных постов через ВСЕ прогоны и оба
+          <div class="grid grid-cols-2 gap-4">
+            <div>
+              <label for="cfg_gc" class="block text-sm font-medium text-slate-700">
+                Global posting capacity
+                <span class="text-slate-400">({cfg.limits.min_global_posting_concurrency}–{cfg.limits.max_global_posting_concurrency})</span>
+              </label>
+              <input id="cfg_gc" type="number" bind:value={formGlobalConcurrency}
+                     min={cfg.limits.min_global_posting_concurrency} max={cfg.limits.max_global_posting_concurrency}
+                     disabled={!canEdit}
+                     class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm disabled:bg-slate-100" />
+            </div>
+            <div>
+              <label for="cfg_floor" class="block text-sm font-medium text-slate-700">
+                Min concurrency / run <span class="text-slate-400">({cfg.limits.min_concurrency_floor}–{cfg.limits.max_concurrency_floor})</span>
+              </label>
+              <input id="cfg_floor" type="number" bind:value={formFloor}
+                     min={cfg.limits.min_concurrency_floor} max={cfg.limits.max_concurrency_floor}
+                     disabled={!canEdit}
+                     class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm disabled:bg-slate-100" />
+            </div>
+          </div>
+          <p class="mt-2 text-[11px] text-slate-400">
+            Global — жёсткий потолок <b>одновременных постов через ВСЕ прогоны и оба
             worker-процесса</b> (защищает пул прокси / БД / трафик). Делится между
-            активными прогонами → «всё двигается понемногу».
-            При global={formGlobalConcurrency} и per-run Concurrency={formConcurrency}
-            одновременно на полной скорости идут ≈ <b>{Math.max(1, Math.floor(formGlobalConcurrency / Math.max(1, formConcurrency)))}</b>
-            прогона, остальные делят слоты вперемешку. Хочешь больше параллельных
-            прогонов «понемногу» — опусти per-run Concurrency.
+            активными прогонами по принципу <b>fair-share</b>: каждый прогон получает
+            ≈ <code class="rounded bg-slate-100 px-1">global ÷ активные</code>, но не ниже
+            <b>floor</b> (чтобы никто не голодал) и не выше Max/run. Один прогон в одиночку
+            забивает весь сервер; при {formFloor > 0 ? Math.max(1, Math.floor(formGlobalConcurrency / formFloor)) : '∞'}+
+            одновременных прогонах включается floor={formFloor}.
+            Под текущий 16ГБ-бокс (вместе с другим сервисом) разумно ~40; на отдельном крупном — 80-150.
           </p>
         </div>
 
@@ -189,6 +220,39 @@
             Сколько <b>браузер-контекстов (Patchright)</b> крутим одновременно при обходе
             Cloudflare (Tier 3). Браузер ~150–400 МБ — ставь по RAM сервера: дев-мак 5–10,
             маленький прод-сервер 3–5. Касается только медленной CF-полосы (~8% сайтов).
+          </p>
+        </div>
+
+        <div class="rounded-md border border-slate-200 p-4">
+          <span class="block text-sm font-medium text-slate-700">Авто-выключение мёртвых сайтов</span>
+          <p class="mt-1 text-[11px] text-slate-400">
+            Сколько site-class фейлов <b>подряд</b> (502/timeout/CF/…) до выключения сайта.
+            Любой успешный пост сбрасывает счётчик в 0. Срабатывает <b>даже если у сайта есть
+            рабочий логин</b> — чтобы «протухшие» домены не жгли слоты бесконечно.
+          </p>
+          <div class="mt-3 grid grid-cols-2 gap-4">
+            <div>
+              <label for="cfg_sd" class="block text-xs font-medium uppercase tracking-wider text-slate-500">
+                Общий порог <span class="text-slate-400 normal-case">({cfg.limits.min_site_disable_threshold}–{cfg.limits.max_site_disable_threshold})</span>
+              </label>
+              <input id="cfg_sd" type="number" bind:value={formSiteDisable}
+                     min={cfg.limits.min_site_disable_threshold} max={cfg.limits.max_site_disable_threshold}
+                     disabled={!canEdit}
+                     class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm disabled:bg-slate-100" />
+            </div>
+            <div>
+              <label for="cfg_sdcf" class="block text-xs font-medium uppercase tracking-wider text-slate-500">
+                Порог CF <span class="text-slate-400 normal-case">({cfg.limits.min_site_disable_threshold_cf}–{cfg.limits.max_site_disable_threshold_cf})</span>
+              </label>
+              <input id="cfg_sdcf" type="number" bind:value={formSiteDisableCf}
+                     min={cfg.limits.min_site_disable_threshold_cf} max={cfg.limits.max_site_disable_threshold_cf}
+                     disabled={!canEdit}
+                     class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm disabled:bg-slate-100" />
+            </div>
+          </div>
+          <p class="mt-2 text-[11px] text-slate-400">
+            CF отдельно агрессивнее: сайт под Cloudflare почти не «оживает» сам, а каждый
+            headful-фейл ~30 сек. Рекоменд.: общий <b>25</b>, CF <b>8</b>.
           </p>
         </div>
 

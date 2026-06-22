@@ -753,6 +753,9 @@ export interface AppSettings {
   default_timeout_seconds: number
   global_posting_concurrency: number
   cf_browser_concurrency: number
+  posting_concurrency_floor: number
+  site_disable_threshold: number
+  site_disable_threshold_cf: number
   default_publish_from: string | null  // ISO date "YYYY-MM-DD"
   default_publish_to: string | null
   limits: {
@@ -764,6 +767,12 @@ export interface AppSettings {
     max_global_posting_concurrency: number
     min_cf_browser_concurrency: number
     max_cf_browser_concurrency: number
+    min_concurrency_floor: number
+    max_concurrency_floor: number
+    min_site_disable_threshold: number
+    max_site_disable_threshold: number
+    min_site_disable_threshold_cf: number
+    max_site_disable_threshold_cf: number
   }
 }
 

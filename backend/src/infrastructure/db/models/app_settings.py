@@ -47,6 +47,25 @@ class AppSettings(Base, TimestampedMixin):
         Integer, nullable=False, server_default="3"
     )
 
+    # Fair-share: минимальная конкурентность одного прогона при дележе
+    # global_posting_concurrency между многими активными прогонами. Реальная
+    # конкурентность прогона = clamp(global // активные_прогоны, floor,
+    # run.concurrency). Одинокий прогон забивает весь сервер, при многих —
+    # делится честно, но никто не опускается ниже floor.
+    posting_concurrency_floor: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="5"
+    )
+    # Сколько site-class фейлов подряд → выключить сайт безусловно (даже с
+    # valid-cred). Счётчик сбрасывается в 0 при любом успехе.
+    site_disable_threshold: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="25"
+    )
+    # Отдельный агрессивный порог для CF-challenge (сайт под Cloudflare редко
+    # «оживает», а headful-фейл дорогой ~30 сек).
+    site_disable_threshold_cf: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="8"
+    )
+
     # Окно публикации: каждому посту воркер ставит случайную дату в диапазоне
     # [publish_from, publish_to]. Если оба NULL — все посты публикуются текущим
     # моментом. Если окно уже в прошлом — воркер клампит к now (см. posting.py).

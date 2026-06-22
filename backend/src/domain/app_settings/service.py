@@ -33,6 +33,16 @@ MIN_GLOBAL_POSTING_CONCURRENCY = 1
 MAX_CF_BROWSER_CONCURRENCY = 20
 MIN_CF_BROWSER_CONCURRENCY = 1
 
+# Fair-share floor — минимум конкурентности прогона при множестве активных.
+MIN_CONCURRENCY_FLOOR = 1
+MAX_CONCURRENCY_FLOOR = 100
+
+# Пороги авто-выключения сайта (site-class фейлы подряд). Общий и отдельный CF.
+MIN_SITE_DISABLE_THRESHOLD = 3
+MAX_SITE_DISABLE_THRESHOLD = 200
+MIN_SITE_DISABLE_THRESHOLD_CF = 1
+MAX_SITE_DISABLE_THRESHOLD_CF = 100
+
 
 async def get_app_settings(session: AsyncSession) -> AppSettings:
     """
@@ -63,6 +73,9 @@ async def update_app_settings(
     default_timeout_seconds: int | None = None,
     global_posting_concurrency: int | None = None,
     cf_browser_concurrency: int | None = None,
+    posting_concurrency_floor: int | None = None,
+    site_disable_threshold: int | None = None,
+    site_disable_threshold_cf: int | None = None,
     default_publish_from: object = _UNSET,
     default_publish_to: object = _UNSET,
 ) -> AppSettings:
@@ -95,6 +108,28 @@ async def update_app_settings(
                 f"[{MIN_CF_BROWSER_CONCURRENCY}, {MAX_CF_BROWSER_CONCURRENCY}]"
             )
         row.cf_browser_concurrency = cf_browser_concurrency
+    if posting_concurrency_floor is not None:
+        if not (MIN_CONCURRENCY_FLOOR <= posting_concurrency_floor <= MAX_CONCURRENCY_FLOOR):
+            raise ValueError(
+                f"posting_concurrency_floor must be in "
+                f"[{MIN_CONCURRENCY_FLOOR}, {MAX_CONCURRENCY_FLOOR}]"
+            )
+        row.posting_concurrency_floor = posting_concurrency_floor
+    if site_disable_threshold is not None:
+        if not (MIN_SITE_DISABLE_THRESHOLD <= site_disable_threshold <= MAX_SITE_DISABLE_THRESHOLD):
+            raise ValueError(
+                f"site_disable_threshold must be in "
+                f"[{MIN_SITE_DISABLE_THRESHOLD}, {MAX_SITE_DISABLE_THRESHOLD}]"
+            )
+        row.site_disable_threshold = site_disable_threshold
+    if site_disable_threshold_cf is not None:
+        if not (MIN_SITE_DISABLE_THRESHOLD_CF <= site_disable_threshold_cf
+                <= MAX_SITE_DISABLE_THRESHOLD_CF):
+            raise ValueError(
+                f"site_disable_threshold_cf must be in "
+                f"[{MIN_SITE_DISABLE_THRESHOLD_CF}, {MAX_SITE_DISABLE_THRESHOLD_CF}]"
+            )
+        row.site_disable_threshold_cf = site_disable_threshold_cf
 
     # Окно публикации: оба значения должны меняться согласованно (либо оба
     # заданы и from <= to, либо оба NULL).

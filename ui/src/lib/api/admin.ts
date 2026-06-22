@@ -538,6 +538,9 @@ export const appSettings = {
     default_timeout_seconds?: number
     global_posting_concurrency?: number
     cf_browser_concurrency?: number
+    posting_concurrency_floor?: number
+    site_disable_threshold?: number
+    site_disable_threshold_cf?: number
     default_publish_from?: string | null
     default_publish_to?: string | null
   }) => api.put<AppSettings>('/admin/api/app-settings', payload),
