@@ -172,7 +172,15 @@ jobs:
             set -euo pipefail
             sudo mkdir -p "${DEPLOY_ROOT}/deploy" "${DEPLOY_ROOT}/docker/nginx/conf.d" \
                          "${DEPLOY_ROOT}/data" "${DEPLOY_ROOT}/backups"
-            sudo chown -R $(whoami) "${DEPLOY_ROOT}"
+            # Делаем DEPLOY_ROOT и конфиг-подкаталоги записываемыми для деплой-юзера,
+            # но НЕ трогаем data/ и backups/ — это рантайм-каталоги контейнеров с
+            # собственными владельцами (postgres=70, redis=999, minio). Рекурсивный
+            # chown на них ронял права файлов БД/redis → "Permission denied" → прод
+            # падал на каждом деплое.
+            sudo chown "$(whoami)" "${DEPLOY_ROOT}"
+            sudo find "${DEPLOY_ROOT}" -mindepth 1 -maxdepth 1 \
+                 ! -name data ! -name backups \
+                 -exec chown -R "$(whoami)" {} +
 
       - name: Upload .env
         uses: appleboy/scp-action@v0.1.7
