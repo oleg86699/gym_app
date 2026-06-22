@@ -313,7 +313,12 @@ async def _pick_candidate_sites(
             has_valid_cred,
             used_count_subq < max_reuse_subq,
         )
-        .order_by(WpSite.id)
+        # LRU + random: сначала давно/никогда не использованные сайты (ровный
+        # делёж бэклинков по пулу со временем), random() как tiebreak — чтобы
+        # 25 параллельных айтемов не толпились на одних и тех же id и не долбили
+        # одни сайты concurrently (отсюда были 503/500). Порядок на корректность
+        # не влияет (каждый сайт всё равно используется max_posts_per_site раз).
+        .order_by(WpSite.last_used_at.asc().nulls_first(), func.random())
         .limit(limit)
     )
     if exclude_site_ids:
@@ -474,7 +479,10 @@ async def _mark_text_posted(
     )
     # Успешный пост ЛЮБЫМ каналом → сбрасываем site-failure счётчик (сайт жив).
     # last_working_url обновляем только при xmlrpc (для admin это не URL endpoint-а).
-    site_values: dict = {"consecutive_site_failures": 0, "last_working_at": now}
+    # last_used_at → для LRU-отбора в _pick_candidate_sites (ровный делёж пула).
+    site_values: dict = {
+        "consecutive_site_failures": 0, "last_working_at": now, "last_used_at": now,
+    }
     if outcome.working_xmlrpc_url:
         site_values["last_working_url"] = outcome.working_xmlrpc_url
     await session.execute(

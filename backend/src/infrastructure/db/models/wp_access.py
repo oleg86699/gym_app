@@ -48,6 +48,10 @@ class WpSite(Base, SoftDeletableMixin):
     # постинге через любую credential этого сайта. См. infrastructure/wp_client/.
     last_working_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     last_working_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Когда сайт последний раз УСПЕШНО приняли пост — для LRU-отбора кандидатов
+    # (_pick_candidate_sites: last_used_at NULLS FIRST, random()). Ровный делёж
+    # бэклинков по пулу; NULL = ещё ни разу не постили (берётся первым).
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     language: Mapped[str | None] = mapped_column(String(10), nullable=True)
