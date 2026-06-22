@@ -1791,27 +1791,38 @@ async def _run_posting_async(run_id: int) -> dict:
                         # сюда долетает только неожиданное исключение корутины.
                         log_ctx.exception("posting.item.unexpected", error=str(exc))
 
-                # No-progress детектор (все сайты ушли в in-memory exhausted?) —
-                # раз в NO_PROGRESS_CHECK_S, чтобы не дёргать БД каждую итерацию.
+                # No-progress детектор. ВАЖНО: НЕ сбрасываем registry._exhausted по
+                # таймеру — иначе 25 слотов снова и снова возвращаются на одни и те же
+                # мёртвые низкие id и не доходят до здоровых сайтов пула. Сбрасываем
+                # ТОЛЬКО когда реально кончились СВЕЖИЕ (не-exhausted) сайты — как
+                # ретрай transient; и если глобально сайтов нет совсем → need_more_admins.
                 now_mono = time.monotonic()
                 if now_mono - last_progress_at >= NO_PROGRESS_CHECK_S:
                     cur_posted = await _read_posted_count(run_id)
                     if cur_posted > last_posted_seen:
                         last_posted_seen = cur_posted
                     else:
-                        # Прогресса нет: сбрасываем in-memory exhausted (мог быть
-                        # transient blip) и проверяем — реально ли больше нет сайтов.
-                        registry._exhausted.clear()
                         _f_langs, _f_tlds = _run_site_filter(run)
                         async with WriteSession() as s:
-                            any_site = await _pick_candidate_sites(
+                            fresh = await _pick_candidate_sites(
                                 s, project_id=run.project_id, run_id=run.id,
-                                exclude_site_ids=set(), limit=1,
+                                exclude_site_ids=set(registry._exhausted), limit=1,
                                 site_langs=_f_langs, site_tlds=_f_tlds,
                             )
-                        if not any_site:
-                            need_more_admins = True
-                            log_ctx.warning("posting.no_progress.no_more_sites")
+                        if not fresh:
+                            # весь eligible-пул уже перепробован этим run-ом — ретраим
+                            # (вдруг transient ожил); если и глобально пусто → нужны
+                            # новые доступы.
+                            registry._exhausted.clear()
+                            async with WriteSession() as s:
+                                any_global = await _pick_candidate_sites(
+                                    s, project_id=run.project_id, run_id=run.id,
+                                    exclude_site_ids=set(), limit=1,
+                                    site_langs=_f_langs, site_tlds=_f_tlds,
+                                )
+                            if not any_global:
+                                need_more_admins = True
+                                log_ctx.warning("posting.no_progress.no_more_sites")
                     last_progress_at = now_mono
 
     except Exception as e:
