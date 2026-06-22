@@ -175,12 +175,13 @@ jobs:
             # Делаем DEPLOY_ROOT и конфиг-подкаталоги записываемыми для деплой-юзера,
             # но НЕ трогаем data/ и backups/ — это рантайм-каталоги контейнеров с
             # собственными владельцами (postgres=70, redis=999, minio). Рекурсивный
-            # chown на них ронял права файлов БД/redis → "Permission denied" → прод
-            # падал на каждом деплое.
-            sudo chown "$(whoami)" "${DEPLOY_ROOT}"
-            sudo find "${DEPLOY_ROOT}" -mindepth 1 -maxdepth 1 \
-                 ! -name data ! -name backups \
-                 -exec chown -R "$(whoami)" {} +
+            # chown всего корня ронял права файлов БД/redis → "Permission denied".
+            me="$(whoami)"
+            sudo chown "${me}" "${DEPLOY_ROOT}"
+            sudo chown -R "${me}" "${DEPLOY_ROOT}/deploy" "${DEPLOY_ROOT}/docker"
+            for f in "${DEPLOY_ROOT}/.env" "${DEPLOY_ROOT}/docker-compose.yaml"; do
+              if [ -e "${f}" ]; then sudo chown "${me}" "${f}"; fi
+            done
 
       - name: Upload .env
         uses: appleboy/scp-action@v0.1.7
