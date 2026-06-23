@@ -97,7 +97,11 @@
       return ''
     }
   }
-  let bulkDomain = $derived(domainOf(resolveLink))
+  // Домен для массовых действий: из выбранной ссылки, а если её ещё не выбрали —
+  // из первого задетекченного кандидата (чтобы кнопки были видны сразу).
+  let bulkDomain = $derived(
+    domainOf(resolveLink) || domainOf(item?.link_candidates?.[0]?.link ?? ''),
+  )
   let bulkBusy = $state(false)
   let addDomainBusy = $state(false)
 
