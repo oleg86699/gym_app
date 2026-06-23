@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ArrowLeft, ArrowRight, Copy, Play, RefreshCw, RotateCw, Send, Wand2 } from 'lucide-svelte'
+  import { ArrowLeft, ArrowRight, CheckCheck, Copy, Play, RefreshCw, RotateCw, Send, Wand2 } from 'lucide-svelte'
   import { goto } from '$app/navigation'
   import { page } from '$app/state'
   import { onDestroy, onMount } from 'svelte'
@@ -316,6 +316,7 @@
   onDestroy(() => {
     if (pollTimer) clearInterval(pollTimer)
     if (itemsReloadTimer) clearTimeout(itemsReloadTimer)
+    if (linkCheckTimer) clearInterval(linkCheckTimer)
     stopSSE()
   })
 
@@ -561,6 +562,42 @@
   )
   let canRetry = $derived(!!progress && progress.failed > 0)
   let canDownload = $derived(!!run && run.total_texts > 0)
+
+  // ─── Перепроверка проставленных ссылок (link-check) ────────────────
+  let validating = $state(false)
+  let linkCheckTimer: ReturnType<typeof setInterval> | null = null
+  let linkCheckRunning = $derived(
+    run?.link_check_status === 'running' || run?.link_check_status === 'queued',
+  )
+  let canValidateLinks = $derived(
+    !!run && run.status === 'done' && run.posted_count > 0 && !linkCheckRunning,
+  )
+
+  async function doValidateLinks() {
+    if (!run || validating || linkCheckRunning) return
+    validating = true
+    try {
+      const res = await postingsApi.validateLinks(runId)
+      showToast('success', `Проверка ссылок запущена: ${res.total} шт.`)
+      await loadRun()
+      // Быстрый поллинг прогресса проверки, пока бежит (общий poll — раз в 10с).
+      if (linkCheckTimer) clearInterval(linkCheckTimer)
+      linkCheckTimer = setInterval(async () => {
+        await loadRun()
+        if (run?.link_check_status !== 'running' && run?.link_check_status !== 'queued') {
+          if (linkCheckTimer) {
+            clearInterval(linkCheckTimer)
+            linkCheckTimer = null
+          }
+          loadItems() // обновить отметки ✓/✗ в таблице
+        }
+      }, 3000)
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    } finally {
+      validating = false
+    }
+  }
 </script>
 
 <div class="space-y-6">
@@ -678,6 +715,26 @@
                 title="Архивировать run (soft-delete). Активный — отменится.">
           {busyAction === 'delete' ? '…' : 'Delete'}
         </button>
+        <!-- Перепроверка проставленных ссылок — только после завершения постинга -->
+        {#if run.status === 'done'}
+          <button onclick={doValidateLinks}
+                  disabled={!canValidateLinks || validating}
+                  class="inline-flex items-center gap-1.5 rounded-md border border-violet-300 bg-violet-50 px-3 py-1.5 text-sm font-medium text-violet-800 hover:bg-violet-100 disabled:opacity-50"
+                  title="Перепроверить уже-валидные бэклинки (фетч страниц постов). Идёт в общей очереди — видно на странице «Очередь».">
+            {#if linkCheckRunning}
+              <span class="inline-block h-2 w-2 animate-pulse rounded-full bg-violet-500"></span>
+              Проверка ссылок… {run.link_check_done}/{run.link_check_total}
+            {:else}
+              <CheckCheck size={14} /> Проверить ссылки
+            {/if}
+          </button>
+          {#if run.link_check_status === 'done' && run.link_check_at}
+            <span class="self-center text-xs text-violet-700"
+                  title={`Последняя проверка: ${new Date(run.link_check_at).toLocaleString()}`}>
+              валидных {run.link_check_valid}/{run.link_check_total}
+            </span>
+          {/if}
+        {/if}
       {/if}
       <div class="ml-auto">
         <DropdownMenu
@@ -692,10 +749,22 @@
               download: `run-${runId}.csv`,
             },
             {
+              label: 'CSV — только валидные',
+              description: 'Лишь подтверждённые ссылки (link_verified ✓)',
+              href: `/admin/api/postings/${runId}/result?format=csv&verified_only=true`,
+              download: `run-${runId}-valid.csv`,
+            },
+            {
               label: 'XLSX',
               description: 'Excel native, posted_url как гиперссылка',
               href: `/admin/api/postings/${runId}/result?format=xlsx`,
               download: `run-${runId}.xlsx`,
+            },
+            {
+              label: 'XLSX — только валидные',
+              description: 'Лишь подтверждённые ссылки (link_verified ✓)',
+              href: `/admin/api/postings/${runId}/result?format=xlsx&verified_only=true`,
+              download: `run-${runId}-valid.xlsx`,
             },
             {
               label: 'JSON',

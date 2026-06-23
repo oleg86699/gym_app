@@ -18,6 +18,7 @@ from api.admin.schemas.supplier_access import (
     SupplierAccessListResponse,
 )
 from core.config import settings
+from core.crypto import decrypt_password
 from core.db import get_db_read, get_db_write
 from domain.supplier_access.service import (
     SupplierAccessError,
@@ -84,6 +85,15 @@ async def list_endpoint(
     session: AsyncSession = Depends(get_db_read),
 ) -> SupplierAccessListResponse:
     rows = await list_supplier_accesses(session)
+
+    def _pw(enc: str | None) -> str | None:
+        if not enc:
+            return None
+        try:
+            return decrypt_password(enc)
+        except Exception:
+            return None
+
     return SupplierAccessListResponse(items=[
         SupplierAccessItem(
             user_id=u.id,
@@ -95,6 +105,7 @@ async def list_endpoint(
             created_at=u.created_at,
             last_login_at=u.last_login_at,
             handover="link" if u.login_token_hash else "password",
+            password=_pw(u.temp_password_enc),
         )
         for u in rows
     ])

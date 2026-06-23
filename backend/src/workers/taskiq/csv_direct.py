@@ -15,7 +15,7 @@ from core.config import settings
 from core.db import WriteSession
 from core.lang_detect import detect_language_from_html
 from core.storage import storage
-from domain.text_links import normalize_domain
+from domain.text_links import inject_link, normalize_domain
 from infrastructure.db.models import PostingRun, PostingRunStatus
 from core.taskiq_app import broker
 
@@ -39,6 +39,8 @@ async def process_csv_direct(run_id: int) -> dict:
         storage_key = run.source_archive_storage_key
         spread_days = run.spread_days or 0
         scheduled_for = run.scheduled_for
+        # Опц.: инжектить ссылку из строки в тело (по умолчанию НЕТ — тело как есть).
+        inject = bool((run.gen_params or {}).get("csv_inject_link"))
 
     # читаем файл из MinIO
     try:
@@ -67,7 +69,10 @@ async def process_csv_direct(run_id: int) -> dict:
     total = 0
     batch: list[dict] = []
     for i, r in enumerate(rows):
-        body = r["text"]
+        # По флагу — инжектим ссылку из строки в тело (то же правило, что в Reuse:
+        # обернуть анкор/значимое слово, иначе вставить в абзац). Иначе тело как есть.
+        body = (inject_link(r["text"], r["link"], r.get("anchor") or r["link"])
+                if inject else r["text"])
         batch.append({
             "posting_run_id": run_id,
             "project_id": project_id,

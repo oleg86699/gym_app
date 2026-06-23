@@ -6,7 +6,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.admin.middleware.auth import get_current_user
+from api.admin.middleware.auth import get_current_user, require_super_admin
 from api.admin.schemas.project_domains import (
     AddProjectDomainRequest,
     AddProjectDomainResult,
@@ -15,6 +15,7 @@ from api.admin.schemas.project_domains import (
     DomainAnalyticsRow,
     DomainItemRow,
     DomainItemsResponse,
+    DomainPlacementRow,
     DomainRunRow,
     DomainSummaryResponse,
     ProjectDomainResponse,
@@ -23,6 +24,7 @@ from api.admin.schemas.projects import (
     CreateProjectRequest,
     ProjectListItem,
     ProjectResponse,
+    ReassignOwnerRequest,
     ShareGroupsRequest,
     ShareUsersRequest,
     UpdateProjectRequest,
@@ -41,6 +43,7 @@ from domain.projects.service import (
     create_project,
     get_project,
     list_projects,
+    reassign_project_owner,
     share_with_groups,
     share_with_users,
     soft_delete_project,
@@ -71,11 +74,13 @@ async def list_projects_endpoint(
     cursor: str | None = Query(default=None),
     limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
     search: str | None = Query(default=None, max_length=200),
+    owner_id: int | None = Query(default=None, description="Только проекты этого владельца"),
     viewer: AdminUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_read),
 ) -> PaginatedResponse[ProjectListItem]:
     after = _decode_cursor(cursor)
-    rows = await list_projects(session, viewer=viewer, after_id=after, limit=limit, search=search)
+    rows = await list_projects(session, viewer=viewer, after_id=after, limit=limit,
+                               search=search, owner_id=owner_id)
     has_more = len(rows) > limit
     if has_more:
         rows = rows[:limit]
@@ -254,6 +259,37 @@ async def share_project_with_groups_endpoint(
     return ProjectResponse.model_validate(updated)
 
 
+@router.post("/{project_id}/reassign-owner", response_model=ProjectResponse)
+async def reassign_project_owner_endpoint(
+    project_id: int,
+    payload: ReassignOwnerRequest,
+    actor: AdminUser = Depends(require_super_admin),
+    session: AsyncSession = Depends(get_db_write),
+) -> ProjectResponse:
+    """Сменить владельца проекта на другого пользователя. ТОЛЬКО super_admin.
+
+    Сценарий: сотрудник ушёл — проект (со всеми прогонами, доменами, кредами и
+    шерами, привязанными к project_id) переходит другому владельцу без потери
+    данных. Обновляются owner_user_id + денорм-кэш owner_group_id.
+    """
+    project = await get_project(session, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    from sqlalchemy import select as _select
+    new_owner = await session.scalar(
+        _select(AdminUser).where(AdminUser.id == payload.new_owner_id,
+                                 AdminUser.deleted_at.is_(None)))
+    if new_owner is None:
+        raise HTTPException(status_code=404, detail="New owner not found")
+    old_owner_id = project.owner_user_id
+    if old_owner_id == new_owner.id:
+        raise HTTPException(status_code=400, detail="Project already owned by this user")
+    updated = await reassign_project_owner(session, project=project, new_owner=new_owner)
+    log.info("projects.reassigned_owner", actor_id=actor.id, project_id=project_id,
+             old_owner_id=old_owner_id, new_owner_id=new_owner.id)
+    return ProjectResponse.model_validate(updated)
+
+
 # ─── Домены проекта (Фаза A: целевые money-домены) ───────────────────
 
 @router.get("/{project_id}/domains", response_model=list[ProjectDomainResponse])
@@ -379,6 +415,22 @@ async def project_domain_runs(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot view this project")
     from domain.project_domains import domain_runs
     return [DomainRunRow(**r) for r in await domain_runs(session, project_id, domain)]
+
+
+@router.get("/{project_id}/domains/{domain}/placements", response_model=list[DomainPlacementRow])
+async def project_domain_placements(
+    project_id: int,
+    domain: str,
+    viewer: AdminUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_read),
+) -> list[DomainPlacementRow]:
+    project = await get_project(session, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not can_view_project(viewer, project):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot view this project")
+    from domain.project_domains import domain_placements
+    return [DomainPlacementRow(**r) for r in await domain_placements(session, project_id, domain)]
 
 
 @router.get("/{project_id}/domains/{domain}/items", response_model=DomainItemsResponse)

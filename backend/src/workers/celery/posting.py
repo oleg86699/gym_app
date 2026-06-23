@@ -699,71 +699,11 @@ async def _read_control_flags(run_id: int) -> tuple[bool, bool]:
 async def _resolve_proxy_pool(
     session: AsyncSession, selector: str | None, fallback_proxy_id: int | None,
 ) -> list[str | None]:
-    """
-    По селектору и/или fallback proxy_id вернуть список proxy-URL (или [None]
-    для direct). Worker будет по нему делать random rotation per request.
-
-    Поддерживаемые формы selector-а:
-      - None / "direct"     → [None]
-      - "all"               → все is_active=True, status='active'
-      - "provider:<name>"   → все active+working от провайдера <name> (source/provider)
-      - "single:<id>"       → один конкретный proxy
-
-    Если selector невалидный или пул пуст → пробуем fallback_proxy_id (для
-    back-compat со старыми API-вызовами без selector). Если и его нет → [None].
-    """
-    from domain.proxies.service import proxy_url as _proxy_url
-    from infrastructure.db.models import Proxy
-
-    sel = (selector or "").strip()
-
-    if sel in ("", "direct"):
-        # selector явно direct ИЛИ не задан — попробуем proxy_id fallback
-        if fallback_proxy_id and not sel:
-            px = await session.scalar(select(Proxy).where(Proxy.id == fallback_proxy_id))
-            if px and px.is_active:
-                return [_proxy_url(px)]
-        return [None]
-
-    # Фильтр: is_active=True И (locked_until IS NULL ИЛИ locked_until <= now).
-    # Прокси с накопившимися network-fail-ами автолочатся на 30 мин (см. health-tracking)
-    # и пропускаются из пула чтобы не портить запросы. После cooldown вернутся.
-    now = datetime.now(UTC)
-    unlocked_pred = (Proxy.locked_until.is_(None)) | (Proxy.locked_until <= now)
-    if sel == "all":
-        rows = (await session.execute(
-            select(Proxy).where(Proxy.is_active.is_(True), unlocked_pred)
-        )).scalars().all()
-    elif sel.startswith("provider:"):
-        provider = sel.removeprefix("provider:").strip()
-        # У нас есть `source` (string) и `provider` (string nullable) — оба
-        # могут указывать провайдера. Любой match.
-        rows = (await session.execute(
-            select(Proxy).where(
-                Proxy.is_active.is_(True),
-                unlocked_pred,
-                (Proxy.source == provider) | (Proxy.provider == provider),
-            )
-        )).scalars().all()
-    elif sel.startswith("single:"):
-        try:
-            pid = int(sel.removeprefix("single:"))
-        except ValueError:
-            return [None]
-        px = await session.scalar(select(Proxy).where(Proxy.id == pid))
-        # Для single-режима lock игнорируем (отладка) — но логируем
-        if px and px.locked_until and px.locked_until > now:
-            log.warning("posting.proxy.single_locked_ignored", proxy_id=pid, locked_until=str(px.locked_until))
-        return [_proxy_url(px)] if px and px.is_active else [None]
-    else:
-        log.warning("posting.proxy.unknown_selector", selector=sel)
-        return [None]
-
-    urls = [_proxy_url(p) for p in rows if p.is_active]
-    if not urls:
-        log.warning("posting.proxy.empty_pool", selector=sel)
-        return [None]
-    return urls
+    """По селектору и/или fallback proxy_id вернуть список proxy-URL (или [None]
+    для direct); worker делает random rotation per request. Общая логика вынесена
+    в domain.proxies.service.resolve_proxy_pool (её же использует link-check)."""
+    from domain.proxies.service import resolve_proxy_pool
+    return await resolve_proxy_pool(session, selector, fallback_proxy_id)
 
 
 class HttpxClientPool:
@@ -1367,6 +1307,21 @@ async def _post_one_item(
                                 "posting.site.auto_disabled_parked",
                                 site_id=site.id, domain=site.domain,
                             )
+                            break
+
+                        if outcome.error == ErrorKind.RATE_LIMITED:
+                            # 429: сайт/прокси перегружены ПРЯМО СЕЙЧАС — это НЕ мёртвый
+                            # сайт. Помечаем exhausted на ЭТОТ прогон (остальные потоки
+                            # пропустят его и разъедутся по другим сайтам, без 429-шторма),
+                            # но НЕ бьём по счётчику авто-выключения (времянка — в следующем
+                            # прогоне сайт снова доступен).
+                            log.info(
+                                "posting.item.rate_limited",
+                                run_id=run.id, item_id=item.id, site_id=site.id,
+                                cred_id=cred.id,
+                            )
+                            registry.mark_exhausted(site.id)
+                            site_done = True
                             break
 
                         if outcome.error in (

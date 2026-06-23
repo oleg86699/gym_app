@@ -40,7 +40,8 @@
       ])
       items = inv
       allGroups = g
-      allRoles = r
+      // supplier выдаётся только через «Доступы поставщиков», не обычным приглашением.
+      allRoles = r.filter((role) => role.name !== 'supplier')
     } catch (e) {
       showToast('error', e instanceof ApiError ? e.message : String(e))
     } finally {

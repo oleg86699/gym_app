@@ -15,4 +15,11 @@ from core.taskiq_app import broker, scheduler  # noqa: F401
 
 # Импортируем модули с тасками, чтобы декораторы `@broker.task` выполнились
 # и таски зарегистрировались.
-from workers.taskiq import campaign, cron_tasks, csv_direct, health, unpack  # noqa: F401
+from workers.taskiq import (  # noqa: F401
+    campaign,
+    cron_tasks,
+    csv_direct,
+    health,
+    unpack,
+    validate_links,
+)

@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from core.crypto import encrypt_password
 from core.security import hash_password
 from infrastructure.db.models import AdminRole, AdminUser
 
@@ -89,6 +90,9 @@ async def create_supplier_access(
         username=username,
         email=None,
         hashed_password=hash_password(pw),
+        # Обратимо шифруем пароль, чтобы super_admin мог посмотреть его позже в
+        # списке (только для временных supplier-аккаунтов; super_admin-only показ).
+        temp_password_enc=encrypt_password(pw),
         full_name=(note or "Поставщик доступов")[:255],
         is_active=True,
         is_temporary=True,

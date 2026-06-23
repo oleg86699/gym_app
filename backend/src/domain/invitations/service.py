@@ -92,6 +92,12 @@ async def create_invitation(
             (await session.execute(select(AdminRole).where(AdminRole.id.in_(role_ids)))).scalars().all()
         )
 
+    # Роль supplier — только через «Доступы поставщиков» (временные аккаунты),
+    # не через обычные приглашения (иначе создаётся постоянный supplier-юзер).
+    if any(r.name == "supplier" for r in target_roles):
+        raise InvitationScopeError(
+            "Роль 'supplier' выдаётся только через «Доступы поставщиков», не приглашением.")
+
     validate_inviter_scope(inviter, group_id, target_roles)
 
     plain, h, prefix = _generate_token()

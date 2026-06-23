@@ -221,6 +221,10 @@ class AdminUser(Base, SoftDeletableMixin):
     login_token_hash: Mapped[str | None] = mapped_column(
         String(64), nullable=True, index=True
     )
+    # Обратимо зашифрованный пароль ТОЛЬКО для временных supplier-аккаунтов —
+    # чтобы super_admin мог посмотреть/скопировать его позже на странице
+    # «Доступы поставщиков». Для обычных юзеров NULL (хранится лишь hash). См. 0049.
+    temp_password_enc: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     group_id: Mapped[int | None] = mapped_column(
         ForeignKey("admin_groups.id", ondelete="SET NULL"),

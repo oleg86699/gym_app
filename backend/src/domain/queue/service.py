@@ -185,9 +185,42 @@ async def _validation_lane(session: AsyncSession) -> dict | None:
     }
 
 
+# Статусы активной перепроверки бэклинков (link-check).
+_LINK_CHECK_STATUSES = ("queued", "running")
+
+
+async def _link_check_lane(session: AsyncSession) -> list[dict]:
+    """Активные перепроверки проставленных ссылок (link-check) завершённых
+    прогонов — отдельный (фиолетовый) тип нагрузки: внешние GET-ы страниц постов,
+    запущенные вручную после постинга. Видно, чем занят сервер."""
+    rows = (await session.scalars(
+        select(PostingRun)
+        .where(PostingRun.link_check_status.in_(_LINK_CHECK_STATUSES),
+               PostingRun.deleted_at.is_(None))
+    )).all()
+    items: list[dict] = []
+    for r in rows:
+        total = r.link_check_total or 0
+        done = r.link_check_done or 0
+        items.append({
+            "id": r.id,
+            "name": r.name,
+            "project_id": r.project_id,
+            "status": r.link_check_status,
+            "total": total,
+            "done": done,
+            "valid": r.link_check_valid or 0,
+            "progress_pct": min(100, round(done * 100 / total)) if total else 0,
+            "started_at": r.link_check_at.isoformat() if r.link_check_at else None,
+        })
+    items.sort(key=lambda x: (0 if x["status"] == "running" else 1, -x["id"]))
+    return items
+
+
 async def get_queue_snapshot(session: AsyncSession) -> dict:
     posting = await _posting_lane(session)
     validation = await _validation_lane(session)
+    link_checks = await _link_check_lane(session)
 
     limit = 80
     try:
@@ -208,9 +241,11 @@ async def get_queue_snapshot(session: AsyncSession) -> dict:
         },
         "posting": posting,
         "validation": validation,
+        "link_checks": link_checks,
         "summary": {
             "posting_active": len(posting),
             "posting_running": running_posting,
             "validation_running": bool(validation and validation.get("running")),
+            "link_check_active": len(link_checks),
         },
     }

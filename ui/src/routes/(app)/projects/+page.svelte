@@ -26,11 +26,33 @@
   let shareGroupIds = $state<number[]>([])
   let shareBusy = $state(false)
 
+  // Переназначение владельца — только super_admin
+  let isSuper = $derived($currentUser?.is_super_admin ?? false)
+  let reassignOpen = $state<ProjectListItem | null>(null)
+  let reassignToId = $state<number | null>(null)
+  let reassignBusy = $state(false)
+
+  async function saveReassign() {
+    if (!reassignOpen || !reassignToId) return
+    reassignBusy = true
+    try {
+      const target = allUsers.find((u) => u.id === reassignToId)
+      await projectsApi.reassignOwner(reassignOpen.id, reassignToId)
+      showToast('success', `«${reassignOpen.name}» → @${target?.username ?? reassignToId}`)
+      reassignOpen = null
+      await refresh()
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    } finally {
+      reassignBusy = false
+    }
+  }
+
   async function refresh() {
     loading = true
     try {
       const r = await projectsApi.list({ search, limit: 100 })
-      items = r.items
+      items = r.items as ProjectListItem[]
     } catch (e) {
       showToast('error', e instanceof ApiError ? e.message : String(e))
     } finally {
@@ -223,7 +245,14 @@
                   <div class="text-[10px] text-slate-400">#{p.owner_group.name}</div>
                 {/if}
               </td>
-              <td class="px-4 py-2 text-slate-600">@{p.owner.username}</td>
+              <td class="px-4 py-2 text-slate-600">
+                <span class="align-middle">@{p.owner.username}</span>
+                {#if isSuper}
+                  <button type="button" title="Переназначить владельца"
+                          onclick={() => { reassignOpen = p; reassignToId = null }}
+                          class="ml-1.5 align-middle rounded border border-violet-200 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 hover:bg-violet-50">↪ владелец</button>
+                {/if}
+              </td>
               <td class="px-4 py-2 text-slate-600">
                 {#if p.shared_with_users.length + p.shared_with_groups.length === 0}
                   <span class="text-slate-300">—</span>
@@ -420,6 +449,41 @@
         <button type="button" onclick={saveShare} disabled={shareBusy}
                 class="rounded-md bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700 disabled:bg-slate-300">
           {shareBusy ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Reassign owner modal (super_admin) -->
+{#if reassignOpen}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="fixed inset-0 z-30 flex items-center justify-center bg-slate-900/40 p-4" onclick={() => (reassignOpen = null)}>
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="w-full max-w-md rounded-lg bg-white p-6 shadow-xl" onclick={(e) => e.stopPropagation()}>
+      <h2 class="text-lg font-semibold text-slate-900">Переназначить владельца</h2>
+      <p class="mt-1 text-sm text-slate-500">
+        Проект <span class="font-medium text-slate-700">{reassignOpen.name}</span> · текущий владелец
+        @{reassignOpen.owner.username}. Прогоны, домены, креды и общий доступ перейдут вместе с проектом.
+      </p>
+      <label for="reassign_to" class="mt-4 block text-sm font-medium text-slate-700">Новый владелец</label>
+      <select id="reassign_to" bind:value={reassignToId}
+              class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
+        <option value={null}>— выбрать пользователя —</option>
+        {#each allUsers.filter((u) => u.id !== reassignOpen?.owner.id) as u}
+          <option value={u.id}>@{u.username}{u.group ? ` · #${u.group.name}` : ''}</option>
+        {/each}
+      </select>
+      <div class="mt-6 flex justify-end gap-2">
+        <button type="button" onclick={() => (reassignOpen = null)}
+                class="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50">
+          Cancel
+        </button>
+        <button type="button" onclick={saveReassign} disabled={reassignBusy || !reassignToId}
+                class="rounded-md bg-violet-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-violet-700 disabled:bg-slate-300">
+          {reassignBusy ? 'Переназначаю…' : 'Переназначить'}
         </button>
       </div>
     </div>

@@ -187,6 +187,17 @@ class PostingRun(Base, SoftDeletableMixin):
     worker_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     celery_task_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # Перепроверка проставленных бэклинков — отдельная фоновая задача (TaskIQ),
+    # запускается ВРУЧНУЮ после завершения постинга. Перепроверяет ссылки, которые
+    # уже были валидны (link_verified=true), и обновляет их отметку. Видна в
+    # глобальной очереди как отдельный (фиолетовый) тип задач. См. миграцию 0048.
+    #   link_check_status: NULL | queued | running | done
+    link_check_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    link_check_total: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
+    link_check_done: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
+    link_check_valid: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
+    link_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     # Прокси (этап 3) — пока nullable заглушка без FK
     proxy_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 

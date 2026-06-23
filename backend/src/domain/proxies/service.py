@@ -296,6 +296,66 @@ def proxy_url(p: Proxy) -> str:
     return f"{p.protocol}://{creds}{p.host}:{p.port}"
 
 
+async def resolve_proxy_pool(
+    session: AsyncSession, selector: str | None, fallback_proxy_id: int | None = None,
+) -> list[str | None]:
+    """По селектору прогона (+ fallback proxy_id) вернуть список proxy-URL (или
+    [None] для direct). Вызывающий делает random-rotation по нему per-request,
+    чтобы не упираться в один exit-IP. Общая логика для постинга и для
+    перепроверки ссылок (link-check).
+
+    Формы selector-а:
+      None / "direct"     → [None]
+      "all"               → все активные незалоченные
+      "provider:<name>"   → активные незалоченные от провайдера <name>
+      "single:<id>"       → один конкретный proxy
+    Пустой пул / невалидный selector → [None] (direct).
+    """
+    sel = (selector or "").strip()
+
+    if sel in ("", "direct"):
+        if fallback_proxy_id and not sel:
+            px = await session.scalar(select(Proxy).where(Proxy.id == fallback_proxy_id))
+            if px and px.is_active:
+                return [proxy_url(px)]
+        return [None]
+
+    # is_active И (locked_until IS NULL ИЛИ <= now): автолоченные (накопили
+    # network-fail-ы) пропускаем, после cooldown вернутся.
+    now = datetime.now(UTC)
+    unlocked_pred = (Proxy.locked_until.is_(None)) | (Proxy.locked_until <= now)
+    if sel == "all":
+        rows = (await session.execute(
+            select(Proxy).where(Proxy.is_active.is_(True), unlocked_pred)
+        )).scalars().all()
+    elif sel.startswith("provider:"):
+        provider = sel.removeprefix("provider:").strip()
+        rows = (await session.execute(
+            select(Proxy).where(
+                Proxy.is_active.is_(True), unlocked_pred,
+                (Proxy.source == provider) | (Proxy.provider == provider),
+            )
+        )).scalars().all()
+    elif sel.startswith("single:"):
+        try:
+            pid = int(sel.removeprefix("single:"))
+        except ValueError:
+            return [None]
+        px = await session.scalar(select(Proxy).where(Proxy.id == pid))
+        if px and px.locked_until and px.locked_until > now:
+            log.warning("proxy.single_locked_ignored", proxy_id=pid, locked_until=str(px.locked_until))
+        return [proxy_url(px)] if px and px.is_active else [None]
+    else:
+        log.warning("proxy.unknown_selector", selector=sel)
+        return [None]
+
+    urls = [proxy_url(p) for p in rows if p.is_active]
+    if not urls:
+        log.warning("proxy.empty_pool", selector=sel)
+        return [None]
+    return urls
+
+
 async def pick_active_proxy_url(session: AsyncSession) -> str | None:
     """Случайный активный residential/mobile прокси-URL — для Tier2/CF-путей
     (provision / links / post-ops), где curl_cffi должен идти через чистый exit

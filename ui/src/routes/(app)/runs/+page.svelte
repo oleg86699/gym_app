@@ -20,6 +20,7 @@
     PromptTemplate,
     Proxy,
     QueueItem,
+    QueueLinkCheckItem,
     User,
   } from '$lib/api/types'
   import { showToast } from '$lib/stores/toast'
@@ -32,12 +33,15 @@
 
   // ─── Global queue — общая видимая очередь по всем юзерам ─────────
   let queue = $state<QueueItem[]>([])
+  let linkChecks = $state<QueueLinkCheckItem[]>([])
   async function refreshQueue() {
     try {
       const res = await postingsApi.queue()
       queue = res.items
+      linkChecks = res.link_checks ?? []
     } catch {
       queue = []
+      linkChecks = []
     }
   }
 
@@ -235,6 +239,8 @@
   let newTaskType = $state<'post' | 'sitewide_link' | 'homepage_link'>('post')
   // «Пост»: источник текстов — архив .txt / готовые тексты CSV / генерация-reuse
   let postSource = $state<'zip' | 'csv_direct' | 'gen'>('zip')
+  // csv_direct: инжектить ли ссылку из строки в тело (по умолчанию НЕТ)
+  let csvInjectLink = $state(false)
   // Content Engine csv_campaign (C2): режим контента + AI
   let campContentMode = $state<'gen_per_post' | 'gen_per_row' | 'reuse'>('gen_per_post')
   let campRunMode = $state<'auto' | 'manual'>('manual')
@@ -300,6 +306,7 @@
   function openCreate() {
     newTaskType = 'post'
     postSource = 'zip'
+    csvInjectLink = false
     newProjectId = filterProjectId ?? manageableProjects[0]?.id ?? null
     nameTouched = false
     newName = `Run ${nowStamp()}`
@@ -374,7 +381,7 @@
         const run = await postingsApi.create(newProjectId, newFile, base)
         showToast('success', `Run "${run.name}" создан`)
       } else if (newTaskType === 'post' && postSource === 'csv_direct') {
-        const run = await postingsApi.createCsvDirect(newProjectId, newFile, base)
+        const run = await postingsApi.createCsvDirect(newProjectId, newFile, { ...base, csv_inject_link: csvInjectLink })
         showToast('success', `Run "${run.name}" создан (готовые тексты)`)
       } else if (newTaskType === 'post' && postSource === 'gen') {
         if (campContentMode !== 'reuse' && !campModelId) {
@@ -521,13 +528,19 @@
               <strong class="tabular-nums">{totalPending}</strong> pending
             </span>
           {/if}
+          {#if linkChecks.length > 0}
+            <span class="text-slate-300">·</span>
+            <span class="rounded bg-violet-100 px-1.5 py-0.5 text-violet-700">
+              <strong class="tabular-nums">{linkChecks.length}</strong> валидация ссылок
+            </span>
+          {/if}
         </div>
       </div>
       <p class="mb-2 text-[11px] text-slate-500">
         Все active runs (running / queued / paused / scheduled) по всем юзерам и проектам.
         Сервер крутит ограниченное число параллельно — координируйтесь по нагрузке.
       </p>
-      {#if queue.length === 0}
+      {#if queue.length === 0 && linkChecks.length === 0}
         <div class="rounded-md bg-white/60 px-3 py-4 text-center text-xs text-slate-400">
           Очередь пуста — никто сейчас ничего не постит. Запустить run? Кнопка справа сверху.
         </div>
@@ -582,6 +595,52 @@
           </li>
         {/each}
       </ol>
+      {#if linkChecks.length > 0}
+        <div class="mt-2 border-t border-violet-200/60 pt-2">
+          <p class="mb-1.5 text-[11px] font-medium uppercase tracking-wider text-violet-700">
+            Валидация проставленных ссылок
+          </p>
+          <ol class="space-y-1.5">
+            {#each linkChecks as lc (lc.id)}
+              {@const pct = lc.total > 0 ? (lc.done / lc.total) * 100 : 0}
+              <li class="flex items-center gap-3 rounded-md px-2 py-1.5 text-sm transition"
+                  class:bg-white={lc.is_mine}
+                  class:ring-1={lc.is_mine}
+                  class:ring-violet-300={lc.is_mine}>
+                <span class="w-6 text-right text-xs">🔎</span>
+                <a href={`/runs/${lc.id}`} class="min-w-[120px] truncate font-medium text-slate-800 hover:text-violet-700 hover:underline">
+                  {lc.name}
+                </a>
+                <span class="rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-medium uppercase text-violet-700">
+                  проверка ссылок
+                  {#if lc.status === 'running'}
+                    <span class="ml-0.5 inline-block h-1 w-1 animate-pulse rounded-full bg-violet-500"></span>
+                  {/if}
+                </span>
+                <div class="relative flex h-2 flex-1 items-center overflow-hidden rounded-full bg-slate-200"
+                     title={`Проверено ${lc.done} из ${lc.total}`}>
+                  {#if lc.total > 0}
+                    <div class="h-full bg-violet-500 transition-all" style="width: {pct}%"></div>
+                  {/if}
+                </div>
+                <span class="w-24 shrink-0 text-right text-xs tabular-nums text-slate-500">
+                  <strong class="text-violet-700">{lc.done}</strong>
+                  <span class="text-slate-300">/</span>
+                  <strong class="text-slate-700">{lc.total}</strong>
+                  <span class="ml-0.5 text-[9px] uppercase text-violet-400">✓{lc.valid}</span>
+                </span>
+                {#if lc.is_mine}
+                  <span class="shrink-0 rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium uppercase text-violet-700">yours</span>
+                {:else}
+                  <span class="w-16 shrink-0 truncate text-right text-[11px] text-slate-400" title={`@${lc.creator_username ?? '?'} · ${lc.project_name}`}>
+                    @{lc.creator_username ?? '?'}
+                  </span>
+                {/if}
+              </li>
+            {/each}
+          </ol>
+        </div>
+      {/if}
     </section>
   {/if}
 
@@ -735,7 +794,7 @@
             </div>
             <p class="mt-1 text-[11px] text-slate-400">
               {#if postSource === 'zip'}.zip с .txt — каждый файл один пост (<code class="rounded bg-slate-100 px-1">&lt;title&gt;</code> = заголовок).
-              {:else if postSource === 'csv_direct'}CSV/XLSX с готовыми текстами: столбцы anchor, link, text. Ссылку из строки инжектим в текст.
+              {:else if postSource === 'csv_direct'}CSV/XLSX с готовыми текстами: столбцы anchor, link, text. По умолчанию тело постится как есть (ссылка должна быть уже в тексте); link/anchor — для валидации и аналитики. Инжект ссылки — галочкой ниже.
               {:else}CSV/XLSX anchor,link,count — тексты сгенерит AI или возьмём из библиотеки (reuse). Генерация отдельной полосой, не блокирует постинг.
               {/if}
             </p>
@@ -752,6 +811,23 @@
                    class="mt-1 w-full text-sm" />
             {#if newFile}<p class="mt-1 text-xs text-slate-500">{newFile.name} · {(newFile.size / 1024).toFixed(1)} KB</p>{/if}
           </div>
+
+          <!-- csv_direct: инжект ссылки в тело (опционально) -->
+          {#if postSource === 'csv_direct'}
+            <label class="flex items-start gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
+              <input type="checkbox" bind:checked={csvInjectLink} class="mt-0.5 rounded border-slate-300" />
+              <span>
+                <span class="font-medium text-slate-700">Инжектить ссылку в текст</span>
+                <span class="mt-0.5 block text-[11px] leading-relaxed text-slate-500">
+                  Вставить <code class="rounded bg-slate-100 px-1">link</code> с анкором
+                  <code class="rounded bg-slate-100 px-1">anchor</code> в тело: обернём вхождение анкора
+                  (или значимое слово), иначе добавим ссылку в содержательный абзац. Старые
+                  <code class="rounded bg-slate-100 px-1">&lt;a&gt;</code> в тексте при этом вычищаются.
+                  Выкл — тело постится как есть.
+                </span>
+              </span>
+            </label>
+          {/if}
 
           <!-- генерация/reuse — режим + AI -->
           {#if postSource === 'gen'}

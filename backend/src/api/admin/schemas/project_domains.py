@@ -98,3 +98,12 @@ class DomainRunRow(BaseModel):
     total: int
     posted: int
     failed: int
+
+
+class DomainPlacementRow(BaseModel):
+    posted_url: str | None = None
+    link_url: str | None = None
+    anchor: str = ""
+    verified: bool | None = None
+    posted_at: str | None = None
+    type: str = "post"

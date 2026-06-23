@@ -11,7 +11,7 @@
     users as usersApi,
   } from '$lib/api/admin'
   import { ApiError } from '$lib/api/client'
-  import type { Group, Project, Role, UserDetail } from '$lib/api/types'
+  import type { Group, Project, ProjectListItem, Role, User, UserDetail } from '$lib/api/types'
   import { showToast } from '$lib/stores/toast'
   import { currentUser } from '$lib/stores/user'
 
@@ -37,6 +37,35 @@
   let isSuper = $derived($currentUser?.is_super_admin ?? false)
   let isSelf = $derived($currentUser?.id === userId)
 
+  // ─── Проекты во владении + переназначение (super_admin only) ────────
+  // Деривим из уже загруженного allProjects (тот же источник, что и «Project
+  // access» выше) — без отдельного фетча и гонок с загрузкой currentUser.
+  let allUsers = $state<User[]>([])
+  // project_id → выбранный в строке новый владелец (по умолчанию текущий = userId)
+  let rowTarget = $state<Record<number, number>>({})
+  let reassignBusy = $state<number | null>(null)
+  let ownedProjects = $derived(
+    (allProjects as ProjectListItem[]).filter((p) => p.owner.id === userId),
+  )
+
+  function userName(id: number): string {
+    return allUsers.find((u) => u.id === id)?.username ?? String(id)
+  }
+
+  async function reassignOne(p: ProjectListItem, targetId: number) {
+    if (targetId === userId) return
+    reassignBusy = p.id
+    try {
+      await projectsApi.reassignOwner(p.id, targetId)
+      showToast('success', `«${p.name}» → @${userName(targetId)}`)
+      await loadAux() // allProjects перечитается → проект уйдёт из ownedProjects
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    } finally {
+      reassignBusy = null
+    }
+  }
+
   async function load() {
     loading = true
     try {
@@ -60,14 +89,17 @@
 
   async function loadAux() {
     try {
-      const [g, r, p] = await Promise.all([
+      const [g, r, p, u] = await Promise.all([
         groupsApi.list().catch(() => [] as Group[]),
         rolesApi.list().catch(() => [] as Role[]),
         projectsApi.list({ limit: 200 }).catch(() => ({ items: [] as Project[], next_cursor: null, has_more: false })),
+        usersApi.list({ limit: 200 }).catch(() => ({ items: [] as User[], next_cursor: null, has_more: false })),
       ])
       allGroups = g
-      allRoles = r
+      // Роль supplier назначается только через «Доступы поставщиков», не вручную.
+      allRoles = r.filter((role) => role.name !== 'supplier')
       allProjects = p.items
+      allUsers = u.items
     } catch {
       /* noop */
     }
@@ -114,13 +146,19 @@
     return sa.every((v, i) => v === sb[i])
   }
 
-  // Какие проекты дают группа/owner и т.п. — для отображения "уже есть доступ"
+  // Какие проекты дают группа/owner и т.п. — для отображения "уже есть доступ".
+  // Зеркалит backend can_view_project: доступ по owner_group получает ТОЛЬКО
+  // group_admin своей группы; обычному члену группы owner_group НЕ даёт доступ —
+  // только явный share проекта на его группу (shared_with_groups).
   function inheritedAccess(p: Project): string | null {
-    if (!user) return null
-    if (p.owner.id === user.id) return 'owner'
-    if (user.group && p.owner_group?.id === user.group.id) return `group #${user.group.name}`
-    if (user.group && p.shared_with_groups.some((g) => g.id === user.group?.id))
-      return `shared with #${user.group.name}`
+    const u = user
+    if (!u) return null
+    if (p.owner.id === u.id) return 'owner'
+    const isGroupAdmin = u.roles?.some((r) => r.name === 'group_admin') ?? false
+    if (isGroupAdmin && u.group && p.owner_group?.id === u.group.id)
+      return `group #${u.group.name} (admin)`
+    if (u.group && p.shared_with_groups.some((g) => g.id === u.group?.id))
+      return `shared with #${u.group.name}`
     return null
   }
 </script>
@@ -141,7 +179,7 @@
       User not found
     </div>
   {:else}
-    <form onsubmit={save} class="space-y-6">
+    <form id="user-edit-form" onsubmit={save} class="space-y-6">
       <!-- Identity block -->
       <section class="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
         <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -224,7 +262,10 @@
       <section class="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
         <h2 class="text-base font-medium text-slate-900">Project access</h2>
         <p class="mt-1 text-xs text-slate-500">
-          Индивидуальный shared доступ. Проекты, к которым у юзера уже есть доступ через owner или группу — помечены.
+          Отметь проекты → выдать этому юзеру индивидуальный доступ.
+          <span class="font-medium text-indigo-600">фиолетовый</span> — он владелец;
+          <span class="font-medium text-emerald-600">зелёный</span> — доступ уже есть (через группу или индивидуальный share);
+          серый — доступа нет. Owner/группа — read-only (галка заблокирована).
         </p>
 
         {#if allProjects.length === 0}
@@ -233,10 +274,16 @@
           <div class="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {#each allProjects as p}
               {@const inherited = inheritedAccess(p)}
-              <label class="flex items-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm"
-                     class:bg-emerald-50={inherited}
-                     class:border-emerald-200={inherited}
-                     class:bg-slate-50={!inherited}>
+              {@const isOwner = inherited === 'owner'}
+              {@const indivShared = !inherited && f_project_ids.includes(p.id)}
+              {@const hasShare = !isOwner && (!!inherited || indivShared)}
+              <label class="flex items-center gap-2 rounded-md border px-3 py-2 text-sm"
+                     class:bg-indigo-50={isOwner}
+                     class:border-indigo-200={isOwner}
+                     class:bg-emerald-50={hasShare}
+                     class:border-emerald-200={hasShare}
+                     class:bg-slate-50={!isOwner && !hasShare}
+                     class:border-slate-200={!isOwner && !hasShare}>
                 <input
                   type="checkbox"
                   value={p.id}
@@ -248,28 +295,93 @@
                   }}
                 />
                 <div class="flex-1">
-                  <div class="font-medium text-slate-900">{p.name}</div>
-                  <div class="text-xs text-slate-400">
-                    @{p.owner.username}
-                    {#if inherited}· via {inherited}{/if}
+                  <div class="flex flex-wrap items-center gap-1.5">
+                    <span class="font-medium text-slate-900">{p.name}</span>
+                    {#if isOwner}
+                      <span class="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium uppercase text-indigo-700">владелец</span>
+                    {:else if inherited}
+                      <span class="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700">{inherited}</span>
+                    {:else if indivShared}
+                      <span class="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium uppercase text-emerald-700">shared</span>
+                    {/if}
                   </div>
+                  <div class="text-xs text-slate-400">@{p.owner.username}</div>
                 </div>
               </label>
             {/each}
           </div>
         {/if}
       </section>
-
-      <div class="flex items-center justify-between">
-        <button type="button" onclick={() => goto('/users')}
-                class="text-sm text-slate-500 hover:text-slate-700">
-          Cancel
-        </button>
-        <button type="submit" disabled={saving}
-                class="rounded-md bg-brand-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-brand-700 disabled:bg-slate-300">
-          {saving ? 'Saving…' : 'Save changes'}
-        </button>
-      </div>
     </form>
+
+    <!-- Проекты во владении + переназначение (super_admin only) -->
+    {#if isSuper}
+      <section class="rounded-lg border border-violet-200 bg-white p-6 shadow-sm">
+        <div class="flex items-center gap-2">
+          <h2 class="text-base font-medium text-slate-900">Проекты во владении</h2>
+          <span class="rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-semibold uppercase text-violet-700">super admin</span>
+          <span class="text-xs text-slate-400">{ownedProjects.length}</span>
+        </div>
+        <p class="mt-1 text-xs text-slate-500">
+          Проекты, где @{user.username} — владелец. Переназначь их другому пользователю (например, когда
+          сотрудник ушёл) — прогоны, домены, креды и общий доступ перейдут вместе с проектом, ничего не теряется.
+        </p>
+
+        {#if ownedProjects.length === 0}
+          <p class="mt-3 text-sm text-slate-400">У пользователя нет проектов во владении.</p>
+        {:else}
+          <div class="mt-3 overflow-hidden rounded-md border border-slate-200">
+            <table class="min-w-full text-sm">
+              <thead class="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
+                <tr>
+                  <th class="px-3 py-2">Проект</th>
+                  <th class="px-3 py-2">Владелец</th>
+                  <th class="w-px px-3 py-2"></th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-slate-100">
+                {#each ownedProjects as p (p.id)}
+                  {@const target = rowTarget[p.id] ?? userId}
+                  <tr class="hover:bg-slate-50">
+                    <td class="px-3 py-2">
+                      <a href={`/projects/${p.id}`} class="font-medium text-brand-600 hover:underline">{p.name}</a>
+                      {#if !p.is_active}<span class="ml-1 text-[10px] uppercase text-slate-400">inactive</span>{/if}
+                    </td>
+                    <td class="px-3 py-2">
+                      <select
+                        value={target}
+                        onchange={(e) => (rowTarget = { ...rowTarget, [p.id]: Number(e.currentTarget.value) })}
+                        class="rounded-md border border-slate-300 px-2 py-1 text-sm">
+                        {#each allUsers as u}
+                          <option value={u.id}>@{u.username}{u.id === userId ? ' · текущий' : ''}</option>
+                        {/each}
+                      </select>
+                    </td>
+                    <td class="px-3 py-2 text-right">
+                      <button type="button" onclick={() => reassignOne(p, target)}
+                              disabled={target === userId || reassignBusy !== null}
+                              class="whitespace-nowrap rounded border border-violet-300 px-2 py-1 text-xs font-medium text-violet-700 hover:bg-violet-50 disabled:opacity-50">
+                        {reassignBusy === p.id ? '…' : 'Переназначить →'}
+                      </button>
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
+      </section>
+    {/if}
+
+    <div class="flex items-center justify-between">
+      <button type="button" onclick={() => goto('/users')}
+              class="text-sm text-slate-500 hover:text-slate-700">
+        Cancel
+      </button>
+      <button type="submit" form="user-edit-form" disabled={saving}
+              class="rounded-md bg-brand-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-brand-700 disabled:bg-slate-300">
+        {saving ? 'Saving…' : 'Save changes'}
+      </button>
+    </div>
   {/if}
 </div>

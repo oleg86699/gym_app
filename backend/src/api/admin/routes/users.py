@@ -86,14 +86,22 @@ async def list_users_endpoint(
 async def _validate_role_assignment(
     session: AsyncSession, viewer: AdminUser, role_ids: list[int]
 ) -> None:
-    """group_admin может назначать только assignable роли."""
-    if viewer.is_super_admin or not role_ids:
+    """Роль supplier назначается ТОЛЬКО через «Доступы поставщиков» (временные
+    аккаунты), не вручную — даже super_admin'у. group_admin — только assignable роли."""
+    if not role_ids:
         return
     from sqlalchemy import select as _select
 
     from infrastructure.db.models import AdminRole
 
     rows = (await session.execute(_select(AdminRole).where(AdminRole.id.in_(role_ids)))).scalars().all()
+    if any(r.name == "supplier" for r in rows):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Роль 'supplier' назначается только через «Доступы поставщиков», не вручную.",
+        )
+    if viewer.is_super_admin:
+        return
     bad = [r.name for r in rows if not r.is_assignable_by_group_admin]
     if bad:
         raise HTTPException(

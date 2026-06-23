@@ -49,10 +49,11 @@ async def list_users(
     group_id: int | None = None,
     search: str | None = None,
 ) -> list[AdminUser]:
-    """Список юзеров с учётом scope viewer."""
+    """Список юзеров с учётом scope viewer. Временные supplier-аккаунты
+    (is_temporary) сюда НЕ попадают — они только на странице «Доступы поставщиков»."""
     stmt = (
         select(AdminUser)
-        .where(AdminUser.deleted_at.is_(None))
+        .where(AdminUser.deleted_at.is_(None), AdminUser.is_temporary.is_(False))
         .options(
             selectinload(AdminUser.group),
             selectinload(AdminUser.roles),

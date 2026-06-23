@@ -40,6 +40,7 @@ import type {
   DomainSummary,
   DomainItemsResponse,
   DomainRunRow,
+  DomainPlacement,
   QueueResponse,
   GlobalQueueSnapshot,
   RunProgress,
@@ -132,9 +133,11 @@ export const groups = {
 // ─── Projects ────────────────────────────────────────────────────────
 
 export const projects = {
-  list: (query?: { cursor?: string; limit?: number; search?: string }) =>
+  list: (query?: { cursor?: string; limit?: number; search?: string; owner_id?: number }) =>
     api.get<Paginated<Project>>('/admin/api/projects', query as Record<string, string | number | undefined>),
   get: (id: number) => api.get<Project>(`/admin/api/projects/${id}`),
+  reassignOwner: (id: number, new_owner_id: number) =>
+    api.post<Project>(`/admin/api/projects/${id}/reassign-owner`, { new_owner_id }),
   create: (payload: { name: string; description?: string }) =>
     api.post<Project>('/admin/api/projects', payload),
   update: (
@@ -166,6 +169,8 @@ export const projects = {
     ),
   domainRuns: (id: number, domain: string) =>
     api.get<DomainRunRow[]>(`/admin/api/projects/${id}/domains/${encodeURIComponent(domain)}/runs`),
+  domainPlacements: (id: number, domain: string) =>
+    api.get<DomainPlacement[]>(`/admin/api/projects/${id}/domains/${encodeURIComponent(domain)}/placements`),
 }
 
 // ─── Roles & permissions ─────────────────────────────────────────────
@@ -267,6 +272,7 @@ export interface SupplierAccessItem {
   created_at: string
   last_login_at: string | null
   handover: 'password' | 'link'
+  password: string | null   // расшифрованный пароль (super_admin-only эндпоинт)
 }
 
 export const supplierAccess = {
@@ -651,6 +657,10 @@ export const postings = {
     api.patch<PostingRun>(`/admin/api/postings/${runId}`, payload),
   start: (runId: number) =>
     api.post<{ ok: boolean; run_id: number; status: string }>(`/admin/api/postings/${runId}/start`),
+  validateLinks: (runId: number) =>
+    api.post<{ ok: boolean; run_id: number; total: number }>(
+      `/admin/api/postings/${runId}/validate-links`,
+    ),
   restart: (runId: number) =>
     api.post<{ ok: boolean; run_id: number; status: string; items_reset: number }>(
       `/admin/api/postings/${runId}/restart`,

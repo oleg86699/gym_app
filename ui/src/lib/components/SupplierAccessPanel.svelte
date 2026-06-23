@@ -1,12 +1,19 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { Check } from 'lucide-svelte'
+  import { Check, Copy, Eye, EyeOff } from 'lucide-svelte'
   import { supplierAccess, type SupplierAccessCreated, type SupplierAccessItem } from '$lib/api/admin'
   import { ApiError } from '$lib/api/client'
   import { showToast } from '$lib/stores/toast'
 
   let items = $state<SupplierAccessItem[]>([])
   let loading = $state(true)
+  let revealed = $state<Set<number>>(new Set())
+
+  function toggleReveal(id: number) {
+    if (revealed.has(id)) revealed.delete(id)
+    else revealed.add(id)
+    revealed = new Set(revealed)
+  }
 
   let createOpen = $state(false)
   let busy = $state(false)
@@ -99,6 +106,7 @@
         <thead class="border-b border-slate-200 text-left text-xs uppercase tracking-wider text-slate-400">
           <tr>
             <th class="py-2 pr-3">Логин</th>
+            <th class="py-2 pr-3">Пароль</th>
             <th class="py-2 pr-3">Заметка</th>
             <th class="py-2 pr-3">Передача</th>
             <th class="py-2 pr-3">Статус</th>
@@ -112,6 +120,24 @@
             {@const st = statusLabel(it)}
             <tr>
               <td class="py-2 pr-3 font-mono text-xs text-slate-700">{it.username}</td>
+              <td class="py-2 pr-3">
+                {#if it.password}
+                  {@const shown = revealed.has(it.user_id)}
+                  <div class="flex items-center gap-1.5">
+                    <code class="font-mono text-xs text-slate-700">{shown ? it.password : '••••••••'}</code>
+                    <button type="button" onclick={() => toggleReveal(it.user_id)}
+                            class="text-slate-400 hover:text-slate-600" title={shown ? 'скрыть' : 'показать'}>
+                      {#if shown}<EyeOff size={13} />{:else}<Eye size={13} />{/if}
+                    </button>
+                    <button type="button" onclick={() => copy(it.password ?? '', `pw-${it.user_id}`)}
+                            class="text-brand-600 hover:text-brand-700" title="копировать">
+                      {#if copied === `pw-${it.user_id}`}<Check size={13} />{:else}<Copy size={13} />{/if}
+                    </button>
+                  </div>
+                {:else}
+                  <span class="text-slate-300" title="пароль не сохранён (старый аккаунт или magic-link)">—</span>
+                {/if}
+              </td>
               <td class="py-2 pr-3 text-slate-600">{it.note ?? '—'}</td>
               <td class="py-2 pr-3 text-slate-500">{it.handover === 'link' ? 'ссылка' : 'логин+пароль'}</td>
               <td class="py-2 pr-3"><span class="rounded px-1.5 py-0.5 text-[11px] font-medium {st.cls}">{st.text}</span></td>

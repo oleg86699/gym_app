@@ -137,6 +137,7 @@ async def list_projects(
     after_id: int | None = None,
     limit: int = 50,
     search: str | None = None,
+    owner_id: int | None = None,
 ) -> list[Project]:
     stmt = (
         select(Project)
@@ -157,7 +158,24 @@ async def list_projects(
         like = f"%{search.strip()}%"
         stmt = stmt.where(Project.name.ilike(like))
 
+    if owner_id is not None:
+        stmt = stmt.where(Project.owner_user_id == owner_id)
+
     return list((await session.execute(stmt)).scalars().unique().all())
+
+
+async def reassign_project_owner(
+    session: AsyncSession, *, project: Project, new_owner: AdminUser,
+) -> Project:
+    """Сменить владельца проекта (super_admin-only действие). Обновляем
+    owner_user_id и денорм-кэш owner_group_id (используется в scope-фильтрах).
+    Прогоны/домены/креды/шеры привязаны к project_id и переходят автоматически."""
+    project.owner_user_id = new_owner.id
+    project.owner_group_id = new_owner.group_id
+    await session.commit()
+    refreshed = await get_project(session, project.id)
+    assert refreshed is not None
+    return refreshed
 
 
 async def get_project(session: AsyncSession, project_id: int) -> Project | None:

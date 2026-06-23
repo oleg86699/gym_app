@@ -43,7 +43,8 @@
         groups = []
       }
       try {
-        roles = await rolesApi.list()
+        // supplier назначается только через «Доступы поставщиков», не вручную.
+        roles = (await rolesApi.list()).filter((r) => r.name !== 'supplier')
       } catch {
         roles = []
       }

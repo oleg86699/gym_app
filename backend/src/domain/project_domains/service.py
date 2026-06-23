@@ -397,6 +397,40 @@ async def domain_runs(session: AsyncSession, project_id: int, domain: str) -> li
     } for r in rows]
 
 
+async def domain_placements(session: AsyncSession, project_id: int, domain: str) -> list[dict]:
+    """Все проставленные (status=posted) ссылки на домен: где стоит (posted_url),
+    на какую ссылку (link_url), анкор, тип (post/sitewide_link/homepage_link — из
+    task_type прогона), отметка верификации. Фронт группирует по анкору/ссылке —
+    видно, какой анкор/линк ещё нужно «дожать» новыми ссылками."""
+    nd = normalize_domain(domain) or domain
+    rows = (await session.execute(
+        select(
+            TextItem.posted_url,
+            TextItem.link_url,
+            TextItem.link_anchor,
+            TextItem.link_verified,
+            TextItem.posted_at,
+            PostingRun.task_type,
+        )
+        .join(PostingRun, PostingRun.id == TextItem.posting_run_id)
+        .where(
+            TextItem.project_id == project_id,
+            TextItem.target_domain == nd,
+            TextItem.status == TextItemStatus.POSTED.value,
+        )
+        .order_by(TextItem.posted_at.desc())
+        .limit(5000)
+    )).all()
+    return [{
+        "posted_url": r[0],
+        "link_url": r[1],
+        "anchor": r[2] or "",
+        "verified": r[3],
+        "posted_at": r[4].isoformat() if r[4] else None,
+        "type": r[5],
+    } for r in rows]
+
+
 async def domain_items(
     session: AsyncSession, project_id: int, domain: str, *,
     after_id: int | None = None, status: str | None = None, limit: int = 50,

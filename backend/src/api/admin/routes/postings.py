@@ -38,6 +38,7 @@ from api.admin.schemas.postings import (
     CreateSpinRunParams,
     PostingRunResponse,
     QueueItem,
+    QueueLinkCheckItem,
     QueueResponse,
     ResolveBulkRequest,
     RunProgressResponse,
@@ -320,6 +321,14 @@ async def create_csv_direct_run(
         post_verify=parsed.post_verify,
     )
     await _store_site_filter(session, run.id, parsed.site_langs, parsed.site_tlds)
+    if parsed.csv_inject_link:
+        # Флаг «инжектить ссылку из строки в текст» — читается воркером csv_direct.
+        gp = (await session.scalar(
+            select(PostingRun.gen_params).where(PostingRun.id == run.id))) or {}
+        gp["csv_inject_link"] = True
+        await session.execute(update(PostingRun).where(PostingRun.id == run.id)
+                              .values(gen_params=gp))
+        await session.commit()
     log.info("postings.created.csv_direct", run_id=run.id, project_id=project_id, actor_id=viewer.id)
     await audit_record(session, actor=viewer, action="postings.create_csv_direct",
                        resource_type="run", resource_id=run.id, request=request,
@@ -1031,7 +1040,33 @@ async def global_queue_endpoint(
         )
         for r in rows
     ]
-    return QueueResponse(items=items, total=len(items))
+
+    # Активные перепроверки ссылок (link-check) — отдельная нагрузка на сервер,
+    # чтобы очередь не выглядела пустой, пока идёт валидация завершённых прогонов.
+    lc_rows = list((await session.execute(
+        select(
+            PostingRun.id, PostingRun.name, PostingRun.link_check_status,
+            PostingRun.link_check_total, PostingRun.link_check_done,
+            PostingRun.link_check_valid, PostingRun.created_by,
+            Project.name.label("project_name"),
+            AU.username.label("creator_username"),
+        )
+        .join(Project, Project.id == PostingRun.project_id)
+        .outerjoin(AU, AU.id == PostingRun.created_by)
+        .where(PostingRun.deleted_at.is_(None),
+               PostingRun.link_check_status.in_(("queued", "running")))
+        .order_by(PostingRun.id)
+    )).all())
+    link_checks = [
+        QueueLinkCheckItem(
+            id=r.id, name=r.name, project_name=r.project_name,
+            creator_username=r.creator_username, status=r.link_check_status,
+            total=r.link_check_total or 0, done=r.link_check_done or 0,
+            valid=r.link_check_valid or 0, is_mine=(r.created_by == viewer.id),
+        )
+        for r in lc_rows
+    ]
+    return QueueResponse(items=items, total=len(items), link_checks=link_checks)
 
 
 # ─── Get single run ──────────────────────────────────────────────────
@@ -1316,6 +1351,63 @@ async def start_run_endpoint(
     return {"ok": True, "run_id": run_id, "status": PostingRunStatus.QUEUED.value}
 
 
+@postings_router.post("/{run_id}/validate-links", status_code=status.HTTP_202_ACCEPTED)
+async def validate_links_endpoint(
+    run_id: int,
+    viewer: AdminUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_write),
+) -> dict:
+    """Перепроверить уже-валидные бэклинки завершённого прогона.
+
+    Отдельная фоновая задача (TaskIQ) — перефетчит страницы постов и обновит
+    отметку link_verified. Доступно ТОЛЬКО после завершения постинга (status=done).
+    Видна в глобальной очереди как отдельный (фиолетовый) тип задач.
+    """
+    run, _ = await _load_run_or_403(session, run_id, viewer, manage=True)
+    if run.status != PostingRunStatus.DONE.value:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Link validation is available only after posting is finished (status 'done').",
+        )
+    if run.link_check_status == "running":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Link validation is already running for this run.",
+        )
+    target = int(await session.scalar(
+        select(func.count(TextItem.id)).where(
+            TextItem.posting_run_id == run_id,
+            TextItem.status == TextItemStatus.POSTED.value,
+            TextItem.link_verified.is_(True),
+            TextItem.posted_url.isnot(None),
+            TextItem.target_domain.isnot(None),
+        )
+    ) or 0)
+    if target == 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No verified links to re-validate in this run.",
+        )
+    await session.execute(
+        update(PostingRun).where(PostingRun.id == run_id).values(
+            link_check_status="queued",
+            link_check_total=target,
+            link_check_done=0,
+            link_check_valid=0,
+        )
+    )
+    await session.commit()
+
+    from workers.taskiq.validate_links import validate_run_links
+    await validate_run_links.kiq(run_id)
+    log.info("postings.validate_links_requested", run_id=run_id, actor_id=viewer.id, total=target)
+    await audit_record(
+        session, actor=viewer, action="postings.validate_links",
+        resource_type="run", resource_id=run_id,
+    )
+    return {"ok": True, "run_id": run_id, "total": target}
+
+
 @postings_router.post("/{run_id}/restart", status_code=status.HTTP_202_ACCEPTED)
 async def restart_run_endpoint(
     run_id: int,
@@ -1557,6 +1649,7 @@ _EXPORT_HEADER = [
     "site_domain",
     "credential_login",
     "posted_url",
+    "link_verified",
     "post_id",
     "attempts",
     "posted_at",
@@ -1591,6 +1684,7 @@ def _export_row(item: TextItem) -> list:
         item.site.domain if item.site else "",
         item.credential.login if item.credential else "",
         item.posted_url or "",
+        ("" if item.link_verified is None else ("valid" if item.link_verified else "invalid")),
         item.post_id,
         item.attempts or 0,
         item.posted_at.isoformat() if item.posted_at else "",
@@ -1599,12 +1693,21 @@ def _export_row(item: TextItem) -> list:
     ]
 
 
-async def _iter_text_items(session: AsyncSession, run_id: int) -> AsyncIterator[TextItem]:
+async def _iter_text_items(
+    session: AsyncSession, run_id: int, *, verified_only: bool = False,
+) -> AsyncIterator[TextItem]:
     after_id = 0
     while True:
+        conds = [TextItem.posting_run_id == run_id, TextItem.id > after_id]
+        if verified_only:
+            # «Только валидные» — проставленные посты с подтверждённым бэклинком.
+            conds += [
+                TextItem.status == TextItemStatus.POSTED.value,
+                TextItem.link_verified.is_(True),
+            ]
         stmt = (
             select(TextItem)
-            .where(TextItem.posting_run_id == run_id, TextItem.id > after_id)
+            .where(*conds)
             .options(selectinload(TextItem.site), selectinload(TextItem.credential),
                      selectinload(TextItem.text))
             .order_by(TextItem.id)
@@ -1623,7 +1726,9 @@ async def _iter_text_items(session: AsyncSession, run_id: int) -> AsyncIterator[
 # ── CSV stream ────────────────────────────────────────────────────
 
 
-async def _stream_run_csv(session: AsyncSession, run_id: int) -> AsyncIterator[bytes]:
+async def _stream_run_csv(
+    session: AsyncSession, run_id: int, *, verified_only: bool = False,
+) -> AsyncIterator[bytes]:
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\n")
     writer.writerow(_EXPORT_HEADER)
@@ -1632,7 +1737,7 @@ async def _stream_run_csv(session: AsyncSession, run_id: int) -> AsyncIterator[b
     buf.truncate()
 
     n = 0
-    async for item in _iter_text_items(session, run_id):
+    async for item in _iter_text_items(session, run_id, verified_only=verified_only):
         writer.writerow([str(c) if c is not None else "" for c in _export_row(item)])
         n += 1
         if n % _EXPORT_BATCH == 0:
@@ -1647,11 +1752,13 @@ async def _stream_run_csv(session: AsyncSession, run_id: int) -> AsyncIterator[b
 # ── JSON stream ───────────────────────────────────────────────────
 
 
-async def _stream_run_json(session: AsyncSession, run_id: int) -> AsyncIterator[bytes]:
+async def _stream_run_json(
+    session: AsyncSession, run_id: int, *, verified_only: bool = False,
+) -> AsyncIterator[bytes]:
     """JSON array, стримим построчно (`[{},\n{},\n…]`)."""
     yield b"[\n"
     first = True
-    async for item in _iter_text_items(session, run_id):
+    async for item in _iter_text_items(session, run_id, verified_only=verified_only):
         row = _export_row(item)
         obj = dict(zip(_EXPORT_HEADER, row, strict=True))
         prefix = b"" if first else b",\n"
@@ -1663,7 +1770,9 @@ async def _stream_run_json(session: AsyncSession, run_id: int) -> AsyncIterator[
 # ── XLSX (binary, не стримим — собираем в BytesIO) ────────────────
 
 
-async def _build_run_xlsx(session: AsyncSession, run_id: int) -> bytes:
+async def _build_run_xlsx(
+    session: AsyncSession, run_id: int, *, verified_only: bool = False,
+) -> bytes:
     """
     openpyxl не поддерживает чистый stream-write красиво, поэтому собираем
     workbook в памяти. Для 100К строк это ~10 МБ, приемлемо. Если когда-то
@@ -1675,7 +1784,7 @@ async def _build_run_xlsx(session: AsyncSession, run_id: int) -> bytes:
     ws = wb.active
     ws.title = f"run-{run_id}"
     ws.append(_EXPORT_HEADER)
-    async for item in _iter_text_items(session, run_id):
+    async for item in _iter_text_items(session, run_id, verified_only=verified_only):
         ws.append(_export_row(item))
 
     # posted_url как hyperlink (нагляднее в Excel)
@@ -1694,12 +1803,14 @@ async def _build_run_xlsx(session: AsyncSession, run_id: int) -> bytes:
 # ── Endpoint ──────────────────────────────────────────────────────
 
 
-async def _build_run_txt_zip(session: AsyncSession, run_id: int) -> bytes:
+async def _build_run_txt_zip(
+    session: AsyncSession, run_id: int, *, verified_only: bool = False,
+) -> bytes:
     """Zip из .txt: 1 файл = постированное тело (texts.body материализованного
     варианта). Имя = {item_id}_{домен}.txt (item_id уникален → коллизий нет)."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        async for item in _iter_text_items(session, run_id):
+        async for item in _iter_text_items(session, run_id, verified_only=verified_only):
             body = item.text.body if item.text else ""
             dom = item.target_domain or (item.site.domain if item.site else "")
             base = re.sub(r"[^A-Za-z0-9._-]+", "_", f"{item.id}_{dom}").strip("_") or str(item.id)
@@ -1711,33 +1822,37 @@ async def _build_run_txt_zip(session: AsyncSession, run_id: int) -> bytes:
 async def download_run_result(
     run_id: int,
     format: str = Query(default="csv", pattern="^(csv|xlsx|json|txt)$"),
+    verified_only: bool = Query(default=False),
     viewer: AdminUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_read),
 ) -> StreamingResponse:
     await _load_run_or_403(session, run_id, viewer)
 
+    # Суффикс имени файла, чтобы «только валидные» не перепутать с полной выгрузкой.
+    suffix = "-valid" if verified_only else ""
+
     if format == "txt":
-        data = await _build_run_txt_zip(session, run_id)
+        data = await _build_run_txt_zip(session, run_id, verified_only=verified_only)
         return StreamingResponse(
             iter([data]), media_type="application/zip",
-            headers={"Content-Disposition": f'attachment; filename="run-{run_id}-texts.zip"'},
+            headers={"Content-Disposition": f'attachment; filename="run-{run_id}{suffix}-texts.zip"'},
         )
     if format == "csv":
         return StreamingResponse(
-            _stream_run_csv(session, run_id),
+            _stream_run_csv(session, run_id, verified_only=verified_only),
             media_type="text/csv; charset=utf-8",
-            headers={"Content-Disposition": f'attachment; filename="run-{run_id}.csv"'},
+            headers={"Content-Disposition": f'attachment; filename="run-{run_id}{suffix}.csv"'},
         )
     if format == "json":
         return StreamingResponse(
-            _stream_run_json(session, run_id),
+            _stream_run_json(session, run_id, verified_only=verified_only),
             media_type="application/json; charset=utf-8",
-            headers={"Content-Disposition": f'attachment; filename="run-{run_id}.json"'},
+            headers={"Content-Disposition": f'attachment; filename="run-{run_id}{suffix}.json"'},
         )
     # xlsx
-    data = await _build_run_xlsx(session, run_id)
+    data = await _build_run_xlsx(session, run_id, verified_only=verified_only)
     return StreamingResponse(
         iter([data]),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="run-{run_id}.xlsx"'},
+        headers={"Content-Disposition": f'attachment; filename="run-{run_id}{suffix}.xlsx"'},
     )

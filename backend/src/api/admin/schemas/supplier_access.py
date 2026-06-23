@@ -38,6 +38,9 @@ class SupplierAccessItem(BaseModel):
     created_at: datetime
     last_login_at: datetime | None = None
     handover: str  # "link" если есть login_token_hash, иначе "password"
+    # Расшифрованный пароль supplier-аккаунта (эндпоинт только для super_admin).
+    # None у старых аккаунтов, созданных до фичи (пароль был только в hash).
+    password: str | None = None
 
 
 class SupplierAccessListResponse(BaseModel):

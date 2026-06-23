@@ -79,6 +79,14 @@ class PostingRunResponse(BaseModel):
     finished_at: datetime | None
     worker_heartbeat_at: datetime | None
 
+    # Перепроверка проставленных ссылок (link-check) — фоновая задача после
+    # завершения постинга. status: NULL|queued|running|done.
+    link_check_status: str | None = None
+    link_check_total: int = 0
+    link_check_done: int = 0
+    link_check_valid: int = 0
+    link_check_at: datetime | None = None
+
     source_archive_storage_key: str | None
 
     created_at: datetime
@@ -107,9 +115,26 @@ class QueueItem(BaseModel):
     is_mine: bool = False    # выставляет endpoint в зависимости от viewer-а
 
 
+class QueueLinkCheckItem(BaseModel):
+    """Активная перепроверка проставленных ссылок (link-check) — отдельный
+    (фиолетовый) тип нагрузки, чтобы очередь не выглядела пустой во время неё."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    project_name: str
+    creator_username: str | None = None
+    status: str  # queued | running
+    total: int
+    done: int
+    valid: int
+    is_mine: bool = False
+
+
 class QueueResponse(BaseModel):
     items: list[QueueItem]
     total: int
+    link_checks: list[QueueLinkCheckItem] = []
 
 
 class UpdateRunParams(BaseModel):
@@ -162,6 +187,10 @@ class CreateRunParams(BaseModel):
     #   site_langs="en,fr,de"   site_tlds="us,uk,au"
     site_langs: str | None = Field(default=None, max_length=200)
     site_tlds: str | None = Field(default=None, max_length=200)
+    # CSV-direct: инжектить ли ссылку из колонки link в тело (колонку text).
+    # False (default) — тело постится как есть (ссылка должна быть уже в тексте).
+    # True → применяем inject_link(body, link, anchor), как в Reuse-пути.
+    csv_inject_link: bool = False
 
     # ─── csv_campaign (Content Engine): режим контента + AI ───
     # gen_per_post — уникальный текст на каждый пост; gen_per_row — 1 текст/строку

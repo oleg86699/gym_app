@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte'
-  import { Activity, CheckCircle2 } from 'lucide-svelte'
+  import { Activity, CheckCheck, CheckCircle2 } from 'lucide-svelte'
 
   import { globalQueue as queueApi } from '$lib/api/admin'
   import { ApiError } from '$lib/api/client'
@@ -196,6 +196,39 @@
         </div>
       {/if}
     </section>
+
+    <!-- Link-check lane — перепроверка проставленных ссылок (фиолетовый тип) -->
+    {#if snap.link_checks.length > 0}
+      <section class="rounded-lg border border-violet-200 bg-white">
+        <div class="flex items-center justify-between border-b border-violet-100 bg-violet-50/50 px-5 py-3">
+          <div class="flex items-center gap-2">
+            <CheckCheck size={16} class="text-violet-500" />
+            <h2 class="text-sm font-semibold text-violet-800">Валидация проставленных ссылок</h2>
+          </div>
+          <span class="text-xs text-violet-400">активных: {snap.summary.link_check_active}</span>
+        </div>
+        <div class="divide-y divide-violet-50">
+          {#each snap.link_checks as lc (lc.id)}
+            <a href={`/runs/${lc.id}`} class="flex items-center gap-4 px-5 py-3 hover:bg-violet-50/60">
+              <div class="min-w-0 flex-1">
+                <div class="flex items-center gap-2">
+                  <span class="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-violet-700">проверка ссылок</span>
+                  <span class="truncate text-sm font-medium text-slate-800">{lc.name}</span>
+                  <span class="rounded-full px-2 py-0.5 text-[10px] font-medium uppercase {lc.status === 'running' ? 'bg-violet-100 text-violet-700' : 'bg-blue-100 text-blue-700'}">{lc.status}</span>
+                </div>
+                <div class="mt-1.5 flex items-center gap-3">
+                  <div class="h-1.5 w-40 overflow-hidden rounded-full bg-slate-100">
+                    <div class="h-full rounded-full bg-violet-500 transition-all" style="width: {lc.progress_pct}%"></div>
+                  </div>
+                  <span class="text-[11px] tabular-nums text-slate-500">{lc.done}/{lc.total} ({lc.progress_pct}%)</span>
+                  <span class="text-[11px] text-violet-600">✓ валидных {lc.valid}</span>
+                </div>
+              </div>
+            </a>
+          {/each}
+        </div>
+      </section>
+    {/if}
   {:else}
     <div class="rounded-lg border border-red-200 bg-white p-8 text-center text-sm text-red-600">
       Не удалось загрузить очередь.

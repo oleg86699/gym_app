@@ -66,3 +66,7 @@ class ShareUsersRequest(BaseModel):
 
 class ShareGroupsRequest(BaseModel):
     group_ids: list[int] = Field(default_factory=list)
+
+
+class ReassignOwnerRequest(BaseModel):
+    new_owner_id: int

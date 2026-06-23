@@ -494,6 +494,12 @@ export interface PostingRun {
   started_at: string | null
   finished_at: string | null
   worker_heartbeat_at: string | null
+  // Перепроверка проставленных ссылок (link-check): статус и прогресс.
+  link_check_status: 'queued' | 'running' | 'done' | null
+  link_check_total: number
+  link_check_done: number
+  link_check_valid: number
+  link_check_at: string | null
   source_archive_storage_key: string | null
   created_at: string
 }
@@ -510,6 +516,8 @@ export interface CreateRunParams {
   // Фильтр пула сайтов (через запятую): lang "en,fr", tld "us,uk"
   site_langs?: string | null
   site_tlds?: string | null
+  // csv_direct: инжектить ли ссылку из строки в тело (по умолчанию false)
+  csv_inject_link?: boolean
   // ─── csv_campaign (Content Engine) ───
   content_mode?: 'gen_per_post' | 'gen_per_row' | 'reuse'
   run_mode?: 'auto' | 'manual'
@@ -660,6 +668,15 @@ export interface DomainRunRow {
   total: number
   posted: number
   failed: number
+}
+
+export interface DomainPlacement {
+  posted_url: string | null
+  link_url: string | null
+  anchor: string
+  verified: boolean | null
+  posted_at: string | null
+  type: 'post' | 'sitewide_link' | 'homepage_link'
 }
 
 // ─── Content Engine: spin-fanout (C1) ────────────────────────────────
@@ -818,14 +835,27 @@ export interface QueueValidation {
   started_at: string | null
   finished_at: string | null
 }
+export interface QueueLinkCheck {
+  id: number
+  name: string
+  project_id: number
+  status: 'queued' | 'running'
+  total: number
+  done: number
+  valid: number
+  progress_pct: number
+  started_at: string | null
+}
 export interface GlobalQueueSnapshot {
   limiter: QueueLimiter
   posting: QueuePostingItem[]
   validation: QueueValidation | null
+  link_checks: QueueLinkCheck[]
   summary: {
     posting_active: number
     posting_running: number
     validation_running: boolean
+    link_check_active: number
   }
 }
 
@@ -854,9 +884,21 @@ export interface QueueItem {
   is_mine: boolean
 }
 
+export interface QueueLinkCheckItem {
+  id: number
+  name: string
+  project_name: string
+  creator_username: string | null
+  status: 'queued' | 'running'
+  total: number
+  done: number
+  valid: number
+  is_mine: boolean
+}
 export interface QueueResponse {
   items: QueueItem[]
   total: number
+  link_checks: QueueLinkCheckItem[]
 }
 
 export interface Group {
