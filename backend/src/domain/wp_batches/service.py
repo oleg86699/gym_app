@@ -443,36 +443,43 @@ async def import_csv_as_batch(
     credentials_duplicate = 0
     duplicate_cred_ids: list[int] = []
     if cred_rows:
-        # ON CONFLICT DO NOTHING с возвратом id-шек вставленных
-        stmt = (
-            pg_insert(WpCredential)
-            .values(cred_rows)
-            .on_conflict_do_nothing(
-                index_elements=["site_id", "login"], index_where=_CRED_UNIQ_WHERE
+        # asyncpg/PG: один INSERT не может иметь >32767 bind-параметров. Cred-строка =
+        # 5 колонок → большие CSV (тысячи строк) пробивали лимит ("the number of query
+        # arguments cannot exceed 32767"). Льём чанками (явный multi-row .values() НЕ
+        # авто-чанкается SQLAlchemy, в отличие от ORM-flush).
+        _CHUNK = 5000  # 5000 × 5 колонок = 25000 параметров — с запасом < 32767
+        inserted_ids: set[int] = set()
+        for _i in range(0, len(cred_rows), _CHUNK):
+            chunk = cred_rows[_i:_i + _CHUNK]
+            stmt = (
+                pg_insert(WpCredential)
+                .values(chunk)
+                .on_conflict_do_nothing(
+                    index_elements=["site_id", "login"], index_where=_CRED_UNIQ_WHERE
+                )
+                .returning(WpCredential.id)
             )
-            .returning(WpCredential.id)
-        )
-        inserted_ids = set((await session.execute(stmt)).scalars().all())
+            inserted_ids.update((await session.execute(stmt)).scalars().all())
         credentials_new = len(inserted_ids)
         credentials_duplicate = len(cred_rows) - credentials_new
 
-        # Найти «оригиналы» для тех (site_id, login) пар что не были inserted.
-        # Они уже есть в БД (в других batches или soft-deleted) — выберем их IDs
-        # чтобы filter='duplicates' в UI мог показать что именно было пропущено.
+        # Найти «оригиналы» для пропущенных дубликатов (для filter='duplicates' в UI).
+        # Тоже чанками (tuple_-IN = 2 параметра на пару); уже вставленные отсеиваем в Python.
         if credentials_duplicate > 0:
             from sqlalchemy import tuple_
 
-            target_pairs = [(r["site_id"], r["login"]) for r in cred_rows]
-            conds = [
-                tuple_(WpCredential.site_id, WpCredential.login).in_(target_pairs),
-                WpCredential.deleted_at.is_(None),
-            ]
-            if inserted_ids:
-                conds.append(WpCredential.id.notin_(inserted_ids))
-            originals = await session.execute(
-                select(WpCredential.id).where(*conds)
-            )
-            duplicate_cred_ids = [int(r) for r in originals.scalars().all()]
+            for _i in range(0, len(cred_rows), _CHUNK):
+                chunk = cred_rows[_i:_i + _CHUNK]
+                target_pairs = [(r["site_id"], r["login"]) for r in chunk]
+                rows = await session.execute(
+                    select(WpCredential.id).where(
+                        tuple_(WpCredential.site_id, WpCredential.login).in_(target_pairs),
+                        WpCredential.deleted_at.is_(None),
+                    )
+                )
+                for cid in rows.scalars().all():
+                    if cid not in inserted_ids:
+                        duplicate_cred_ids.append(int(cid))
 
     # 4. Counters на батч
     batch.duplicate_credentials = credentials_duplicate

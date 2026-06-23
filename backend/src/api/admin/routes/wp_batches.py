@@ -812,7 +812,7 @@ async def delete_endpoint(
     actor: AdminUser = Depends(require_page_access("/batches")),
     session: AsyncSession = Depends(get_db_write),
 ):
-    await _batch_or_404(session, batch_id, actor)  # access-check (404 чужой/нет)
+    b = await _batch_or_404(session, batch_id, actor)  # access-check (404) + батч для audit
     await soft_delete_batch(session, batch_id)
     log.info("batches.delete", actor_id=actor.id, batch_id=batch_id)
     from domain.audit.service import record as audit_record

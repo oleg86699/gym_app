@@ -188,8 +188,7 @@
 
   onMount(async () => {
     loading = true
-    // proxiesApi доступен только админам (supplier → 403 sandbox), грузим только им.
-    await Promise.all([refresh(), isSuper ? loadProxies() : Promise.resolve()])
+    await refresh()
     loading = false
     // Polling: каждые 3 сек если идёт валидация (агрессивно — UI live);
     // каждые 15 сек для "spectator" статусов (uploaded/ready/paused/done) —
@@ -905,12 +904,9 @@
           <select id="bv_proxy" bind:value={vProxyId}
                   class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
             <option value={null}>— весь пул (ротация + ретрай дохлых) —</option>
-            {#each proxiesList as p}
-              <option value={p.id}>[sticky] {p.provider ? `[${p.provider}] ` : ''}{p.host}:{p.port} {p.country ? `· ${p.country}` : ''}</option>
-            {/each}
           </select>
           <p class="mt-1 text-[11px] text-slate-400">
-            По умолчанию — round-robin по всему живому пулу с перебором при дохлом прокси. Конкретный прокси = sticky (все креды через него).
+            Round-robin по всему живому пулу с перебором при дохлом прокси (рекомендуется).
           </p>
         </div>
         <div>

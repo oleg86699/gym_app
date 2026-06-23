@@ -74,8 +74,7 @@
   }
 
   onMount(async () => {
-    // proxiesApi — только админам (supplier → 403 sandbox).
-    await Promise.all([refresh(), isSuper ? loadProxies() : Promise.resolve()])
+    await refresh()
     pollTimer = setInterval(tickPoll, 3000)
     etaTimer = setInterval(() => { nowMs = Date.now() }, 1000)
   })
@@ -557,13 +556,7 @@
           <label for="v_proxy" class="block text-xs font-medium text-slate-700">Proxy (recommended)</label>
           <select id="v_proxy" bind:value={vProxyId}
                   class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
-            <option value={null}>— direct (без прокси) —</option>
-            {#each proxiesList as p}
-              <option value={p.id}>
-                {p.provider ? `[${p.provider}] ` : ''}{p.host}:{p.port}
-                {p.country ? `· ${p.country}` : ''}
-              </option>
-            {/each}
+            <option value={null}>— весь пул (ротация + ретрай дохлых) —</option>
           </select>
         </div>
         <div>

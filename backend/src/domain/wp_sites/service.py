@@ -568,13 +568,20 @@ async def import_csv(
             sites_touched=len(unique_domains),
         )
 
-    cred_stmt = (
-        pg_insert(WpCredential)
-        .values(cred_rows)
-        .on_conflict_do_nothing(index_elements=["site_id", "login"], index_where=_CRED_UNIQ_WHERE)
-        .returning(WpCredential.id)
-    )
-    inserted = list((await session.execute(cred_stmt)).scalars().all())
+    # Чанкуем: явный .values([list]) НЕ авто-чанкается (в отличие от executemany);
+    # cred-строка = ~6 колонок → лимит 32767 bind-параметров пробивается на больших
+    # файлах (как было в импорте батчей). Льём порциями.
+    _CHUNK = 5000
+    inserted: list[int] = []
+    for _i in range(0, len(cred_rows), _CHUNK):
+        chunk = cred_rows[_i:_i + _CHUNK]
+        cred_stmt = (
+            pg_insert(WpCredential)
+            .values(chunk)
+            .on_conflict_do_nothing(index_elements=["site_id", "login"], index_where=_CRED_UNIQ_WHERE)
+            .returning(WpCredential.id)
+        )
+        inserted.extend((await session.execute(cred_stmt)).scalars().all())
     await session.commit()
 
     imported = len(inserted)
