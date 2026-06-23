@@ -39,6 +39,7 @@ from api.admin.schemas.postings import (
     PostingRunResponse,
     QueueItem,
     QueueResponse,
+    ResolveBulkRequest,
     RunProgressResponse,
     SpinOriginalRow,
     TextItemResponse,
@@ -617,7 +618,7 @@ async def remove_link_endpoint(
     session: AsyncSession = Depends(get_db_write),
 ) -> dict:
     """Снять ранее размещённую сквозную ссылку (по placed_via+placement_ref)."""
-    run = await _load_run_or_403(session, run_id, viewer, manage=True)
+    run, _ = await _load_run_or_403(session, run_id, viewer, manage=True)
     item = await session.scalar(
         select(TextItem).where(TextItem.id == item_id, TextItem.posting_run_id == run.id)
     )
@@ -630,6 +631,68 @@ async def remove_link_endpoint(
         session, actor=viewer, action="postings.remove_link",
         resource_type="text_item", resource_id=item_id,
         changes={"run_id": run_id, "status": res.get("status")},
+    )
+    return res
+
+
+@postings_router.post("/{run_id}/resolve-bulk", status_code=status.HTTP_200_OK)
+async def resolve_bulk_endpoint(
+    run_id: int,
+    payload: ResolveBulkRequest,
+    viewer: AdminUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_write),
+) -> dict:
+    """Массовый резолв needs_review-задач прогона по одному домену (каждой её
+    собственная ссылка). Домен в проект НЕ добавляем — разовый резолв."""
+    run, _ = await _load_run_or_403(session, run_id, viewer, manage=True)
+    from domain.project_domains import resolve_run_by_domain
+
+    try:
+        res = await resolve_run_by_domain(session, run.id, payload.domain)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    await audit_record(
+        session, actor=viewer, action="postings.resolve_bulk",
+        resource_type="posting_run", resource_id=run.id,
+        changes={"domain": payload.domain, **res},
+    )
+    return res
+
+
+@postings_router.get("/{run_id}/needs-review-domains")
+async def needs_review_domains_endpoint(
+    run_id: int,
+    viewer: AdminUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_read),
+) -> list[dict]:
+    """Сводка доменов needs_review-задач прогона (для массового резолва на
+    странице прогона). Пустой список = все нужные тексты уже привязаны."""
+    run, _ = await _load_run_or_403(session, run_id, viewer)
+    from domain.project_domains import needs_review_domains
+
+    return await needs_review_domains(session, run.id)
+
+
+@postings_router.post("/{run_id}/add-project-domain", status_code=status.HTTP_200_OK)
+async def add_project_domain_for_run_endpoint(
+    run_id: int,
+    payload: ResolveBulkRequest,
+    viewer: AdminUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_write),
+) -> dict:
+    """Добавить домен в проект этого прогона → авто-резолв всех needs_review с ним
+    (и будущих текстов). project_id берём с прогона — фронту передавать не нужно."""
+    run, _ = await _load_run_or_403(session, run_id, viewer, manage=True)
+    from domain.project_domains import add_domain
+
+    try:
+        res = await add_domain(session, run.project_id, payload.domain)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    await audit_record(
+        session, actor=viewer, action="postings.add_project_domain",
+        resource_type="posting_run", resource_id=run.id,
+        changes={"domain": payload.domain, **res},
     )
     return res
 

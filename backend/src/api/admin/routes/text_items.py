@@ -76,6 +76,7 @@ async def get_text_item_detail(
     return TextItemDetailResponse(
         id=item.id,
         posting_run_id=item.posting_run_id,
+        project_id=item.project_id,
         status=item.status,
         title=item.title,
         original_filename=item.original_filename,

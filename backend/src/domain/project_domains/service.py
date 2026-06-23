@@ -228,6 +228,75 @@ async def resolve_item(
     return {"item_id": item_id, "target_domain": nd, "status": "pending"}
 
 
+async def resolve_run_by_domain(
+    session: AsyncSession, run_id: int, domain: str
+) -> dict:
+    """Массовый резолв: привязать ОДИН домен ко ВСЕМ needs_review-задачам прогона,
+    у кого этот домен есть среди кандидатов — каждой её собственная ссылка/анкор
+    (из её текста). Домен в проект НЕ добавляем (разовый резолв). Тексты без ссылки
+    на этот домен — пропускаем. Возвращает {resolved, skipped, total}."""
+    nd = normalize_domain(domain)
+    if not nd:
+        raise ValueError(f"invalid domain: {domain!r}")
+    items = list((await session.scalars(
+        select(TextItem).where(
+            TextItem.posting_run_id == run_id,
+            TextItem.status == TextItemStatus.NEEDS_REVIEW.value,
+        )
+    )).all())
+    resolved = 0
+    for it in items:
+        cand = _pick_candidate_for_domains(it.link_candidates, {nd})
+        if not cand:
+            continue
+        anchor = cand.get("anchor") or None
+        it.link_url = cand["link"]
+        it.link_anchor = anchor[:500] if anchor else None
+        it.target_domain = cand["domain"]
+        it.status = TextItemStatus.PENDING.value
+        resolved += 1
+    if resolved:
+        await session.commit()
+        await _redispatch_runs({run_id})
+    return {"resolved": resolved, "skipped": len(items) - resolved, "total": len(items)}
+
+
+async def needs_review_domains(session: AsyncSession, run_id: int) -> list[dict]:
+    """Сводка прогона: различные домены среди кандидатов needs_review-задач +
+    сколько задач можно резолвнуть каждым доменом (is_project_domain — уже в
+    проекте?). После массового резолва/добавления в проект домен исчезает из
+    списка — задач с ним в needs_review больше нет."""
+    project_id = await session.scalar(
+        select(PostingRun.project_id).where(PostingRun.id == run_id))
+    pset: set[str] = set()
+    if project_id is not None:
+        pset = {d for d in (
+            normalize_domain(x) for x in (await session.scalars(
+                select(ProjectDomain.domain).where(ProjectDomain.project_id == project_id)
+            )).all()
+        ) if d}
+    cand_lists = (await session.scalars(
+        select(TextItem.link_candidates).where(
+            TextItem.posting_run_id == run_id,
+            TextItem.status == TextItemStatus.NEEDS_REVIEW.value,
+        )
+    )).all()
+    counts: dict[str, int] = {}
+    for cands in cand_lists:
+        seen: set[str] = set()
+        for c in (cands or []):
+            d = c.get("domain") if isinstance(c, dict) else None
+            if d and d not in seen:
+                seen.add(d)
+                counts[d] = counts.get(d, 0) + 1
+    out = [
+        {"domain": d, "count": n, "is_project_domain": d in pset}
+        for d, n in counts.items()
+    ]
+    out.sort(key=lambda r: (-r["count"], r["domain"]))
+    return out
+
+
 async def domain_analytics(session: AsyncSession, project_id: int) -> list[dict]:
     """Аналитика по целевым доменам проекта: сколько задач/опубликовано на каждый
     target_domain."""

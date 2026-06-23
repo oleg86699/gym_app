@@ -7,8 +7,10 @@ from domain.project_domains.service import (
     domain_runs,
     domain_summary,
     list_domains,
+    needs_review_domains,
     remove_domain,
     resolve_item,
+    resolve_run_by_domain,
 )
 
 __all__ = [
@@ -20,6 +22,8 @@ __all__ = [
     "domain_runs",
     "domain_summary",
     "list_domains",
+    "needs_review_domains",
     "remove_domain",
     "resolve_item",
+    "resolve_run_by_domain",
 ]

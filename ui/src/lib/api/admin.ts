@@ -625,6 +625,20 @@ export const postings = {
   },
   progress: (runId: number) =>
     api.get<RunProgress>(`/admin/api/postings/${runId}/progress`),
+  resolveBulk: (runId: number, domain: string) =>
+    api.post<{ resolved: number; skipped: number; total: number }>(
+      `/admin/api/postings/${runId}/resolve-bulk`,
+      { domain },
+    ),
+  needsReviewDomains: (runId: number) =>
+    api.get<{ domain: string; count: number; is_project_domain: boolean }[]>(
+      `/admin/api/postings/${runId}/needs-review-domains`,
+    ),
+  addProjectDomain: (runId: number, domain: string) =>
+    api.post<{ domain: string; created: boolean; auto_resolved_runs: number }>(
+      `/admin/api/postings/${runId}/add-project-domain`,
+      { domain },
+    ),
   textItems: (
     runId: number,
     query?: { cursor?: string; limit?: number; status?: string },

@@ -744,6 +744,7 @@ export interface RunProgress {
 
 export interface TextItemDetail extends TextItem {
   posting_run_id: number
+  project_id: number | null
   content: string
   editable: boolean
 }

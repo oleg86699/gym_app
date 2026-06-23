@@ -3,7 +3,7 @@
   import { page } from '$app/state'
   import { onMount } from 'svelte'
 
-  import { textItems as textItemsApi } from '$lib/api/admin'
+  import { postings as postingsApi, projects as projectsApi, textItems as textItemsApi } from '$lib/api/admin'
   import { ApiError } from '$lib/api/client'
   import TipTapEditor from '$lib/components/ui/TipTapEditor.svelte'
   import type { TextItemDetail, TextItemStatus } from '$lib/api/types'
@@ -87,6 +87,45 @@
     } catch (e) {
       showToast('error', e instanceof ApiError ? e.message : String(e))
     } finally { resolveBusy = false }
+  }
+
+  // ─── Массовое до-заполнение по домену + добавление домена в проект ──
+  function domainOf(url: string): string {
+    try {
+      return new URL(url.trim()).hostname.toLowerCase().replace(/^www\./, '')
+    } catch {
+      return ''
+    }
+  }
+  let bulkDomain = $derived(domainOf(resolveLink))
+  let bulkBusy = $state(false)
+  let addDomainBusy = $state(false)
+
+  // Привязать выбранный домен ко ВСЕМ needs_review этого прогона (каждой своя
+  // ссылка), без добавления домена в проект.
+  async function bulkResolve() {
+    if (!item || !bulkDomain || bulkBusy) return
+    bulkBusy = true
+    try {
+      const res = await postingsApi.resolveBulk(item.posting_run_id, bulkDomain)
+      showToast('success', `Привязано ${res.resolved}, пропущено ${res.skipped} → в очередь`)
+      await load()
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    } finally { bulkBusy = false }
+  }
+
+  // Добавить домен в проект → авто-резолв всех needs_review с ним (и будущих).
+  async function addDomainToProject() {
+    if (!item || !item.project_id || !bulkDomain || addDomainBusy) return
+    addDomainBusy = true
+    try {
+      const res = await projectsApi.addDomain(item.project_id, bulkDomain)
+      showToast('success', `Домен ${res.domain} в проекте — авто-резолв (${res.auto_resolved_runs} прогон.)`)
+      await load()
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    } finally { addDomainBusy = false }
   }
 
   // Операции над уже опубликованным постом на живом сайте
@@ -245,6 +284,19 @@
               {resolveBusy ? '…' : 'Дозаполнить → в очередь'}
             </button>
           </div>
+          {#if bulkDomain}
+            <div class="mt-2 flex flex-wrap items-center gap-2 border-t border-amber-200 pt-2">
+              <span class="text-[11px] text-amber-700">Применить ко всем needs_review прогона:</span>
+              <button type="button" onclick={bulkResolve} disabled={bulkBusy}
+                      class="rounded-md border border-amber-400 bg-white px-3 py-1.5 text-xs font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-50">
+                {bulkBusy ? '…' : `Привязать ${bulkDomain} ко всем`}
+              </button>
+              <button type="button" onclick={addDomainToProject} disabled={addDomainBusy || !item.project_id}
+                      class="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:bg-slate-300">
+                {addDomainBusy ? '…' : `Добавить ${bulkDomain} в проект`}
+              </button>
+            </div>
+          {/if}
         </div>
       {/if}
       {#if item.target_domain || item.lang}

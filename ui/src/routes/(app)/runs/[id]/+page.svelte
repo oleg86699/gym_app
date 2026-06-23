@@ -25,6 +25,11 @@
   let items = $state<TextItem[]>([])
   let loading = $state(true)
 
+  // Сводка доменов needs_review-задач прогона (массовый резолв «по домену»).
+  // Пустой список → баннера нет; после привязки домен исчезает сам.
+  let nrDomains = $state<{ domain: string; count: number; is_project_domain: boolean }[]>([])
+  let nrBusy = $state('')  // 'resolve:<domain>' | 'add:<domain>'
+
   // 'in_progress' — виртуальный фильтр карточки Pending (pending + posting in-flight)
   let filterStatus = $state<TextItemStatus | 'all' | 'in_progress'>('all')
   let busyAction = $state<'pause' | 'resume' | 'cancel' | 'retry' | 'delete' | null>(null)
@@ -100,9 +105,43 @@
     }
   }
 
+  async function loadNrDomains() {
+    try {
+      nrDomains = await postingsApi.needsReviewDomains(runId)
+    } catch {
+      nrDomains = []
+    }
+  }
+
+  // Привязать выбранный домен ко ВСЕМ needs_review прогона (каждой своя ссылка).
+  async function nrBulkResolve(domain: string) {
+    if (nrBusy) return
+    nrBusy = `resolve:${domain}`
+    try {
+      const res = await postingsApi.resolveBulk(runId, domain)
+      showToast('success', `${domain}: привязано ${res.resolved}, пропущено ${res.skipped} → в очередь`)
+      await Promise.all([loadNrDomains(), loadItems(), loadProgress(), loadRun()])
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    } finally { nrBusy = '' }
+  }
+
+  // Добавить домен в проект → авто-резолв всех needs_review с ним (и будущих).
+  async function nrAddDomain(domain: string) {
+    if (nrBusy) return
+    nrBusy = `add:${domain}`
+    try {
+      const res = await postingsApi.addProjectDomain(runId, domain)
+      showToast('success', `${res.domain} в проекте — авто-резолв (${res.auto_resolved_runs} прогон.)`)
+      await Promise.all([loadNrDomains(), loadItems(), loadProgress(), loadRun()])
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    } finally { nrBusy = '' }
+  }
+
   async function refresh(initial = false) {
     if (initial) loading = true
-    await Promise.all([loadRun(), loadProgress(), loadItems()])
+    await Promise.all([loadRun(), loadProgress(), loadItems(), loadNrDomains()])
     if (initial) loading = false
   }
 
@@ -804,6 +843,35 @@
 
   <!-- Text items table -->
   <section>
+    {#if nrDomains.length > 0}
+      <div class="mb-3 rounded-lg border border-amber-300 bg-amber-50 p-3">
+        <div class="text-sm font-medium text-amber-900">⚠ needs_review по доменам — массовое до-заполнение</div>
+        <p class="mt-0.5 text-[11px] text-amber-700">
+          Привяжи домен ко всем задачам прогона (каждой — её собственная ссылка), либо добавь
+          его в проект (авто-резолв + будущие тексты с ним не уйдут в review).
+        </p>
+        <div class="mt-2 flex flex-col gap-1.5">
+          {#each nrDomains as d}
+            <div class="flex flex-wrap items-center gap-2 rounded border border-amber-200 bg-white px-2 py-1.5">
+              <span class="font-mono text-xs text-slate-800">{d.domain}</span>
+              {#if d.is_project_domain}<span class="rounded bg-emerald-100 px-1 text-[10px] text-emerald-700">в проекте</span>{/if}
+              <span class="text-[11px] text-slate-500">{d.count} задач</span>
+              <span class="grow"></span>
+              <button type="button" onclick={() => nrBulkResolve(d.domain)} disabled={!!nrBusy}
+                      class="rounded border border-amber-400 bg-white px-2.5 py-1 text-xs font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-50">
+                {nrBusy === `resolve:${d.domain}` ? '…' : `Привязать ко всем (${d.count})`}
+              </button>
+              {#if !d.is_project_domain}
+                <button type="button" onclick={() => nrAddDomain(d.domain)} disabled={!!nrBusy}
+                        class="rounded bg-emerald-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50">
+                  {nrBusy === `add:${d.domain}` ? '…' : '+ в проект'}
+                </button>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      </div>
+    {/if}
     <div class="mb-3 flex flex-wrap items-center gap-2">
       <h2 class="mr-2 text-lg font-medium text-slate-900">Texts</h2>
       {#each ['all', 'needs_review', 'pending', 'generating', 'posting', 'posted', 'failed', 'skipped'] as s}

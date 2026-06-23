@@ -320,8 +320,17 @@ class TextItemDetailResponse(TextItemResponse):
     """Полная карточка text_item + raw HTML контент из MinIO + run_id."""
 
     posting_run_id: int
+    project_id: int | None = None  # для «добавить домен в проект» из карточки resolve
     content: str
     editable: bool
+
+
+class ResolveBulkRequest(BaseModel):
+    """Массовый резолв needs_review-задач прогона по одному домену."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    domain: str = Field(min_length=1, max_length=255)
 
 
 class UpdateTextItemRequest(BaseModel):
