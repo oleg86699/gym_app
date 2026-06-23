@@ -624,6 +624,8 @@ export interface DomainSummary {
   sites: number
   runs: number
   last_posted_at: string | null
+  available_sites: number   // свободные уникальные сайты под этот домен (из пула)
+  pool_total: number        // всего постабельных сайтов в пуле
 }
 
 export interface DomainItemRow {

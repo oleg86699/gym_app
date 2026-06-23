@@ -60,6 +60,10 @@ class DomainSummaryResponse(BaseModel):
     sites: int
     runs: int
     last_posted_at: datetime | None = None
+    # Свободные уникальные сайты под ЭТОТ домен (постабельный пул − сайты, где уже
+    # стоит пост со ссылкой на него). На сколько постов хватит при max_per_site=1.
+    available_sites: int = 0
+    pool_total: int = 0
 
 
 class DomainItemRow(BaseModel):

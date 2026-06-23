@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import structlog
-from sqlalchemy import distinct, func, select, update
+from sqlalchemy import distinct, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from domain.text_links import normalize_domain
@@ -13,6 +13,7 @@ from infrastructure.db.models import (
     ProjectDomain,
     TextItem,
     TextItemStatus,
+    WpCredential,
     WpSite,
 )
 
@@ -330,10 +331,42 @@ async def domain_summary(session: AsyncSession, project_id: int, domain: str) ->
         func.count(distinct(TextItem.posting_run_id)),
         func.max(TextItem.posted_at),
     ).where(*where))).first()
+
+    # Свободные сайты ПОД ЭТОТ ДОМЕН: постабельный пул сайтов минус те, на которых
+    # уже стоит пост со ссылкой на этот домен (text_items.target_domain + posted).
+    # Показывает, на сколько ещё постов хватит уникальных сайтов при max_per_site=1.
+    # Тот же предикат «постабельного сайта», что у воркера и project-метрики.
+    postable_cred_exists = exists().where(
+        WpCredential.site_id == WpSite.id,
+        WpCredential.deleted_at.is_(None),
+        WpCredential.cred_status == "valid",
+        or_(
+            WpCredential.can_post_via_xmlrpc.is_(True),
+            WpCredential.can_post_via_admin.is_(True),
+        ),
+    )
+    pool_total = int((await session.execute(
+        select(func.count(WpSite.id)).where(
+            WpSite.deleted_at.is_(None), WpSite.is_active.is_(True), postable_cred_exists)
+    )).scalar_one())
+    used_for_domain = (
+        select(distinct(TextItem.site_id)).where(
+            TextItem.target_domain == nd,
+            TextItem.status == TextItemStatus.POSTED.value,
+            TextItem.site_id.isnot(None),
+        )
+    )
+    available_sites = int((await session.execute(
+        select(func.count(WpSite.id)).where(
+            WpSite.deleted_at.is_(None), WpSite.is_active.is_(True), postable_cred_exists,
+            ~WpSite.id.in_(used_for_domain))
+    )).scalar_one())
+
     return {
         "domain": nd, "total": int(r[0]), "posted": int(r[1]), "failed": int(r[2]),
         "skipped": int(r[3]), "in_progress": int(r[4]), "sites": int(r[5]),
         "runs": int(r[6]), "last_posted_at": r[7],
+        "available_sites": available_sites, "pool_total": pool_total,
     }
 
 

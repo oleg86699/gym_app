@@ -90,6 +90,16 @@
         </p>
       {/if}
     </div>
+    <div class="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-5 py-3">
+      <div class="flex items-baseline gap-2">
+        <span class="text-2xl font-semibold text-emerald-700">{summary.available_sites}</span>
+        <span class="text-sm text-emerald-600">из {summary.pool_total} сайтов пула свободно</span>
+      </div>
+      <p class="mt-0.5 text-[11px] text-emerald-700/80">
+        Уникальных сайтов, на которых ещё НЕ стоит пост со ссылкой на этот домен. Столько
+        постов можно сделать на этот домен при max posts/site = 1.
+      </p>
+    </div>
   {/if}
 
   <!-- Прогоны по домену -->

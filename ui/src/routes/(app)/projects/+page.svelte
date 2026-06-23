@@ -208,7 +208,6 @@
             <th class="px-4 py-2">Shared with</th>
             <th class="px-4 py-2 text-center" title="Сейчас выполняется: queued / running / paused / scheduled / unpacking">Active</th>
             <th class="px-4 py-2 text-center" title="Опубликовано постов (lifetime) · последние 24ч">Posted</th>
-            <th class="px-4 py-2 text-center" title="Сайтов, на которые проект может постить (валидный admin + рабочий канал XML-RPC/wp-admin) и которые ещё не использованы в проекте. Совпадает с реальным пулом постинга.">Admins free</th>
             <th class="px-4 py-2 text-center" title="Runs в проблемных статусах: failed / need_more_admins / interrupted">Issues</th>
             <th class="px-4 py-2 text-center" title="Последняя активность: max(post, run created)">Last activity</th>
             <th class="px-4 py-2 text-center">Status</th>
@@ -217,9 +216,6 @@
         </thead>
         <tbody class="divide-y divide-slate-100">
           {#each items as p (p.id)}
-            {@const adminsPool = p.valid_admins_pool}
-            {@const adminsAvail = p.available_admins}
-            {@const adminsLow = adminsPool > 0 && adminsAvail < Math.max(adminsPool * 0.1, 5)}
             <tr class="hover:bg-slate-50">
               <td class="px-4 py-2 font-medium text-slate-900">
                 <a href={`/projects/${p.id}`} class="text-brand-600 hover:underline">{p.name}</a>
@@ -265,19 +261,6 @@
                   {/if}
                 {:else}
                   <span class="text-xs text-slate-300">—</span>
-                {/if}
-              </td>
-              <td class="px-4 py-2 text-center">
-                {#if adminsPool === 0}
-                  <span class="text-xs text-slate-300" title="Пул постабельных сайтов пуст">—</span>
-                {:else}
-                  <span class="text-sm font-medium"
-                        class:text-emerald-700={!adminsLow}
-                        class:text-amber-700={adminsLow}
-                        title="Сайтов, на которые проект ещё может постить: {adminsAvail} из {adminsPool} постабельных в пуле (валидный admin + рабочий канал). Сайт «использован» = ≥1 публикация в проекте; лимит повторов — в самой задаче.">
-                    {adminsAvail}
-                  </span>
-                  <div class="text-[10px] text-slate-400">of {adminsPool}</div>
                 {/if}
               </td>
               <td class="px-4 py-2 text-center">
