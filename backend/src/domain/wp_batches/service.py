@@ -443,11 +443,12 @@ async def import_csv_as_batch(
     credentials_duplicate = 0
     duplicate_cred_ids: list[int] = []
     if cred_rows:
-        # asyncpg/PG: один INSERT не может иметь >32767 bind-параметров. Cred-строка =
-        # 5 колонок → большие CSV (тысячи строк) пробивали лимит ("the number of query
-        # arguments cannot exceed 32767"). Льём чанками (явный multi-row .values() НЕ
-        # авто-чанкается SQLAlchemy, в отличие от ORM-flush).
-        _CHUNK = 5000  # 5000 × 5 колонок = 25000 параметров — с запасом < 32767
+        # asyncpg/PG: один INSERT не может иметь >32767 bind-параметров. ВНИМАНИЕ:
+        # pg_insert(WpCredential).values([...]) биндит НЕ только 5 ключей из dict, а
+        # ВСЕ колонки с python-дефолтами (is_valid/error_counter/amount_use/provisioned/
+        # created_at/updated_at/…) — реально ~11 параметров на строку. Поэтому чанк
+        # маленький. Явный multi-row .values() НЕ авто-чанкается (в отличие от ORM-flush).
+        _CHUNK = 1000  # 1000 × ~11 колонок ≈ 11k параметров — с запасом < 32767
         inserted_ids: set[int] = set()
         for _i in range(0, len(cred_rows), _CHUNK):
             chunk = cred_rows[_i:_i + _CHUNK]

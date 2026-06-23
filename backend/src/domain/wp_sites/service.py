@@ -568,10 +568,11 @@ async def import_csv(
             sites_touched=len(unique_domains),
         )
 
-    # Чанкуем: явный .values([list]) НЕ авто-чанкается (в отличие от executemany);
-    # cred-строка = ~6 колонок → лимит 32767 bind-параметров пробивается на больших
-    # файлах (как было в импорте батчей). Льём порциями.
-    _CHUNK = 5000
+    # Чанкуем: явный .values([list]) НЕ авто-чанкается (в отличие от executemany).
+    # pg_insert биндит ВСЕ колонки с python-дефолтами (is_valid/error_counter/
+    # amount_use/provisioned/created_at/…), а не только ключи dict — реально ~11+
+    # параметров на строку. Поэтому чанк маленький (1000 × ~11 ≈ 11k < 32767).
+    _CHUNK = 1000
     inserted: list[int] = []
     for _i in range(0, len(cred_rows), _CHUNK):
         chunk = cred_rows[_i:_i + _CHUNK]
