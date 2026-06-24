@@ -13,13 +13,16 @@ import io
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+import structlog
 from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from core.crypto import encrypt_password
-from infrastructure.db.models import WpCredential, WpSite
+from infrastructure.db.models import WpCredential, WpImportBatch, WpSite
+
+log = structlog.get_logger(__name__)
 
 _SITE_UNIQ_WHERE = text("deleted_at IS NULL")
 _CRED_UNIQ_WHERE = text("deleted_at IS NULL")
@@ -754,23 +757,24 @@ async def refresh_pool_summary_mv(session: AsyncSession) -> None:
 
 
 async def list_credential_tags(session: AsyncSession) -> list[str]:
-    """Уникальные теги (unnest из tags array), отсортированы по свежести —
-    новые сверху (по самому позднему created_at креда, несущего тег)."""
+    """Теги для фильтра пула доступов прогона — ОБЪЕДИНЕНИЕ тегов БАТЧЕЙ
+    (WpImportBatch.tag — то, что видно в списке батчей) и тегов КРЕДОВ
+    (WpCredential.tags: provisioned/role от провижна + ручные). Сортировка по
+    свежести — новые сверху (по самому позднему created_at источника тега)."""
     from sqlalchemy import func as _f
 
-    tags_sub = (
-        select(
-            _f.unnest(WpCredential.tags).label("t"),
-            WpCredential.created_at.label("c"),
-        )
-        .where(WpCredential.deleted_at.is_(None))
-        .subquery()
-    )
+    cred_tags = select(
+        _f.unnest(WpCredential.tags).label("tag"),
+        WpCredential.created_at.label("ts"),
+    ).where(WpCredential.deleted_at.is_(None))
+    batch_tags = select(
+        WpImportBatch.tag.label("tag"),
+        WpImportBatch.created_at.label("ts"),
+    ).where(WpImportBatch.tag.isnot(None), WpImportBatch.deleted_at.is_(None))
+    u = cred_tags.union_all(batch_tags).subquery()
     rows = (
         await session.execute(
-            select(tags_sub.c.t)
-            .group_by(tags_sub.c.t)
-            .order_by(_f.max(tags_sub.c.c).desc())
+            select(u.c.tag).group_by(u.c.tag).order_by(_f.max(u.c.ts).desc())
         )
     ).all()
     return [r[0] for r in rows if r[0]]

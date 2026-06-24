@@ -25,6 +25,7 @@ from infrastructure.db.models.posting import (
     TextItem,
     TextItemStatus,
 )
+from infrastructure.db.models import WpImportBatch
 from infrastructure.db.models.wp_access import WpCredential, WpSite
 from infrastructure.wp_admin_client import (
     AdminLoginKind,
@@ -88,7 +89,12 @@ async def candidate_link_sites(
     if site_tlds:
         q = q.where(or_(*(WpSite.domain.ilike(f"%.{t}") for t in site_tlds)))
     if site_tags:
-        q = q.where(or_(*(WpCredential.tags.any(t) for t in site_tags)))
+        q = q.where(or_(
+            *(WpCredential.tags.any(t) for t in site_tags),
+            WpCredential.import_batch_id.in_(
+                select(WpImportBatch.id).where(WpImportBatch.tag.in_(site_tags))
+            ),
+        ))
     if site_domains:
         q = q.where(WpSite.domain.in_(site_domains))
     if exclude_site_ids:

@@ -52,6 +52,7 @@ from infrastructure.db.models import (
     TextItem,
     TextItemStatus,
     WpCredential,
+    WpImportBatch,
     WpSite,
 )
 from infrastructure.concurrency import posting_limiter
@@ -294,10 +295,16 @@ async def _pick_candidate_sites(
             WpCredential.can_post_via_admin.is_(True),
         ),
     ]
-    # Пул по тегам: сайт подходит, если у него есть валидный постабельный cred
-    # с одним из выбранных тегов (теги живут на credential, не на site).
+    # Пул по тегам: сайт подходит, если у него есть валидный постабельный cred,
+    # у которого один из выбранных тегов — либо на самом креде (WpCredential.tags),
+    # либо на его батче (WpImportBatch.tag). Покрывает оба пространства тегов.
     if site_tags:
-        cred_conds.append(or_(*(WpCredential.tags.any(t) for t in site_tags)))
+        cred_conds.append(or_(
+            *(WpCredential.tags.any(t) for t in site_tags),
+            WpCredential.import_batch_id.in_(
+                select(WpImportBatch.id).where(WpImportBatch.tag.in_(site_tags))
+            ),
+        ))
     has_valid_cred = exists().where(and_(*cred_conds))
     # Подзапрос: сколько раз этот сайт уже использован в этом проекте
     used_count_subq = (

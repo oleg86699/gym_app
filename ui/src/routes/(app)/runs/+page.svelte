@@ -281,7 +281,7 @@
   let newSiteDomainsKey = $state<string | null>(null)  // большой список файлом → MinIO-ключ
   let domainsFileCount = $state(0)          // сколько доменов в загруженном файле
   let domainsUploading = $state(false)
-  let availableTags = $state<string[]>([])  // все теги кредов (из credential-tags)
+  let availableTags = $state<string[]>([])  // теги батчей + кредов (из credential-tags)
   let tagSearch = $state('')                // поиск по тегам (для 100+)
   const TAG_RESULTS_CAP = 24                // не вываливаем 100+ тегов сразу
   let domainCount = $derived(
@@ -1099,7 +1099,7 @@
                     {#if tagResultsMore > 0}
                       <p class="mt-1 text-[11px] text-slate-400">…ещё {tagResultsMore} — уточни поиск.</p>
                     {/if}
-                    <p class="mt-1 text-[11px] text-slate-400">Выбрано: <b>{newSiteTags.length}</b> · берём сайты с кредом, у которого есть хотя бы один из выбранных тегов.</p>
+                    <p class="mt-1 text-[11px] text-slate-400">Выбрано: <b>{newSiteTags.length}</b> · теги батчей и кредов; берём сайты, у которых доступ помечен одним из выбранных (тегом батча или самого креда).</p>
                   {/if}
                 {:else if poolMode === 'domains'}
                   {#if newSiteDomainsKey}
