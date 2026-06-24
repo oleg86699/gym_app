@@ -754,14 +754,23 @@ async def refresh_pool_summary_mv(session: AsyncSession) -> None:
 
 
 async def list_credential_tags(session: AsyncSession) -> list[str]:
-    """Уникальные теги (unnest из tags array)."""
+    """Уникальные теги (unnest из tags array), отсортированы по свежести —
+    новые сверху (по самому позднему created_at креда, несущего тег)."""
     from sqlalchemy import func as _f
 
+    tags_sub = (
+        select(
+            _f.unnest(WpCredential.tags).label("t"),
+            WpCredential.created_at.label("c"),
+        )
+        .where(WpCredential.deleted_at.is_(None))
+        .subquery()
+    )
     rows = (
         await session.execute(
-            select(_f.distinct(_f.unnest(WpCredential.tags)).label("t"))
-            .where(WpCredential.deleted_at.is_(None))
-            .order_by("t")
+            select(tags_sub.c.t)
+            .group_by(tags_sub.c.t)
+            .order_by(_f.max(tags_sub.c.c).desc())
         )
     ).all()
     return [r[0] for r in rows if r[0]]
