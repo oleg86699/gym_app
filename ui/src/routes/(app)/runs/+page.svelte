@@ -268,7 +268,10 @@
   let newScheduledFor = $state('')
   let newSpreadDays = $state(0)  // drip-feed: размазать постинг на N дней (0 = сразу)
   let newMaxPostsPerSite = $state(1)  // сколько раз один сайт можно юзать в задаче (1 = «1 сайт = 1 пост»)
-  let advancedOpen = $state(false)  // сворачиваемые «Дополнительно»
+  // Аккордеон «Дополнительно» — 3 смысловые категории (несколько открытых сразу)
+  let secPoolOpen = $state(false)
+  let secSchedOpen = $state(false)
+  let secPostOpen = $state(false)
   let newSiteLangs = $state('')     // фильтр пула: языки сайтов через запятую
   let newSiteTlds = $state('')      // фильтр пула: TLD через запятую
   // Источник пула доступов: all = весь пул; tags = по тегам кредов; domains = свой список
@@ -276,9 +279,36 @@
   let newSiteTags = $state<string[]>([])   // выбранные теги (для poolMode='tags')
   let newSiteDomains = $state('')           // свой список доменов (для poolMode='domains')
   let availableTags = $state<string[]>([])  // все теги кредов (из credential-tags)
+  let tagSearch = $state('')                // поиск по тегам (для 100+)
   let domainCount = $derived(
     newSiteDomains.split(/[\n,\s]+/).map((d) => d.trim()).filter(Boolean).length,
   )
+  let filteredTags = $derived.by(() => {
+    const q = tagSearch.trim().toLowerCase()
+    return q ? availableTags.filter((t) => t.toLowerCase().includes(q)) : availableTags
+  })
+  function toggleTag(tag: string) {
+    newSiteTags = newSiteTags.includes(tag)
+      ? newSiteTags.filter((t) => t !== tag)
+      : [...newSiteTags, tag]
+  }
+  // Сводки для свёрнутых категорий — видно настройки не разворачивая
+  let poolSummary = $derived(
+    poolMode === 'tags' ? `по тегам: ${newSiteTags.length || '—'}`
+    : poolMode === 'domains' ? `домены: ${domainCount || '—'}`
+    : 'весь пул',
+  )
+  let schedSummary = $derived([
+    newScheduledFor ? 'по расписанию' : 'сразу',
+    (newPublishFrom && newPublishTo) ? 'своё окно' : 'станд. окно',
+    newSpreadDays > 0 ? `drip ${newSpreadDays}д` : 'без drip',
+  ].join(' · '))
+  let postSummary = $derived([
+    newPriority,
+    `${newMaxPostsPerSite || 1}/сайт`,
+    newProxySelector === 'direct' ? 'без прокси' : newProxySelector === 'all' ? 'все прокси' : newProxySelector,
+    ...(newTaskType === 'post' ? [newPostingMethod] : []),
+  ].join(' · '))
   // Селектор прокси-пула:
   //   "direct" — без прокси
   //   "all" — все active
@@ -357,12 +387,15 @@
     campLang = 'English'
     newSpreadDays = 0
     newMaxPostsPerSite = 1
-    advancedOpen = false
+    secPoolOpen = false
+    secSchedOpen = false
+    secPostOpen = false
     newSiteLangs = ''
     newSiteTlds = ''
     poolMode = 'all'
     newSiteTags = []
     newSiteDomains = ''
+    tagSearch = ''
     createOpen = true
   }
 
@@ -791,9 +824,9 @@
   <div class="fixed inset-0 z-30 flex items-center justify-center bg-slate-900/40 p-4" onclick={() => (createOpen = false)}>
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="max-h-[90vh] w-full max-w-md overflow-auto rounded-lg bg-white p-6 shadow-xl"
+    <div class="max-h-[90vh] w-full max-w-2xl overflow-auto rounded-lg bg-white p-6 shadow-xl"
          onclick={(e) => e.stopPropagation()}>
-      <h2 class="text-lg font-semibold text-slate-900">New run</h2>
+      <h2 class="text-lg font-semibold text-slate-900">Новый прогон</h2>
 
       <!-- Тип прогона -->
       <div class="mt-3 grid grid-cols-3 gap-1">
@@ -809,20 +842,21 @@
       </div>
 
       <form onsubmit={handleCreate} class="mt-4 space-y-3">
-        <div>
-          <label for="nrr_proj" class="block text-sm font-medium text-slate-700">Project *</label>
-          <select id="nrr_proj" bind:value={newProjectId} required onchange={refreshLinkCandidates}
-                  class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
-            {#each manageableProjects as p}
-              <option value={p.id}>{p.name}</option>
-            {/each}
-          </select>
-        </div>
-
-        <div>
-          <label for="nrr_name" class="block text-sm font-medium text-slate-700">Name *</label>
-          <input id="nrr_name" type="text" bind:value={newName} required minlength="1" maxlength="255"
-                 class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label for="nrr_proj" class="block text-sm font-medium text-slate-700">Project *</label>
+            <select id="nrr_proj" bind:value={newProjectId} required onchange={refreshLinkCandidates}
+                    class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
+              {#each manageableProjects as p}
+                <option value={p.id}>{p.name}</option>
+              {/each}
+            </select>
+          </div>
+          <div>
+            <label for="nrr_name" class="block text-sm font-medium text-slate-700">Name *</label>
+            <input id="nrr_name" type="text" bind:value={newName} required minlength="1" maxlength="255"
+                   class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
+          </div>
         </div>
 
         {#if newTaskType === 'post'}
@@ -963,198 +997,204 @@
           </div>
         {/if}
 
-        <div>
-          <span class="block text-sm font-medium text-slate-700">Priority</span>
-          <div class="mt-1 flex gap-1">
-            {#each [['low', 'Low'], ['normal', 'Normal'], ['high', 'High']] as [val, label]}
-              {@const isOn = newPriority === val}
-              <button type="button"
-                      onclick={() => (newPriority = val as PostingRunPriority)}
-                      class="flex-1 rounded-md border px-2 py-1.5 text-xs font-medium transition"
-                      class:border-brand-600={isOn}
-                      class:bg-brand-50={isOn}
-                      class:text-brand-700={isOn}
-                      class:border-slate-300={!isOn}
-                      class:text-slate-600={!isOn}
-                      class:hover:bg-slate-50={!isOn}>
-                {label}
-              </button>
-            {/each}
-          </div>
-          <p class="mt-1 text-[11px] text-slate-400">
-            High пойдёт в работу раньше прогонов с Normal/Low, ждущих в очереди.
-          </p>
-        </div>
+        <!-- ─── Дополнительно: 3 смысловые категории-аккордеона ─── -->
 
-        <div class="border-t border-slate-100 pt-3">
-          <button type="button" onclick={() => (advancedOpen = !advancedOpen)}
-                  class="flex w-full items-center gap-1.5 text-sm font-medium text-slate-600 hover:text-slate-900">
-            <span class="text-[10px]">{advancedOpen ? '▼' : '▶'}</span> Дополнительно
-            <span class="ml-1 text-[11px] font-normal text-slate-400">фильтр сайтов · расписание · drip · прокси{#if newTaskType === 'post'} · метод{/if}</span>
+        <!-- 1. Пул сайтов и доступов -->
+        <div class="rounded-md border border-slate-200">
+          <button type="button" onclick={() => (secPoolOpen = !secPoolOpen)}
+                  class="flex w-full items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-slate-50">
+            <span class="flex items-center gap-1.5 text-sm font-medium text-slate-700">
+              <span class="text-[10px] text-slate-400">{secPoolOpen ? '▼' : '▶'}</span> Пул сайтов и доступов
+            </span>
+            <span class="text-[11px] text-slate-400">{poolSummary}</span>
           </button>
-        </div>
-        {#if advancedOpen}
-        <!-- Фильтр пула сайтов — для всех режимов -->
-        <div>
-          <span class="block text-sm font-medium text-slate-700">Фильтр пула сайтов</span>
-          <div class="mt-1 grid grid-cols-2 gap-2">
-            <input bind:value={newSiteLangs} placeholder="lang: en,fr,de"
-                   class="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-mono" />
-            <input bind:value={newSiteTlds} placeholder="tld: us,uk,au"
-                   class="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-mono" />
-          </div>
-          <p class="mt-1 text-[11px] text-slate-400">Постим только на сайты пула с этим <b>языком</b> и <b>TLD</b> (несколько через запятую). Пусто = все доступные.</p>
-        </div>
-
-        <!-- Пул доступов: весь / по тегам кредов / свой список доменов -->
-        <div>
-          <span class="block text-sm font-medium text-slate-700">Пул доступов</span>
-          <select bind:value={poolMode}
-                  class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
-            <option value="all">Все доступы (весь пул) — по умолчанию</option>
-            <option value="tags">По тегам кредов</option>
-            <option value="domains">Свой список доменов</option>
-          </select>
-
-          {#if poolMode === 'tags'}
-            {#if availableTags.length === 0}
-              <p class="mt-2 text-[11px] text-slate-400">Тегов пока нет — добавь теги кредам/батчам, и они появятся здесь.</p>
-            {:else}
-              <div class="mt-2 flex flex-wrap gap-1.5">
-                {#each availableTags as tag}
-                  <button type="button"
-                          onclick={() => (newSiteTags = newSiteTags.includes(tag) ? newSiteTags.filter((t) => t !== tag) : [...newSiteTags, tag])}
-                          class="rounded-full border px-2.5 py-1 text-[12px] {newSiteTags.includes(tag) ? 'border-brand-400 bg-brand-50 text-brand-700' : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-50'}">
-                    {tag}
-                  </button>
-                {/each}
+          {#if secPoolOpen}
+            <div class="space-y-3 border-t border-slate-100 px-3 py-3">
+              <div>
+                <span class="block text-sm font-medium text-slate-700">Фильтр по языку / TLD сайта</span>
+                <div class="mt-1 grid grid-cols-2 gap-2">
+                  <input bind:value={newSiteLangs} placeholder="lang: en,fr,de"
+                         class="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-mono" />
+                  <input bind:value={newSiteTlds} placeholder="tld: us,uk,au"
+                         class="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-mono" />
+                </div>
+                <p class="mt-1 text-[11px] text-slate-400">Только сайты с этим <b>языком</b> и <b>TLD</b> (через запятую). Пусто = все.</p>
               </div>
-              <p class="mt-1 text-[11px] text-slate-400">Берём сайты с валидным кредом, у которого есть хотя бы <b>один</b> из выбранных тегов. Не выбрано = весь пул.</p>
-            {/if}
-          {:else if poolMode === 'domains'}
-            <textarea bind:value={newSiteDomains} rows="4"
-                      placeholder="по домену в строке (или через запятую): example.com, blog.example.org"
-                      class="mt-2 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm font-mono"></textarea>
-            <p class="mt-1 text-[11px] text-slate-400">
-              Постим только на эти домены — креды к ним берём из базы (какие есть).
-              {#if domainCount > 0}<b>{domainCount}</b> домен(ов) в списке.{/if}
-              <span class="text-slate-300">Большой список файлом — добавим следующим шагом.</span>
-            </p>
-          {/if}
-        </div>
-        <!-- Расписание / drip / max-posts / прокси — для всех режимов (вкл. link) -->
-        <div>
-          <label for="nrr_sched" class="block text-sm font-medium text-slate-700">
-            Scheduled start <span class="text-slate-400">(пусто <ArrowRight size={14} class="inline-block align-text-bottom" /> без расписания)</span>
-          </label>
-          <input id="nrr_sched" type="datetime-local" bind:value={newScheduledFor}
-                 class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
-        </div>
 
-        <div>
-          <span class="block text-sm font-medium text-slate-700">
-            Окно публикации <span class="text-slate-400">(пусто <ArrowRight size={14} class="inline-block align-text-bottom" /> стандартное из настроек)</span>
-          </span>
-          <div class="mt-1 grid grid-cols-2 gap-2">
-            <input type="date" bind:value={newPublishFrom} max={newPublishTo || today} aria-label="Publish from"
-                   class="rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
-            <input type="date" bind:value={newPublishTo} min={newPublishFrom || undefined} max={today} aria-label="Publish to"
-                   class="rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
-          </div>
-          {#if newWindowInvalid}
-            <p class="mt-1 text-[11px] text-red-600">Заполни обе даты, From не позже To.</p>
-          {:else if newWindowFuture}
-            <p class="mt-1 text-[11px] text-amber-600">
-              <AlertTriangle size={12} class="inline-block align-text-bottom" /> Дата позже сегодня — посты уйдут в Scheduled. Выбери не позже сегодняшней.
-            </p>
-          {:else}
-            <p class="mt-1 text-[11px] text-slate-400">
-              Каждому посту воркер ставит случайную (прошедшую) дату внутри окна. Пусто — берётся стандартное окно из настроек.
-            </p>
-          {/if}
-        </div>
+              <div>
+                <span class="block text-sm font-medium text-slate-700">Пул доступов</span>
+                <div class="mt-1 flex flex-wrap items-center gap-1.5">
+                  <button type="button" onclick={() => (poolMode = poolMode === 'tags' ? 'all' : 'tags')}
+                          class="rounded-full border px-3 py-1 text-xs font-medium {poolMode === 'tags' ? 'border-brand-400 bg-brand-50 text-brand-700' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}">
+                    По тегам
+                  </button>
+                  <button type="button" onclick={() => (poolMode = poolMode === 'domains' ? 'all' : 'domains')}
+                          class="rounded-full border px-3 py-1 text-xs font-medium {poolMode === 'domains' ? 'border-brand-400 bg-brand-50 text-brand-700' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}">
+                    Свой список доменов
+                  </button>
+                  {#if poolMode === 'all'}<span class="text-[11px] text-slate-400">сейчас: весь пул</span>{/if}
+                </div>
 
-        <div>
-          <label for="nrr_spread" class="block text-sm font-medium text-slate-700">
-            Разбить на дней <span class="text-slate-400">(0 <ArrowRight size={14} class="inline-block align-text-bottom" /> постить всё сразу)</span>
-          </label>
-          <input id="nrr_spread" type="number" min="0" max="365" bind:value={newSpreadDays}
-                 class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
-          <p class="mt-1 text-[11px] text-slate-400">
-            Drip-feed: тексты равномерно размажутся по окну от старта на N дней
-            (естественная link velocity). Прогон сам «засыпает» между порциями.
-          </p>
-        </div>
-
-        <div>
-          <label for="nrr_mpps" class="block text-sm font-medium text-slate-700">
-            Max posts per site
-          </label>
-          <input id="nrr_mpps" type="number" min="1" max="1000" bind:value={newMaxPostsPerSite}
-                 class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
-          <p class="mt-1 text-[11px] text-slate-400">
-            Сколько раз один WP-сайт можно использовать в этой задаче.
-            <strong>1</strong> = «1 сайт = 1 пост». Подними, если не хватает
-            доступов и хочешь добрать из уже использованных. Можно изменить и после старта.
-          </p>
-        </div>
-
-        <div>
-          <label for="nrr_proxy" class="block text-sm font-medium text-slate-700">
-            Proxy pool
-          </label>
-          <select id="nrr_proxy" bind:value={newProxySelector}
-                  class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
-            {#if poolStats.all_active > 0}
-              <option value="all">All proxies ({poolStats.all_active} — round-robin)</option>
-              {#each Object.entries(poolStats.providers) as [name, cnt]}
-                {#if cnt > 0}
-                  <option value={`provider:${name}`}>Provider: {name} ({cnt})</option>
+                {#if poolMode === 'tags'}
+                  {#if availableTags.length === 0}
+                    <p class="mt-2 text-[11px] text-slate-400">Тегов пока нет — добавь теги кредам/батчам.</p>
+                  {:else}
+                    <input bind:value={tagSearch} placeholder="поиск тега…"
+                           class="mt-2 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
+                    <div class="mt-2 flex max-h-36 flex-wrap gap-1.5 overflow-auto">
+                      {#each filteredTags as tag}
+                        <button type="button" onclick={() => toggleTag(tag)}
+                                class="rounded-full border px-2.5 py-1 text-[12px] {newSiteTags.includes(tag) ? 'border-brand-400 bg-brand-50 text-brand-700' : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-50'}">
+                          {tag}
+                        </button>
+                      {/each}
+                      {#if filteredTags.length === 0}<p class="text-[11px] text-slate-400">Ничего не найдено.</p>{/if}
+                    </div>
+                    <p class="mt-1 text-[11px] text-slate-400">
+                      Выбрано: <b>{newSiteTags.length}</b>{#if newSiteTags.length} · <button type="button" onclick={() => (newSiteTags = [])} class="text-brand-600 hover:underline">сбросить</button>{/if} · берём сайты с кредом, у которого есть хотя бы один из тегов.
+                    </p>
+                  {/if}
+                {:else if poolMode === 'domains'}
+                  <textarea bind:value={newSiteDomains} rows="4"
+                            placeholder="по домену в строке (или через запятую): example.com, blog.example.org"
+                            class="mt-2 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm font-mono"></textarea>
+                  <p class="mt-1 text-[11px] text-slate-400">
+                    Постим только на эти домены — креды берём из базы.
+                    {#if domainCount > 0}<b>{domainCount}</b> домен(ов).{/if}
+                    <span class="text-slate-300">Большой список файлом — добавим следующим шагом.</span>
+                  </p>
                 {/if}
-              {/each}
-            {/if}
-            <option value="direct">— без прокси (direct) —</option>
-          </select>
-          <p class="mt-1 text-[11px] text-slate-400">
-            Worker рандомизирует прокси из пула на каждый запрос. Для 1000+ текстов
-            одиночный proxy = bottleneck (плагины рейт-лимитят по IP).
-          </p>
+              </div>
+            </div>
+          {/if}
         </div>
 
-        {#if newTaskType === 'post'}
-        <div>
-          <label for="nrr_method" class="block text-sm font-medium text-slate-700">
-            Posting method
-          </label>
-          <select id="nrr_method" bind:value={newPostingMethod}
-                  class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
-            <option value="auto">Auto — XML-RPC → wp-admin fallback (recommended)</option>
-            <option value="xmlrpc_only">XML-RPC only — fastest, classic</option>
-            <option value="admin_only">wp-admin only — for sites with XML-RPC disabled</option>
-          </select>
-          <p class="mt-1 text-[11px] text-slate-400">
-            Auto ловит ~50% больше cred-ов (где XML-RPC отключён плагином, но
-            wp-admin работает). Чуть дороже — 3-4 HTTP-запроса вместо 1-2 на сайтах
-            где fallback срабатывает.
-          </p>
+        <!-- 2. Расписание и темп -->
+        <div class="rounded-md border border-slate-200">
+          <button type="button" onclick={() => (secSchedOpen = !secSchedOpen)}
+                  class="flex w-full items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-slate-50">
+            <span class="flex items-center gap-1.5 text-sm font-medium text-slate-700">
+              <span class="text-[10px] text-slate-400">{secSchedOpen ? '▼' : '▶'}</span> Расписание и темп
+            </span>
+            <span class="text-[11px] text-slate-400">{schedSummary}</span>
+          </button>
+          {#if secSchedOpen}
+            <div class="grid grid-cols-2 gap-3 border-t border-slate-100 px-3 py-3">
+              <div>
+                <label for="nrr_sched" class="block text-sm font-medium text-slate-700">
+                  Scheduled start <span class="text-slate-400">(пусто = без расписания)</span>
+                </label>
+                <input id="nrr_sched" type="datetime-local" bind:value={newScheduledFor}
+                       class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
+              </div>
+              <div>
+                <label for="nrr_spread" class="block text-sm font-medium text-slate-700">
+                  Разбить на дней <span class="text-slate-400">(0 = сразу)</span>
+                </label>
+                <input id="nrr_spread" type="number" min="0" max="365" bind:value={newSpreadDays}
+                       class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
+                <p class="mt-1 text-[11px] text-slate-400">Drip-feed: размазать постинг по окну на N дней (link velocity).</p>
+              </div>
+              <div class="col-span-2">
+                <span class="block text-sm font-medium text-slate-700">
+                  Окно публикации <span class="text-slate-400">(пусто = стандартное из настроек)</span>
+                </span>
+                <div class="mt-1 grid grid-cols-2 gap-2">
+                  <input type="date" bind:value={newPublishFrom} max={newPublishTo || today} aria-label="Publish from"
+                         class="rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
+                  <input type="date" bind:value={newPublishTo} min={newPublishFrom || undefined} max={today} aria-label="Publish to"
+                         class="rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
+                </div>
+                {#if newWindowInvalid}
+                  <p class="mt-1 text-[11px] text-red-600">Заполни обе даты, From не позже To.</p>
+                {:else if newWindowFuture}
+                  <p class="mt-1 text-[11px] text-amber-600">
+                    <AlertTriangle size={12} class="inline-block align-text-bottom" /> Дата позже сегодня — посты уйдут в Scheduled. Выбери не позже сегодняшней.
+                  </p>
+                {:else}
+                  <p class="mt-1 text-[11px] text-slate-400">Каждому посту — случайная (прошедшая) дата внутри окна. Пусто = стандартное окно из настроек.</p>
+                {/if}
+              </div>
+            </div>
+          {/if}
         </div>
-        <div>
-          <label for="nrr_verify" class="block text-sm font-medium text-slate-700">
-            Валидация ссылки на посте
-          </label>
-          <select id="nrr_verify" bind:value={newPostVerify}
-                  class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
-            <option value="mark">Отметка — проверить и пометить ✓/✗, пост засчитан в любом случае</option>
-            <option value="auto">Автовалидация — перепост, пока ссылка не подтвердится на странице</option>
-          </select>
-          <p class="mt-1 text-[11px] text-slate-400">
-            После поста делаем GET страницы (резолвим реальный permalink) и проверяем,
-            что на ней есть ссылка на твой домен. <b>Отметка</b> — только помечает. <b>Автовалидация</b> —
-            не считает задачу готовой, пока ссылка не подтвердится: перечитывает пост, затем перепостит на другой сайт.
-          </p>
+
+        <!-- 3. Параметры постинга -->
+        <div class="rounded-md border border-slate-200">
+          <button type="button" onclick={() => (secPostOpen = !secPostOpen)}
+                  class="flex w-full items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-slate-50">
+            <span class="flex items-center gap-1.5 text-sm font-medium text-slate-700">
+              <span class="text-[10px] text-slate-400">{secPostOpen ? '▼' : '▶'}</span> Параметры постинга
+            </span>
+            <span class="text-[11px] text-slate-400">{postSummary}</span>
+          </button>
+          {#if secPostOpen}
+            <div class="space-y-3 border-t border-slate-100 px-3 py-3">
+              <div>
+                <span class="block text-sm font-medium text-slate-700">Priority</span>
+                <div class="mt-1 flex gap-1">
+                  {#each [['low', 'Low'], ['normal', 'Normal'], ['high', 'High']] as [val, label]}
+                    {@const isOn = newPriority === val}
+                    <button type="button" onclick={() => (newPriority = val as PostingRunPriority)}
+                            class="flex-1 rounded-md border px-2 py-1.5 text-xs font-medium transition"
+                            class:border-brand-600={isOn} class:bg-brand-50={isOn} class:text-brand-700={isOn}
+                            class:border-slate-300={!isOn} class:text-slate-600={!isOn} class:hover:bg-slate-50={!isOn}>
+                      {label}
+                    </button>
+                  {/each}
+                </div>
+                <p class="mt-1 text-[11px] text-slate-400">High идёт в работу раньше Normal/Low в очереди.</p>
+              </div>
+
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label for="nrr_mpps" class="block text-sm font-medium text-slate-700">Max posts / site</label>
+                  <input id="nrr_mpps" type="number" min="1" max="1000" bind:value={newMaxPostsPerSite}
+                         class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
+                  <p class="mt-1 text-[11px] text-slate-400"><strong>1</strong> = «1 сайт = 1 пост». Подними, чтобы добрать из использованных.</p>
+                </div>
+                <div>
+                  <label for="nrr_proxy" class="block text-sm font-medium text-slate-700">Proxy pool</label>
+                  <select id="nrr_proxy" bind:value={newProxySelector}
+                          class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
+                    {#if poolStats.all_active > 0}
+                      <option value="all">All proxies ({poolStats.all_active} — round-robin)</option>
+                      {#each Object.entries(poolStats.providers) as [name, cnt]}
+                        {#if cnt > 0}
+                          <option value={`provider:${name}`}>Provider: {name} ({cnt})</option>
+                        {/if}
+                      {/each}
+                    {/if}
+                    <option value="direct">— без прокси (direct) —</option>
+                  </select>
+                  <p class="mt-1 text-[11px] text-slate-400">Рандомизация прокси на каждый запрос. Один proxy = bottleneck на 1000+.</p>
+                </div>
+              </div>
+
+              {#if newTaskType === 'post'}
+                <div>
+                  <label for="nrr_method" class="block text-sm font-medium text-slate-700">Posting method</label>
+                  <select id="nrr_method" bind:value={newPostingMethod}
+                          class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
+                    <option value="auto">Auto — XML-RPC → wp-admin fallback (recommended)</option>
+                    <option value="xmlrpc_only">XML-RPC only — fastest, classic</option>
+                    <option value="admin_only">wp-admin only — for sites with XML-RPC disabled</option>
+                  </select>
+                  <p class="mt-1 text-[11px] text-slate-400">Auto ловит ~50% больше cred-ов (где XML-RPC выключен, но wp-admin работает).</p>
+                </div>
+                <div>
+                  <label for="nrr_verify" class="block text-sm font-medium text-slate-700">Валидация ссылки на посте</label>
+                  <select id="nrr_verify" bind:value={newPostVerify}
+                          class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
+                    <option value="mark">Отметка — проверить и пометить ✓/✗, пост засчитан в любом случае</option>
+                    <option value="auto">Автовалидация — перепост, пока ссылка не подтвердится на странице</option>
+                  </select>
+                  <p class="mt-1 text-[11px] text-slate-400"><b>Отметка</b> — только помечает. <b>Автовалидация</b> — не готова, пока ссылка не подтвердится (перепост на другой сайт).</p>
+                </div>
+              {/if}
+            </div>
+          {/if}
         </div>
-        {/if}
-        {/if}
 
         <div class="flex justify-end gap-2 pt-2">
           <button type="button" onclick={() => (createOpen = false)}
