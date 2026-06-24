@@ -1221,6 +1221,18 @@ async def run_batch_validation(
                 if not tier1_decisive and cred.can_admin_login is not True:
                     cred_values["is_valid"] = False
 
+            # Сайт ОТВЕТИЛ через админку (ok / явный auth-fail) → он жив, даже
+            # если Tier 1 был xmlrpc_disabled / CF / network. Сбрасываем
+            # преждевременно накрученный на Tier 1 счётчик провалов сайта — иначе
+            # сайт, рабочий через admin (но с выключенным xmlrpc), мог бы
+            # отключиться по «xmlrpc disabled». Site-disable теперь честный:
+            # только когда ВСЯ цепочка (xmlrpc → admin → браузер) недоступна.
+            if login_res.error in (AdminLoginKind.OK, AdminLoginKind.AUTH_INVALID,
+                                   AdminLoginKind.PERMISSION_DENIED):
+                site_values["consecutive_site_failures"] = 0
+                site_values["last_site_failure_at"] = None
+                site_values["last_site_failure_kind"] = None
+
             # Запись
             async with WriteSession() as s_t2:
                 await s_t2.execute(
