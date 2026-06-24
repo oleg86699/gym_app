@@ -59,12 +59,13 @@ class ValidateBatchRequest(BaseModel):
     proxy_id: int | None = None
     detect_language: bool = True
     # Уровень валидации:
-    #   light — только XML-RPC (Tier 1). По умолчанию, самый быстрый.
+    #   light — только XML-RPC (Tier 1), самый быстрый.
     #   medium — + admin form-login (Tier 2) для случаев XML-RPC disabled
     #            или network errors. ~3x запросов.
     #   full — medium + capability probes (theme-editor / widgets / pages /
     #            wp_version / role). ~6-7 запросов на cred.
-    level: str = Field(default="light", pattern="^(light|medium|full)$")
+    # По умолчанию валидация ВСЕГДА идёт полным циклом (full).
+    level: str = Field(default="full", pattern="^(light|medium|full)$")
     # После валидации создать наши аккаунты на admin-сайтах батча
     provision_after: bool = False
     provision_role: str = Field(default="author", pattern="^(author|editor|administrator)$")

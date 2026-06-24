@@ -524,12 +524,14 @@ async def resume_endpoint(
         update(WpImportBatch).where(WpImportBatch.id == batch_id).values(pause_requested=False))
     await session.commit()
     from workers.taskiq.cron_tasks import validate_batch_task
-    # super_admin — как было (default light→medium); supplier — фикс medium.
-    level = "light" if actor.is_super_admin else "medium"
+    # Валидация ВСЕГДА полным циклом: super_admin — full (как импорт/ручной
+    # запуск), supplier — фикс medium (ограничение поставщика). Раньше resume
+    # форсил light — легаси-артефакт, ронял xmlrpc-disabled сайты в transient.
+    level = "full" if actor.is_super_admin else "medium"
     await validate_batch_task.kiq(batch_id=batch_id, scope="all", actor_id=actor.id,
                                   level=level, provision_after=False,
                                   concurrency=settings.DEFAULT_VALIDATION_CONCURRENCY)
-    log.info("batches.resume", actor_id=actor.id, batch_id=batch_id)
+    log.info("batches.resume", actor_id=actor.id, batch_id=batch_id, level=level)
     return {"ok": True}
 
 
@@ -541,10 +543,12 @@ async def revalidate_failed_endpoint(
 ) -> dict:
     b = await _batch_or_404(session, batch_id, actor)
     from workers.taskiq.cron_tasks import validate_batch_task
-    level = "light" if actor.is_super_admin else "medium"
+    # Полный цикл (full) для super_admin, medium для поставщика — см. resume.
+    level = "full" if actor.is_super_admin else "medium"
     await validate_batch_task.kiq(batch_id=batch_id, scope="invalid", actor_id=actor.id,
-                                  level=level, provision_after=False)
-    log.info("batches.revalidate_failed", actor_id=actor.id, batch_id=batch_id)
+                                  level=level, provision_after=False,
+                                  concurrency=settings.DEFAULT_VALIDATION_CONCURRENCY)
+    log.info("batches.revalidate_failed", actor_id=actor.id, batch_id=batch_id, level=level)
     return {"ok": True}
 
 

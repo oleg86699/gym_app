@@ -206,7 +206,7 @@ async def validate_batch_task(
     proxy_id: int | None = None,
     detect_lang: bool = True,
     actor_id: int | None = None,
-    level: str = "light",
+    level: str = "full",
     provision_after: bool = False,
     provision_role: str = "author",
 ) -> dict:
