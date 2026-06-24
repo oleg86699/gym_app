@@ -131,3 +131,9 @@ class BatchCredListResponse(BaseModel):
 class ForceCredStatusRequest(BaseModel):
     """Ручной override: пометить cred валидным или невалидным без перевалидации."""
     is_valid: bool
+
+
+class ResetValidationRequest(BaseModel):
+    """Подтверждение сброса валидации батча. Anti-fat-finger: клиент обязан
+    прислать ТОЧНОЕ имя батча в confirm_name, иначе сервер вернёт 400."""
+    confirm_name: str = Field(min_length=1)

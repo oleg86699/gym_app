@@ -436,6 +436,11 @@ export const wpBatches = {
   resume: (id: number) => api.post<{ ok: boolean }>(`/admin/api/batches/${id}/resume`),
   revalidateFailed: (id: number) =>
     api.post<{ ok: boolean }>(`/admin/api/batches/${id}/revalidate-failed`),
+  resetValidation: (id: number, confirm_name: string) =>
+    api.post<{ ok: boolean; creds_reset: number }>(
+      `/admin/api/batches/${id}/reset-validation`,
+      { confirm_name },
+    ),
   remove: (id: number) => api.del(`/admin/api/batches/${id}`),
   credentials: (
     id: number,

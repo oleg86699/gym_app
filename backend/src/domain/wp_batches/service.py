@@ -1419,6 +1419,54 @@ async def request_pause(session: AsyncSession, batch_id: int) -> None:
     await session.commit()
 
 
+async def reset_batch_validation(session: AsyncSession, batch_id: int) -> int:
+    """Полный сброс валидации батча: все creds → pending (как сразу после
+    импорта), счётчики/таймстампы батча обнулены, статус → uploaded.
+
+    Деструктивно: стирает все вердикты (valid/invalid/transient), capability-
+    матрицу (Tier 1/2 discovery) и cooldown'ы. НЕ трогает provision-флаги,
+    amount_use и сами логин/пароль. Нужен для чистого повторного прогона
+    (напр. когда первая проверка прошла неполным уровнем). Возвращает число
+    затронутых creds. После сброса нужен новый запуск validate (full)."""
+    res = await session.execute(
+        update(WpCredential)
+        .where(
+            WpCredential.import_batch_id == batch_id,
+            WpCredential.deleted_at.is_(None),
+        )
+        .values(
+            is_valid=True,            # + last_validated_at=None → cred_status='pending'
+            last_validated_at=None,
+            last_validation_kind=None,
+            last_error_message=None,
+            last_error_at=None,
+            error_counter=0,
+            error_cooldown_until=None,
+            # capability-матрица (Tier 1/2 discovery) — сброс
+            can_xmlrpc=None,
+            can_admin_login=None,
+            can_post_via_xmlrpc=None,
+            can_post_via_admin=None,
+            can_create_users=None,
+            admin_role=None,
+            last_admin_check_at=None,
+        )
+    )
+    await session.execute(
+        update(WpImportBatch).where(WpImportBatch.id == batch_id).values(
+            status=WpBatchStatus.UPLOADED.value,
+            valid_count=0,
+            invalid_count=0,
+            transient_count=0,
+            validation_started_at=None,
+            validation_finished_at=None,
+            pause_requested=False,
+        )
+    )
+    await session.commit()
+    return res.rowcount or 0
+
+
 # ─── Result CSV ─────────────────────────────────────────────────────
 
 

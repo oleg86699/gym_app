@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ArrowLeft, ArrowRight, Check, ChevronDown, ChevronRight, Copy, Download, Eye, EyeOff, Pause, Play, RotateCw, UserPlus, X } from 'lucide-svelte'
+  import { AlertTriangle, ArrowLeft, ArrowRight, Check, ChevronDown, ChevronRight, Copy, Download, Eye, EyeOff, Pause, Play, RotateCcw, RotateCw, UserPlus, X } from 'lucide-svelte'
   import { goto } from '$app/navigation'
   import { page } from '$app/state'
   import { onDestroy, onMount } from 'svelte'
@@ -245,6 +245,11 @@
   // Provision (создание наших author-аккаунтов) для всего батча
   let provBusy = $state(false)
 
+  // Reset validation (danger zone) — требует ввода имени батча
+  let resetOpen = $state(false)
+  let resetConfirm = $state('')
+  let resetBusy = $state(false)
+
   async function submitValidate(e: SubmitEvent) {
     e.preventDefault()
     if (!batch) return
@@ -307,6 +312,22 @@
       showToast('success', 'Deleted')
       goto('/batches')
     } catch (e) { showToast('error', e instanceof ApiError ? e.message : String(e)) }
+  }
+
+  // Имя введено точно? (включает кнопку подтверждения сброса)
+  let resetNameOk = $derived(!!batch && resetConfirm.trim() === batch.name)
+  async function doResetValidation() {
+    if (!batch || resetBusy || !resetNameOk) return
+    resetBusy = true
+    try {
+      const r = await batchesApi.resetValidation(batchId, resetConfirm.trim())
+      showToast('success', `Валидация сброшена: ${r.creds_reset} creds → pending`)
+      resetOpen = false
+      resetConfirm = ''
+      await refresh()
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    } finally { resetBusy = false }
   }
 
   // WP-роль → короткий бейдж с цветом. administrator выделен (важно для
@@ -476,6 +497,13 @@
           </div>
         {/if}
       </div>
+      {#if isSuper && batch.status !== 'validating'}
+        <button onclick={() => { resetConfirm = ''; resetOpen = true }}
+                title="Сбросить всю валидацию батча — все creds вернутся в pending для чистого повторного прогона"
+                class="rounded-md border border-red-500 bg-red-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-red-700">
+          <RotateCcw size={14} class="inline-block align-text-bottom" /> Сбросить валидацию
+        </button>
+      {/if}
       <button onclick={doDelete}
               class="rounded-md border border-red-300 bg-white px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50">
         <X size={14} class="inline-block align-text-bottom" /> Delete
@@ -940,6 +968,42 @@
           </button>
         </div>
       </form>
+    </div>
+  </div>
+{/if}
+
+<!-- Reset-validation modal (DANGER) -->
+{#if resetOpen && batch}
+  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+  <div class="fixed inset-0 z-30 flex items-center justify-center bg-slate-900/50 p-4" onclick={() => (resetOpen = false)}>
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="w-full max-w-md rounded-lg border-2 border-red-300 bg-white p-6 shadow-xl" onclick={(e) => e.stopPropagation()}>
+      <h2 class="flex items-center gap-2 text-lg font-semibold text-red-700">
+        <AlertTriangle size={20} /> Сбросить валидацию батча #{batch.id}
+      </h2>
+      <div class="mt-3 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+        <p class="font-medium">Это действие необратимо.</p>
+        <p class="mt-1 text-[13px]">
+          Все <b>{batch.total_credentials}</b> credentials вернутся в статус
+          <b>pending</b>: сотрутся вердикты (valid / invalid / transient),
+          capability-матрица и cooldown'ы. Логин/пароль и наши provision-аккаунты
+          останутся. После сброса запустите валидацию заново (full).
+        </p>
+      </div>
+      <label for="reset_confirm" class="mt-4 block text-xs font-medium text-slate-700">
+        Для подтверждения введите имя батча: <span class="font-mono text-red-600">{batch.name}</span>
+      </label>
+      <input id="reset_confirm" type="text" bind:value={resetConfirm} placeholder={batch.name}
+             autocomplete="off"
+             class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm focus:border-red-400 focus:ring-red-400" />
+      <div class="mt-4 flex justify-end gap-2">
+        <button type="button" onclick={() => (resetOpen = false)}
+                class="rounded-md border border-slate-300 px-3 py-1.5 text-sm">Отмена</button>
+        <button type="button" onclick={doResetValidation} disabled={!resetNameOk || resetBusy}
+                class="rounded-md bg-red-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:bg-slate-300">
+          {#if resetBusy}Сбрасываю…{:else}<RotateCcw size={14} class="inline-block align-text-bottom" /> Сбросить{/if}
+        </button>
+      </div>
     </div>
   </div>
 {/if}

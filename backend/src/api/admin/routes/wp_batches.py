@@ -19,6 +19,7 @@ from api.admin.schemas.wp_batches import (
     CreateBatchImportResult,
     ForceCredStatusRequest,
     ProvisionRequest,
+    ResetValidationRequest,
     ValidateBatchRequest,
     WpBatchListResponse,
     WpBatchResponse,
@@ -38,6 +39,7 @@ from domain.wp_batches.service import (
     iter_batch_result_rows,
     list_batches,
     request_pause as request_pause_batch,
+    reset_batch_validation,
     soft_delete_batch,
 )
 from infrastructure.db.models import AdminUser, WpBatchStatus, WpImportBatch
@@ -550,6 +552,40 @@ async def revalidate_failed_endpoint(
                                   concurrency=settings.DEFAULT_VALIDATION_CONCURRENCY)
     log.info("batches.revalidate_failed", actor_id=actor.id, batch_id=batch_id, level=level)
     return {"ok": True}
+
+
+@router.post("/{batch_id}/reset-validation", status_code=status.HTTP_200_OK)
+async def reset_validation_endpoint(
+    batch_id: int,
+    payload: ResetValidationRequest,
+    actor: AdminUser = Depends(require_super_admin),
+    session: AsyncSession = Depends(get_db_write),
+) -> dict:
+    """⚠️ ДЕСТРУКТИВНО: сбросить ВСЮ валидацию батча — все creds → pending,
+    счётчики/статус как у только что загруженного батча. Нужен для чистого
+    повторного прогона (напр. когда первая проверка прошла неполным уровнем).
+
+    Только super_admin. Anti-fat-finger: требует точного имени батча в
+    confirm_name. Нельзя сбросить во время активной валидации — сперва Pause."""
+    b = await get_batch(session, batch_id)
+    if b is None:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    if b.status == WpBatchStatus.VALIDATING.value:
+        raise HTTPException(
+            status_code=409,
+            detail="Идёт валидация — сначала поставьте на паузу, потом сбрасывайте",
+        )
+    if payload.confirm_name.strip() != b.name:
+        raise HTTPException(status_code=400, detail="Имя батча не совпадает — сброс отменён")
+    n = await reset_batch_validation(session, batch_id)
+    from domain.audit.service import record
+    await record(
+        session, actor=actor, action="wp_batches.reset_validation",
+        resource_type="wp_batch", resource_id=batch_id,
+        changes={"creds_reset": n, "name": b.name},
+    )
+    log.info("batches.reset_validation", actor_id=actor.id, batch_id=batch_id, creds_reset=n)
+    return {"ok": True, "creds_reset": n}
 
 
 # ─── Manual override per credential ─────────────────────────────────
