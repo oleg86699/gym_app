@@ -66,10 +66,10 @@ check_target() {
 
 if [[ "${GITHUB_REF_NAME:-}" == "main" ]]; then
   check_target "PROD_A" "${PROD_A_SSH_HOST:-}" "${PROD_A_SSH_USER:-}" "${PROD_A_SSH_AUTH:-}" "${PROD_A_SSH_PORT:-22}"
-  # Uncomment when you add a 2nd prod server (PROD_B_* secrets in GitHub):
-  # if [[ -n "${PROD_B_SSH_HOST:-}" ]]; then
-  #   check_target "PROD_B" "${PROD_B_SSH_HOST}" "${PROD_B_SSH_USER}" "${PROD_B_SSH_AUTH}" "${PROD_B_SSH_PORT:-22}"
-  # fi
+  # PROD_B проверяется только когда заданы его секреты (иначе пропускаем).
+  if [[ -n "${PROD_B_SSH_HOST:-}" ]]; then
+    check_target "PROD_B" "${PROD_B_SSH_HOST}" "${PROD_B_SSH_USER}" "${PROD_B_SSH_AUTH}" "${PROD_B_SSH_PORT:-22}"
+  fi
 else
   echo "::error::Unsupported branch for deploy: ${GITHUB_REF_NAME:-<unset>}"; failures=$((failures + 1))
 fi

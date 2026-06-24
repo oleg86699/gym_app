@@ -35,6 +35,10 @@ jobs:
       PROD_A_SSH_USER: ${{ secrets.PROD_A_SSH_USER || vars.PROD_A_SSH_USER }}
       PROD_A_SSH_PORT: ${{ secrets.PROD_A_SSH_PORT || vars.PROD_A_SSH_PORT || '22' }}
       PROD_A_SSH_AUTH: ${{ secrets.PROD_A_SSH_KEY }}
+      PROD_B_SSH_HOST: ${{ secrets.PROD_B_SSH_HOST || vars.PROD_B_SSH_HOST }}
+      PROD_B_SSH_USER: ${{ secrets.PROD_B_SSH_USER || vars.PROD_B_SSH_USER }}
+      PROD_B_SSH_PORT: ${{ secrets.PROD_B_SSH_PORT || vars.PROD_B_SSH_PORT || '22' }}
+      PROD_B_SSH_AUTH: ${{ secrets.PROD_B_SSH_KEY }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -255,9 +259,145 @@ jobs:
         if: always()
         run: rm -rf "${GITHUB_WORKSPACE}/.deploy-tmp"
 
+  # ── deploy to prod server B ────────────────────────────────────────
+  # Copy of deploy-prod-a (PROD_A_ → PROD_B_); runs in parallel.
+  deploy-prod-b:
+    needs: [preflight, build-and-push]
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      IMAGE_BASE: ${{ needs.preflight.outputs.image_base }}
+      VERSION: ${{ needs.preflight.outputs.version }}
+      DEPLOY_ROOT: ${{ vars.PROD_B_DEPLOY_ROOT || '/opt/gym_app' }}
+      PROD_SSH_HOST: ${{ secrets.PROD_B_SSH_HOST || vars.PROD_B_SSH_HOST }}
+      PROD_SSH_USER: ${{ secrets.PROD_B_SSH_USER || vars.PROD_B_SSH_USER }}
+      PROD_SSH_PORT: ${{ secrets.PROD_B_SSH_PORT || vars.PROD_B_SSH_PORT || '22' }}
+      PROD_SSH_KEY: ${{ secrets.PROD_B_SSH_KEY }}
+      APP_ENV_CONTENT: ${{ secrets.PROD_B_APP_ENV }}
+      PUBLIC_PORT: ${{ vars.PROD_B_PUBLIC_PORT || '8090' }}
+      NGINX_BIND_IP: ${{ vars.PROD_B_NGINX_BIND_IP || '0.0.0.0' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare SSH key file
+        id: ssh_key
+        shell: bash
+        run: |
+          set -euo pipefail
+          key_normalized="${PROD_SSH_KEY//$'\r'/}"
+          key_normalized="${key_normalized//\\n/$'\n'}"
+          key_dir="${GITHUB_WORKSPACE}/.deploy-tmp"; key_file="${key_dir}/prod_b_ssh_key"
+          mkdir -p "${key_dir}"; chmod 755 "${key_dir}"
+          printf '%s\n' "${key_normalized}" > "${key_file}"; chmod 600 "${key_file}"
+          ssh-keygen -y -f "${key_file}" >/dev/null; chmod 644 "${key_file}"
+          echo "path=${key_file}" >> "$GITHUB_OUTPUT"
+
+      - name: Render and validate .env
+        id: env_file
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="${GITHUB_WORKSPACE}/.deploy-tmp"; mkdir -p "${tmp}"; env_file="${tmp}/.env"
+          if [[ -z "${APP_ENV_CONTENT}" ]]; then echo "::error::PROD_B_APP_ENV secret is empty."; exit 1; fi
+          normalized="${APP_ENV_CONTENT//$'\r'/}"; normalized="${normalized//\\n/$'\n'}"
+          printf '%s\n' "${normalized}" > "${env_file}"; chmod 644 "${env_file}"
+          ./deploy/preflight-env.sh "${env_file}"
+          echo "path=${env_file}" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure remote directories
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ env.PROD_SSH_HOST }}
+          port: ${{ env.PROD_SSH_PORT }}
+          username: ${{ env.PROD_SSH_USER }}
+          key_path: ${{ steps.ssh_key.outputs.path }}
+          envs: DEPLOY_ROOT
+          script: |
+            set -euo pipefail
+            sudo mkdir -p "${DEPLOY_ROOT}/deploy" "${DEPLOY_ROOT}/docker/nginx/conf.d" \
+                         "${DEPLOY_ROOT}/data" "${DEPLOY_ROOT}/backups"
+            me="$(whoami)"
+            sudo chown "${me}" "${DEPLOY_ROOT}"
+            sudo chown -R "${me}" "${DEPLOY_ROOT}/deploy" "${DEPLOY_ROOT}/docker"
+            for f in "${DEPLOY_ROOT}/.env" "${DEPLOY_ROOT}/docker-compose.yaml"; do
+              if [ -e "${f}" ]; then sudo chown "${me}" "${f}"; fi
+            done
+
+      - name: Upload .env
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ env.PROD_SSH_HOST }}
+          port: ${{ env.PROD_SSH_PORT }}
+          username: ${{ env.PROD_SSH_USER }}
+          key_path: ${{ steps.ssh_key.outputs.path }}
+          source: ".deploy-tmp/.env"
+          target: ${{ env.DEPLOY_ROOT }}
+          strip_components: 1
+          overwrite: true
+
+      - name: Upload compose + nginx config
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ env.PROD_SSH_HOST }}
+          port: ${{ env.PROD_SSH_PORT }}
+          username: ${{ env.PROD_SSH_USER }}
+          key_path: ${{ steps.ssh_key.outputs.path }}
+          source: "docker-compose.yaml,deploy/docker-compose.deploy.yaml,docker/nginx/nginx.conf,docker/nginx/conf.d/default.prod.conf"
+          target: ${{ env.DEPLOY_ROOT }}
+          overwrite: true
+
+      - name: Deploy stack
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ env.PROD_SSH_HOST }}
+          port: ${{ env.PROD_SSH_PORT }}
+          username: ${{ env.PROD_SSH_USER }}
+          key_path: ${{ steps.ssh_key.outputs.path }}
+          command_timeout: 25m
+          envs: IMAGE_BASE,VERSION,DEPLOY_ROOT,PUBLIC_PORT,NGINX_BIND_IP
+          script: |
+            set -euo pipefail
+            cd "${DEPLOY_ROOT}"
+            export APP_IMAGE_REF="${IMAGE_BASE}/app:${VERSION}"
+            export UI_IMAGE_REF="${IMAGE_BASE}/ui:${VERSION}"
+            export BACKUP_IMAGE_REF="${IMAGE_BASE}/backup:${VERSION}"
+            export PUBLIC_PORT="${PUBLIC_PORT}"
+            export NGINX_BIND_IP="${NGINX_BIND_IP}"
+
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+            COMPOSE="docker compose --project-name gym_app \
+              -f docker-compose.yaml -f deploy/docker-compose.deploy.yaml"
+
+            ${COMPOSE} pull
+            ${COMPOSE} up -d --remove-orphans
+            ${COMPOSE} ps
+            ${COMPOSE} logs --tail=40 app || true
+            docker image prune -af || true
+
+      - name: Diagnostics on failure
+        if: failure()
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ env.PROD_SSH_HOST }}
+          port: ${{ env.PROD_SSH_PORT }}
+          username: ${{ env.PROD_SSH_USER }}
+          key_path: ${{ steps.ssh_key.outputs.path }}
+          envs: DEPLOY_ROOT
+          script: |
+            set -x
+            cd "${DEPLOY_ROOT}" || exit 0
+            COMPOSE="docker compose --project-name gym_app -f docker-compose.yaml -f deploy/docker-compose.deploy.yaml"
+            ${COMPOSE} ps -a || true
+            ${COMPOSE} logs --tail=200 || true
+
+      - name: Cleanup
+        if: always()
+        run: rm -rf "${GITHUB_WORKSPACE}/.deploy-tmp"
+
   # ── tag the release ────────────────────────────────────────────────
   tag-release:
-    needs: [preflight, deploy-prod-a]
+    needs: [preflight, deploy-prod-a, deploy-prod-b]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
