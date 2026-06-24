@@ -910,17 +910,10 @@
           </select>
         </div>
         {#if isSuper}
-        <div>
-          <label for="bv_level" class="block text-xs font-medium text-slate-700">Validation level</label>
-          <select id="bv_level" bind:value={vLevel}
-                  class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
-            <option value="light">Light — XML-RPC only (fastest)</option>
-            <option value="medium">Medium — + admin form-login (catches XML-RPC disabled sites)</option>
-            <option value="full">Full — + capability probes (theme/widgets/pages, ~6 req/cred)</option>
-          </select>
-          <p class="mt-1 text-[11px] text-slate-400">
-            Light: ~1 HTTP req/cred · Medium: ~3 req/cred · Full: ~6-7 req/cred.
-          </p>
+        <div class="rounded-md border border-emerald-200 bg-emerald-50 p-2 text-[11px] text-emerald-800">
+          Полный цикл (всегда): <b>full</b>-валидация (XML-RPC + admin-login + probes)
+          <b>и создание наших author-аккаунтов</b> там, где мы админ с правом create_users.
+          Отдельной опции нет.
         </div>
         <div>
           <label for="bv_conc" class="block text-xs font-medium text-slate-700">Concurrency <span class="text-slate-400">(пусто = по умолчанию сервера)</span></label>
@@ -942,17 +935,6 @@
             <input type="checkbox" bind:checked={vDetectLang} class="rounded border-slate-300" />
             Detect site language (+1 GET per site)
           </label>
-        </div>
-        <div class="rounded-md border border-blue-200 bg-blue-50 p-2">
-          <label class="flex items-center gap-2 text-sm text-blue-800">
-            <input type="checkbox" bind:checked={vProvision} class="rounded border-blue-300" />
-            После валидации создать наши author-аккаунты
-          </label>
-          <p class="mt-1 text-[11px] text-blue-600">
-            Валидация проверит и XML-RPC, и admin-логин на каждом креде (level авто-поднимется
-            до medium), определит роль, и сразу создаст наш author-аккаунт там, где мы админ
-            с правом create_users и нашего аккаунта ещё нет.
-          </p>
         </div>
         {:else}
           <p class="text-[11px] text-slate-400">

@@ -420,12 +420,12 @@ async def validate_endpoint(
     if b.status == WpBatchStatus.VALIDATING.value:
         raise HTTPException(status_code=409, detail="Validation already running")
 
-    # Поставщик: форсим безопасные параметры (никакого провижна/выбора прокси,
-    # фиксированный level). super_admin — как просил.
+    # Полный цикл ВСЕГДА: super_admin валидирует на full И создаёт наши аккаунты
+    # (provision) — другого варианта нет. Поставщик: фикс medium, без провижна.
     is_super = actor.is_super_admin
-    level = payload.level if is_super else "medium"
+    level = "full" if is_super else "medium"
     proxy_id = payload.proxy_id if is_super else None
-    provision_after = payload.provision_after if is_super else False
+    provision_after = is_super
     # super: явное значение из диалога или серверный дефолт; supplier: фикс 8.
     concurrency = (payload.concurrency or settings.DEFAULT_VALIDATION_CONCURRENCY) if is_super else 8
 
@@ -531,7 +531,7 @@ async def resume_endpoint(
     # форсил light — легаси-артефакт, ронял xmlrpc-disabled сайты в transient.
     level = "full" if actor.is_super_admin else "medium"
     await validate_batch_task.kiq(batch_id=batch_id, scope="all", actor_id=actor.id,
-                                  level=level, provision_after=False,
+                                  level=level, provision_after=actor.is_super_admin,
                                   concurrency=settings.DEFAULT_VALIDATION_CONCURRENCY)
     log.info("batches.resume", actor_id=actor.id, batch_id=batch_id, level=level)
     return {"ok": True}
@@ -548,7 +548,7 @@ async def revalidate_failed_endpoint(
     # Полный цикл (full) для super_admin, medium для поставщика — см. resume.
     level = "full" if actor.is_super_admin else "medium"
     await validate_batch_task.kiq(batch_id=batch_id, scope="invalid", actor_id=actor.id,
-                                  level=level, provision_after=False,
+                                  level=level, provision_after=actor.is_super_admin,
                                   concurrency=settings.DEFAULT_VALIDATION_CONCURRENCY)
     log.info("batches.revalidate_failed", actor_id=actor.id, batch_id=batch_id, level=level)
     return {"ok": True}
