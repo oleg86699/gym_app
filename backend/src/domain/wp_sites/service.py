@@ -757,24 +757,17 @@ async def refresh_pool_summary_mv(session: AsyncSession) -> None:
 
 
 async def list_credential_tags(session: AsyncSession) -> list[str]:
-    """Теги для фильтра пула доступов прогона — ОБЪЕДИНЕНИЕ тегов БАТЧЕЙ
-    (WpImportBatch.tag — то, что видно в списке батчей) и тегов КРЕДОВ
-    (WpCredential.tags: provisioned/role от провижна + ручные). Сортировка по
-    свежести — новые сверху (по самому позднему created_at источника тега)."""
+    """Теги БАТЧЕЙ (WpImportBatch.tag — то, что видно в списке батчей) для
+    фильтра пула доступов прогона, по свежести — новые сверху. Теги кредов
+    (provisioned/role/ручные) пока НЕ включаем — только батч-теги."""
     from sqlalchemy import func as _f
 
-    cred_tags = select(
-        _f.unnest(WpCredential.tags).label("tag"),
-        WpCredential.created_at.label("ts"),
-    ).where(WpCredential.deleted_at.is_(None))
-    batch_tags = select(
-        WpImportBatch.tag.label("tag"),
-        WpImportBatch.created_at.label("ts"),
-    ).where(WpImportBatch.tag.isnot(None), WpImportBatch.deleted_at.is_(None))
-    u = cred_tags.union_all(batch_tags).subquery()
     rows = (
         await session.execute(
-            select(u.c.tag).group_by(u.c.tag).order_by(_f.max(u.c.ts).desc())
+            select(WpImportBatch.tag)
+            .where(WpImportBatch.tag.isnot(None), WpImportBatch.deleted_at.is_(None))
+            .group_by(WpImportBatch.tag)
+            .order_by(_f.max(WpImportBatch.created_at).desc())
         )
     ).all()
     return [r[0] for r in rows if r[0]]
