@@ -1373,6 +1373,29 @@ async def run_batch_validation(
     async with WriteSession() as s_fin:
         fresh_batch = await get_batch(s_fin, batch_id)
         was_paused = fresh_batch.pause_requested if fresh_batch else False
+        if not was_paused:
+            # Креды, оставшиеся pending на ОТКЛЮЧЁННЫХ сайтах: сайт исключён из
+            # scope валидации (is_active=false), проверить их нечем и незачем —
+            # они не «ждут проверки». Метим терминально site_disabled → invalid,
+            # чтобы не висели фантомным pending при DONE (live-счётчики посчитают
+            # их в invalid).
+            await s_fin.execute(
+                update(WpCredential)
+                .where(
+                    WpCredential.import_batch_id == batch_id,
+                    WpCredential.deleted_at.is_(None),
+                    WpCredential.last_validated_at.is_(None),
+                    WpCredential.site_id.in_(
+                        select(WpSite.id).where(WpSite.is_active.is_(False))
+                    ),
+                )
+                .values(
+                    is_valid=False,
+                    last_validation_kind="site_disabled",
+                    last_validated_at=datetime.now(UTC),
+                    last_error_message="сайт отключён (недоступен / parked)",
+                )
+            )
         await s_fin.execute(
             update(WpImportBatch).where(WpImportBatch.id == batch_id).values(
                 status=(
