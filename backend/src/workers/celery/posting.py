@@ -243,13 +243,15 @@ async def _external_gen_pending(run_id: int) -> int:
 
 def _run_site_filter(run):
     """(site_langs, site_tlds, site_tags, site_domains) из gen_params рана —
-    фильтр пула сайтов: язык / TLD / теги кредов / явный список доменов."""
+    фильтр пула сайтов: язык / TLD / теги кредов / явный список доменов.
+    Домены могут лежать inline или файлом в MinIO (resolve_site_domains)."""
+    from domain.postings.service import resolve_site_domains
     gp = getattr(run, "gen_params", None) or {}
     return (
         gp.get("site_langs") or None,
         gp.get("site_tlds") or None,
         gp.get("site_tags") or None,
-        gp.get("site_domains") or None,
+        resolve_site_domains(gp),
     )
 
 

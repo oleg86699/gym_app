@@ -523,6 +523,7 @@ export interface CreateRunParams {
   // (через запятую/перенос). Пусто = весь пул.
   site_tags?: string | null
   site_domains?: string | null
+  site_domains_key?: string | null  // большой список доменов файлом в MinIO
   // csv_direct: инжектить ли ссылку из строки в тело (по умолчанию false)
   csv_inject_link?: boolean
   // ─── csv_campaign (Content Engine) ───

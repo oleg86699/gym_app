@@ -113,14 +113,15 @@ def parse_domain_list(s: str | None) -> list[str]:
 async def _store_site_filter(session: AsyncSession, run_id: int,
                              site_langs: str | None, site_tlds: str | None,
                              site_tags: str | None = None,
-                             site_domains: str | None = None) -> None:
+                             site_domains: str | None = None,
+                             site_domains_key: str | None = None) -> None:
     """Сохранить фильтр пула сайтов (lang/tld/tags/domains) в gen_params рана.
-    No-op если всё пусто."""
+    No-op если всё пусто. site_domains_key — большой список файлом в MinIO."""
     langs = parse_site_filter(site_langs)
     tlds = parse_site_filter(site_tlds)
     tags = parse_tag_list(site_tags)
     domains = parse_domain_list(site_domains)
-    if not langs and not tlds and not tags and not domains:
+    if not langs and not tlds and not tags and not domains and not site_domains_key:
         return
     gp = dict((await session.scalar(
         select(PostingRun.gen_params).where(PostingRun.id == run_id))) or {})
@@ -132,6 +133,8 @@ async def _store_site_filter(session: AsyncSession, run_id: int,
         gp["site_tags"] = tags
     if domains:
         gp["site_domains"] = domains
+    elif site_domains_key:
+        gp["site_domains_key"] = site_domains_key
     await session.execute(update(PostingRun).where(PostingRun.id == run_id).values(gen_params=gp))
     await session.commit()
 
@@ -139,6 +142,29 @@ async def _store_site_filter(session: AsyncSession, run_id: int,
 # Один роутер с двумя prefix-ами: nested /projects/{id}/postings и flat /postings/{id}
 project_postings_router = APIRouter(prefix="/projects", tags=["postings"])
 postings_router = APIRouter(prefix="/postings", tags=["postings"])
+
+
+@postings_router.post("/domain-list")
+async def upload_domain_list_endpoint(
+    file: UploadFile = File(..., description="txt/csv: домены пула (по одному в строке)"),
+    viewer: AdminUser = Depends(get_current_user),
+) -> dict:
+    """Загрузить большой список доменов файлом для пула доступов прогона.
+    Нормализуем + дедупим, кладём в MinIO, возвращаем ключ + count. Ключ
+    передаётся в params рана как site_domains_key (вместо inline site_domains)."""
+    raw = await file.read()
+    if len(raw) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File too large (>20 MB)")
+    domains = parse_domain_list(raw.decode("utf-8", errors="ignore"))
+    if not domains:
+        raise HTTPException(status_code=400, detail="Не нашёл валидных доменов в файле")
+    key = f"domains-{uuid.uuid4().hex}/list.txt"
+    storage.put_bytes(
+        settings.MINIO_BUCKET_UPLOADS, key,
+        "\n".join(domains).encode("utf-8"), content_type="text/plain",
+    )
+    log.info("postings.domain_list.uploaded", actor_id=viewer.id, count=len(domains), key=key)
+    return {"key": key, "count": len(domains)}
 
 
 # ─── List runs of project ────────────────────────────────────────────
@@ -274,7 +300,7 @@ async def create_project_run(
         post_verify=parsed.post_verify,
     )
     await _store_site_filter(session, run.id, parsed.site_langs, parsed.site_tlds,
-                             parsed.site_tags, parsed.site_domains)
+                             parsed.site_tags, parsed.site_domains, parsed.site_domains_key)
 
     log.info(
         "postings.created",
@@ -368,7 +394,7 @@ async def create_csv_direct_run(
         post_verify=parsed.post_verify,
     )
     await _store_site_filter(session, run.id, parsed.site_langs, parsed.site_tlds,
-                             parsed.site_tags, parsed.site_domains)
+                             parsed.site_tags, parsed.site_domains, parsed.site_domains_key)
     if parsed.csv_inject_link:
         # Флаг «инжектить ссылку из строки в текст» — читается воркером csv_direct.
         gp = (await session.scalar(
@@ -460,7 +486,8 @@ async def create_campaign_run(
                **({"site_langs": parse_site_filter(parsed.site_langs)} if parse_site_filter(parsed.site_langs) else {}),
                **({"site_tlds": parse_site_filter(parsed.site_tlds)} if parse_site_filter(parsed.site_tlds) else {}),
                **({"site_tags": parse_tag_list(parsed.site_tags)} if parse_tag_list(parsed.site_tags) else {}),
-               **({"site_domains": parse_domain_list(parsed.site_domains)} if parse_domain_list(parsed.site_domains) else {})}
+               **({"site_domains": parse_domain_list(parsed.site_domains)} if parse_domain_list(parsed.site_domains)
+                  else {"site_domains_key": parsed.site_domains_key} if parsed.site_domains_key else {})}
     from domain.content_engine import create_empty_campaign_items
     total, groups, main_ids = await create_empty_campaign_items(
         run.id, project.id, pc.rows, parsed.content_mode, parsed.language)
@@ -557,6 +584,7 @@ async def create_link_run_endpoint(
         site_tlds=parse_site_filter(parsed.site_tlds),
         site_tags=parse_tag_list(parsed.site_tags),
         site_domains=parse_domain_list(parsed.site_domains),
+        site_domains_key=parsed.site_domains_key,
         max_posts_per_site=parsed.max_posts_per_site,
         proxy_selector=parsed.proxy_selector, spread_days=parsed.spread_days,
         scheduled_for=parsed.scheduled_for,

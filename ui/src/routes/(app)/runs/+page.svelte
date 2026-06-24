@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { AlertTriangle, ArrowRight, HelpCircle, Play, X } from 'lucide-svelte'
+  import { AlertTriangle, ArrowRight, Check, HelpCircle, Play, X } from 'lucide-svelte'
   import { onDestroy, onMount } from 'svelte'
 
   import {
@@ -277,20 +277,49 @@
   // Источник пула доступов: all = весь пул; tags = по тегам кредов; domains = свой список
   let poolMode = $state<'all' | 'tags' | 'domains'>('all')
   let newSiteTags = $state<string[]>([])   // выбранные теги (для poolMode='tags')
-  let newSiteDomains = $state('')           // свой список доменов (для poolMode='domains')
+  let newSiteDomains = $state('')           // свой список доменов inline (для poolMode='domains')
+  let newSiteDomainsKey = $state<string | null>(null)  // большой список файлом → MinIO-ключ
+  let domainsFileCount = $state(0)          // сколько доменов в загруженном файле
+  let domainsUploading = $state(false)
   let availableTags = $state<string[]>([])  // все теги кредов (из credential-tags)
   let tagSearch = $state('')                // поиск по тегам (для 100+)
+  const TAG_RESULTS_CAP = 24                // не вываливаем 100+ тегов сразу
   let domainCount = $derived(
-    newSiteDomains.split(/[\n,\s]+/).map((d) => d.trim()).filter(Boolean).length,
+    newSiteDomainsKey
+      ? domainsFileCount
+      : newSiteDomains.split(/[\n,\s]+/).map((d) => d.trim()).filter(Boolean).length,
   )
   let filteredTags = $derived.by(() => {
     const q = tagSearch.trim().toLowerCase()
     return q ? availableTags.filter((t) => t.toLowerCase().includes(q)) : availableTags
   })
+  // Результаты поиска тегов = отфильтрованные минус уже выбранные, с потолком
+  let tagResultsAll = $derived(filteredTags.filter((t) => !newSiteTags.includes(t)))
+  let tagResults = $derived(tagResultsAll.slice(0, TAG_RESULTS_CAP))
+  let tagResultsMore = $derived(Math.max(0, tagResultsAll.length - TAG_RESULTS_CAP))
   function toggleTag(tag: string) {
     newSiteTags = newSiteTags.includes(tag)
       ? newSiteTags.filter((t) => t !== tag)
       : [...newSiteTags, tag]
+  }
+  async function uploadDomainsFile(file: File | null) {
+    if (!file) return
+    domainsUploading = true
+    try {
+      const r = await postingsApi.uploadDomainList(file)
+      newSiteDomainsKey = r.key
+      domainsFileCount = r.count
+      newSiteDomains = ''  // файл имеет приоритет над textarea
+      showToast('success', `Загружено доменов: ${r.count}`)
+    } catch (e) {
+      newSiteDomainsKey = null
+      domainsFileCount = 0
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    } finally { domainsUploading = false }
+  }
+  function clearDomainsFile() {
+    newSiteDomainsKey = null
+    domainsFileCount = 0
   }
   // Сводки для свёрнутых категорий — видно настройки не разворачивая
   let poolSummary = $derived(
@@ -395,6 +424,8 @@
     poolMode = 'all'
     newSiteTags = []
     newSiteDomains = ''
+    newSiteDomainsKey = null
+    domainsFileCount = 0
     tagSearch = ''
     createOpen = true
   }
@@ -451,7 +482,8 @@
         post_verify: newPostVerify,
         site_langs: newSiteLangs.trim() || null, site_tlds: newSiteTlds.trim() || null,
         site_tags: poolMode === 'tags' ? (newSiteTags.join(',') || null) : null,
-        site_domains: poolMode === 'domains' ? (newSiteDomains.trim() || null) : null,
+        site_domains: poolMode === 'domains' && !newSiteDomainsKey ? (newSiteDomains.trim() || null) : null,
+        site_domains_key: poolMode === 'domains' ? newSiteDomainsKey : null,
       }
       if (newTaskType === 'post' && postSource === 'zip') {
         const run = await postingsApi.create(newProjectId, newFile, base)
@@ -484,7 +516,8 @@
           proxy_selector: newProxySelector,
           site_langs: newSiteLangs.trim() || null, site_tlds: newSiteTlds.trim() || null,
           site_tags: poolMode === 'tags' ? (newSiteTags.join(',') || null) : null,
-          site_domains: poolMode === 'domains' ? (newSiteDomains.trim() || null) : null,
+          site_domains: poolMode === 'domains' && !newSiteDomainsKey ? (newSiteDomains.trim() || null) : null,
+          site_domains_key: poolMode === 'domains' ? newSiteDomainsKey : null,
         })
         showToast('success', `Link-run "${run.name}" создан (${run.total_texts} целей). Запусти кнопкой Start.`)
       }
@@ -1039,29 +1072,56 @@
                   {#if availableTags.length === 0}
                     <p class="mt-2 text-[11px] text-slate-400">Тегов пока нет — добавь теги кредам/батчам.</p>
                   {:else}
-                    <input bind:value={tagSearch} placeholder="поиск тега…"
+                    {#if newSiteTags.length}
+                      <div class="mt-2 flex flex-wrap items-center gap-1.5">
+                        {#each newSiteTags as tag}
+                          <button type="button" onclick={() => toggleTag(tag)}
+                                  class="flex items-center gap-1 rounded-full border border-brand-400 bg-brand-50 px-2.5 py-1 text-[12px] text-brand-700">
+                            {tag} <X size={11} class="inline-block" />
+                          </button>
+                        {/each}
+                        <button type="button" onclick={() => (newSiteTags = [])} class="px-1 text-[11px] text-slate-400 hover:text-slate-600">сбросить</button>
+                      </div>
+                    {/if}
+                    <input bind:value={tagSearch} placeholder={`поиск среди ${availableTags.length} тегов…`}
                            class="mt-2 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
-                    <div class="mt-2 flex max-h-36 flex-wrap gap-1.5 overflow-auto">
-                      {#each filteredTags as tag}
+                    <div class="mt-2 flex max-h-32 flex-wrap gap-1.5 overflow-auto">
+                      {#each tagResults as tag}
                         <button type="button" onclick={() => toggleTag(tag)}
-                                class="rounded-full border px-2.5 py-1 text-[12px] {newSiteTags.includes(tag) ? 'border-brand-400 bg-brand-50 text-brand-700' : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-50'}">
-                          {tag}
+                                class="rounded-full border border-slate-300 bg-white px-2.5 py-1 text-[12px] text-slate-600 hover:bg-slate-50">
+                          + {tag}
                         </button>
                       {/each}
-                      {#if filteredTags.length === 0}<p class="text-[11px] text-slate-400">Ничего не найдено.</p>{/if}
+                      {#if tagResults.length === 0}
+                        <p class="text-[11px] text-slate-400">{tagSearch.trim() ? 'Ничего не найдено.' : 'Все теги выбраны.'}</p>
+                      {/if}
                     </div>
-                    <p class="mt-1 text-[11px] text-slate-400">
-                      Выбрано: <b>{newSiteTags.length}</b>{#if newSiteTags.length} · <button type="button" onclick={() => (newSiteTags = [])} class="text-brand-600 hover:underline">сбросить</button>{/if} · берём сайты с кредом, у которого есть хотя бы один из тегов.
-                    </p>
+                    {#if tagResultsMore > 0}
+                      <p class="mt-1 text-[11px] text-slate-400">…ещё {tagResultsMore} — уточни поиск.</p>
+                    {/if}
+                    <p class="mt-1 text-[11px] text-slate-400">Выбрано: <b>{newSiteTags.length}</b> · берём сайты с кредом, у которого есть хотя бы один из выбранных тегов.</p>
                   {/if}
                 {:else if poolMode === 'domains'}
-                  <textarea bind:value={newSiteDomains} rows="4"
-                            placeholder="по домену в строке (или через запятую): example.com, blog.example.org"
-                            class="mt-2 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm font-mono"></textarea>
+                  {#if newSiteDomainsKey}
+                    <div class="mt-2 flex items-center gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+                      <Check size={14} /> Загружено <b>{domainsFileCount}</b> доменов из файла.
+                      <button type="button" onclick={clearDomainsFile} class="ml-auto text-[12px] text-emerald-700 hover:underline">убрать</button>
+                    </div>
+                  {:else}
+                    <textarea bind:value={newSiteDomains} rows="4"
+                              placeholder="по домену в строке (или через запятую): example.com, blog.example.org"
+                              class="mt-2 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm font-mono"></textarea>
+                    <div class="mt-2 flex items-center gap-2 text-[11px] text-slate-500">
+                      <span>или большой список файлом:</span>
+                      <input type="file" accept=".txt,.csv,text/plain,text/csv" disabled={domainsUploading}
+                             onchange={(e) => uploadDomainsFile((e.currentTarget as HTMLInputElement).files?.[0] ?? null)}
+                             class="text-[11px]" />
+                      {#if domainsUploading}<span class="text-slate-400">загрузка…</span>{/if}
+                    </div>
+                  {/if}
                   <p class="mt-1 text-[11px] text-slate-400">
-                    Постим только на эти домены — креды берём из базы.
+                    Постим только на эти домены — креды к ним берём из базы.
                     {#if domainCount > 0}<b>{domainCount}</b> домен(ов).{/if}
-                    <span class="text-slate-300">Большой список файлом — добавим следующим шагом.</span>
                   </p>
                 {/if}
               </div>

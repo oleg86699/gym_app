@@ -24,6 +24,36 @@ from infrastructure.db.models import (
 )
 
 
+# ─── Пул доступов: резолв списка доменов ──────────────────────────────
+
+# Кэш списков доменов по MinIO-ключу (ключ → immutable список). Заполняется
+# лениво в воркере, чтобы не дёргать MinIO на каждой итерации подбора сайтов.
+_RUN_DOMAINS_CACHE: dict[str, list[str]] = {}
+
+
+def resolve_site_domains(gen_params) -> list[str] | None:
+    """Список доменов пула для прогона из gen_params:
+    - inline `site_domains` (маленький список, лежит прямо в gen_params), ИЛИ
+    - `site_domains_key` — большой список, загруженный файлом в MinIO; читаем
+      один раз и кэшируем по ключу. None → ограничения по домену нет."""
+    gp = gen_params or {}
+    inline = gp.get("site_domains")
+    if inline:
+        return inline
+    key = gp.get("site_domains_key")
+    if not key:
+        return None
+    if key not in _RUN_DOMAINS_CACHE:
+        from core.config import settings
+        from core.storage import storage
+        try:
+            raw = storage.get_bytes(settings.MINIO_BUCKET_UPLOADS, key)
+            _RUN_DOMAINS_CACHE[key] = [d.strip() for d in raw.decode("utf-8").splitlines() if d.strip()]
+        except Exception:
+            _RUN_DOMAINS_CACHE[key] = []
+    return _RUN_DOMAINS_CACHE[key] or None
+
+
 # ─── Access / scope ───────────────────────────────────────────────────
 
 

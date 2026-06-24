@@ -198,6 +198,9 @@ class CreateRunParams(BaseModel):
     # Свой список доменов (через запятую/перенос строки): постим ТОЛЬКО на эти
     # домены, креды к ним берём из базы. Пусто = без ограничения по домену.
     site_domains: str | None = Field(default=None, max_length=200_000)
+    # Большой список доменов — загружен файлом в MinIO (см. /postings/domain-list);
+    # тут лежит ключ объекта. Приоритет у inline site_domains, если задан.
+    site_domains_key: str | None = Field(default=None, max_length=300)
     # CSV-direct: инжектить ли ссылку из колонки link в тело (колонку text).
     # False (default) — тело постится как есть (ссылка должна быть уже в тексте).
     # True → применяем inject_link(body, link, anchor), как в Reuse-пути.
@@ -289,6 +292,7 @@ class CreateLinkRunFileParams(BaseModel):
     # Пул доступов: по тегам кредов / по своему списку доменов (см. CreateRunParams).
     site_tags: str | None = Field(default=None, max_length=2000)
     site_domains: str | None = Field(default=None, max_length=200_000)
+    site_domains_key: str | None = Field(default=None, max_length=300)
     # Сколько раз один сайт можно использовать в задаче (1 = «1 сайт = 1 ссылка»).
     max_posts_per_site: int = Field(default=1, ge=1, le=1000)
     # Отложенный старт: пусто = стартует сразу (READY → ручной Start). Задано =

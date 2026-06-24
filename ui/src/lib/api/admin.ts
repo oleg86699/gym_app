@@ -699,12 +699,18 @@ export const postings = {
       publish_to?: string | null
       site_tags?: string | null
       site_domains?: string | null
+      site_domains_key?: string | null
     },
   ) => {
     const fd = new FormData()
     fd.append('file', file)
     fd.append('params', JSON.stringify(params))
     return api.upload<PostingRun>(`/admin/api/projects/${projectId}/postings/links`, fd)
+  },
+  uploadDomainList: (file: File) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return api.upload<{ key: string; count: number }>('/admin/api/postings/domain-list', fd)
   },
   removeLink: (runId: number, itemId: number) =>
     api.post<{ ok: boolean; status: string }>(

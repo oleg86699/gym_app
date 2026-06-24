@@ -121,6 +121,7 @@ async def create_link_run(
     priority: str = "normal", max_sites: int | None = None,
     site_langs: list[str] | None = None, site_tlds: list[str] | None = None,
     site_tags: list[str] | None = None, site_domains: list[str] | None = None,
+    site_domains_key: str | None = None,
     max_posts_per_site: int = 1, proxy_selector: str | None = None,
     spread_days: int = 0, scheduled_for: datetime | None = None,
     publish_from: date | None = None, publish_to: date | None = None,
@@ -151,6 +152,8 @@ async def create_link_run(
         gp["site_tags"] = site_tags
     if site_domains:
         gp["site_domains"] = site_domains
+    elif site_domains_key:
+        gp["site_domains_key"] = site_domains_key
 
     status = (PostingRunStatus.SCHEDULED if scheduled_for
               else PostingRunStatus.READY)
@@ -319,10 +322,11 @@ async def process_link_item(
             await _mark_item(s, item_id, TextItemStatus.FAILED, last_error="no url")
         return {"ok": False, "status": "error", "item_id": item_id}
 
+    from domain.postings.service import resolve_site_domains
     site_langs = gp.get("site_langs")
     site_tlds = gp.get("site_tlds")
     site_tags = gp.get("site_tags")
-    site_domains = gp.get("site_domains")
+    site_domains = resolve_site_domains(gp)
     last_status, last_domain = "no_sites", None
     while True:
         async with WriteSession() as s:
