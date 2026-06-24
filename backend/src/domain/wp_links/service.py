@@ -9,7 +9,7 @@ process_link_item:
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import structlog
 from sqlalchemy import distinct, exists, func, select, text as sql_text, update
@@ -117,6 +117,7 @@ async def create_link_run(
     site_langs: list[str] | None = None, site_tlds: list[str] | None = None,
     max_posts_per_site: int = 1, proxy_selector: str | None = None,
     spread_days: int = 0, scheduled_for: datetime | None = None,
+    publish_from: date | None = None, publish_to: date | None = None,
 ) -> PostingRun:
     """Создать link-run + TextItems.
 
@@ -149,6 +150,7 @@ async def create_link_run(
         concurrency=concurrency, timeout_seconds=timeout_seconds, priority=priority,
         max_posts_per_site=max_posts_per_site, proxy_selector=proxy_selector,
         spread_days=spread_days or 0, scheduled_for=scheduled_for,
+        publish_from=publish_from, publish_to=publish_to,
         gen_params=gp or None,
     )
     session.add(run)

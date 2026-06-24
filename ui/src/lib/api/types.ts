@@ -509,6 +509,9 @@ export interface CreateRunParams {
   priority?: PostingRunPriority
   max_posts_per_site?: number            // 1 = «1 сайт = 1 пост»; подними чтобы добрать сайты
   scheduled_for?: string | null
+  // Окно публикации этого прогона (YYYY-MM-DD). Обе пустые → глобальный дефолт из settings
+  publish_from?: string | null
+  publish_to?: string | null
   spread_days?: number                   // drip-feed: размазать постинг на N дней (0 = сразу)
   proxy_id?: number | null              // legacy, оставлено для back-compat
   proxy_selector?: string | null         // "direct" | "all" | "provider:<name>" | "single:<id>"

@@ -158,6 +158,11 @@ class CreateRunParams(BaseModel):
     # добрать из уже использованных сайтов. Редактируется и после создания.
     max_posts_per_site: int = Field(default=1, ge=1, le=1000)
     scheduled_for: datetime | None = None
+    # Окно публикации [publish_from, publish_to] для ЭТОГО прогона: воркер ставит
+    # каждому посту случайную (прошедшую) дату внутри окна. Если обе пустые —
+    # берётся глобальный дефолт из app_settings (default_publish_from/to).
+    publish_from: date | None = None
+    publish_to: date | None = None
     # Drip-feed: размазать постинг всех текстов на N дней (link velocity).
     # 0 = постить всё сразу. Окно стартует от scheduled_for (или момента запуска).
     spread_days: int = Field(default=0, ge=0, le=365)
@@ -284,6 +289,10 @@ class CreateLinkRunFileParams(BaseModel):
     spread_days: int = Field(default=0, ge=0, le=365)
     # Селектор прокси-пула: "direct" | "all" | "provider:<name>" | "single:<id>".
     proxy_selector: str | None = Field(default=None, max_length=120)
+    # Окно публикации [publish_from, publish_to] для этого прогона. Обе пустые →
+    # глобальный дефолт из app_settings.
+    publish_from: date | None = None
+    publish_to: date | None = None
 
 
 # ─── Run detail: progress + text_items ────────────────────────────────

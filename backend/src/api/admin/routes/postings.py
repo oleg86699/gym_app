@@ -139,6 +139,14 @@ async def list_project_runs(
 # ─── Create run (multipart: file + JSON-params) ──────────────────────
 
 
+def _resolve_publish_window(pub_from, pub_to, app_cfg):
+    """Окно публикации прогона: per-run [pub_from, pub_to], если заданы ОБЕ
+    даты; иначе — глобальный дефолт из app_settings (default_publish_from/to)."""
+    if pub_from is not None and pub_to is not None:
+        return pub_from, pub_to
+    return app_cfg.default_publish_from, app_cfg.default_publish_to
+
+
 @project_postings_router.post(
     "/{project_id}/postings",
     response_model=PostingRunResponse,
@@ -209,13 +217,14 @@ async def create_project_run(
     app_cfg = await get_app_settings(session)
 
     # 7. Создаём запись прогона со статусом unpacking
+    pub_from, pub_to = _resolve_publish_window(parsed.publish_from, parsed.publish_to, app_cfg)
     run = await create_run(
         session,
         project=project,
         creator=viewer,
         name=parsed.name,
-        publish_from=app_cfg.default_publish_from,
-        publish_to=app_cfg.default_publish_to,
+        publish_from=pub_from,
+        publish_to=pub_to,
         concurrency=app_cfg.default_concurrency,
         timeout_seconds=app_cfg.default_timeout_seconds,
         priority=parsed.priority,
@@ -309,9 +318,10 @@ async def create_csv_direct_run(
         raise HTTPException(status_code=500, detail=f"Failed to store file: {e}") from e
 
     app_cfg = await get_app_settings(session)
+    pub_from, pub_to = _resolve_publish_window(parsed.publish_from, parsed.publish_to, app_cfg)
     run = await create_run(
         session, project=project, creator=viewer, name=parsed.name,
-        publish_from=app_cfg.default_publish_from, publish_to=app_cfg.default_publish_to,
+        publish_from=pub_from, publish_to=pub_to,
         concurrency=app_cfg.default_concurrency, timeout_seconds=app_cfg.default_timeout_seconds,
         priority=parsed.priority, scheduled_for=parsed.scheduled_for,
         spread_days=parsed.spread_days, source_archive_storage_key=upload_key,
@@ -391,9 +401,10 @@ async def create_campaign_run(
         raise HTTPException(status_code=500, detail=f"Failed to store file: {e}") from e
 
     app_cfg = await get_app_settings(session)
+    pub_from, pub_to = _resolve_publish_window(parsed.publish_from, parsed.publish_to, app_cfg)
     run = await create_run(
         session, project=project, creator=viewer, name=parsed.name,
-        publish_from=app_cfg.default_publish_from, publish_to=app_cfg.default_publish_to,
+        publish_from=pub_from, publish_to=pub_to,
         concurrency=app_cfg.default_concurrency, timeout_seconds=app_cfg.default_timeout_seconds,
         priority=parsed.priority, scheduled_for=parsed.scheduled_for,
         spread_days=parsed.spread_days, source_archive_storage_key=upload_key,
@@ -494,6 +505,7 @@ async def create_link_run_endpoint(
              for r in pc.rows]
 
     app_cfg = await get_app_settings(session)
+    pub_from, pub_to = _resolve_publish_window(parsed.publish_from, parsed.publish_to, app_cfg)
     from domain.wp_links import create_link_run
 
     run = await create_link_run(
@@ -506,6 +518,7 @@ async def create_link_run_endpoint(
         max_posts_per_site=parsed.max_posts_per_site,
         proxy_selector=parsed.proxy_selector, spread_days=parsed.spread_days,
         scheduled_for=parsed.scheduled_for,
+        publish_from=pub_from, publish_to=pub_to,
     )
     log.info("postings.link_run.created", run_id=run.id, project_id=project_id,
              task_type=parsed.task_type, links=len(links), total=run.total_texts, actor_id=viewer.id)

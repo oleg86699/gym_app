@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ArrowRight, HelpCircle, Play, X } from 'lucide-svelte'
+  import { AlertTriangle, ArrowRight, HelpCircle, Play, X } from 'lucide-svelte'
   import { onDestroy, onMount } from 'svelte'
 
   import {
@@ -269,6 +269,21 @@
   let newProxySelector = $state<string>('direct')
   let newPostingMethod = $state<'auto' | 'xmlrpc_only' | 'admin_only'>('auto')
   let newPostVerify = $state<'mark' | 'auto'>('mark')
+  // Окно публикации этого прогона (пусто = глобальный дефолт из settings)
+  let newPublishFrom = $state('')
+  let newPublishTo = $state('')
+  const today = new Date().toISOString().slice(0, 10)
+  // Окно: либо обе даты, либо обе пустые, и From <= To.
+  let newWindowInvalid = $derived.by(() => {
+    const a = newPublishFrom, b = newPublishTo
+    if (!a && !b) return false
+    if (!a || !b) return true
+    return a > b
+  })
+  // Дата в будущем → WP спрячет пост в Scheduled.
+  let newWindowFuture = $derived(
+    (!!newPublishFrom && newPublishFrom > today) || (!!newPublishTo && newPublishTo > today),
+  )
 
   // Дефолт = «all proxies» если они есть, иначе direct
   function pickDefaultPoolSelector(): string {
@@ -313,6 +328,8 @@
     newFile = null
     newPriority = 'normal'
     newScheduledFor = ''
+    newPublishFrom = ''
+    newPublishTo = ''
     newProxySelector = pickDefaultPoolSelector()
     newPostingMethod = 'auto'
     newPostVerify = 'mark'
@@ -366,12 +383,15 @@
     e.preventDefault()
     if (!newProjectId) { showToast('error', 'Select a project'); return }
     if (!newFile) { showToast('error', 'Загрузи файл'); return }
+    if (newWindowInvalid) { showToast('error', 'Окно публикации: заполни обе даты, From не позже To'); return }
+    if (newWindowFuture) { showToast('error', 'Окно публикации: дата позже сегодня — выбери не позже сегодняшней'); return }
     createBusy = true
     try {
       const base = {
         name: newName, priority: newPriority,
         max_posts_per_site: newMaxPostsPerSite || 1,
         scheduled_for: newScheduledFor ? new Date(newScheduledFor).toISOString() : null,
+        publish_from: newPublishFrom || null, publish_to: newPublishTo || null,
         spread_days: newSpreadDays || 0,
         proxy_selector: newProxySelector, posting_method: newPostingMethod,
         post_verify: newPostVerify,
@@ -403,6 +423,7 @@
           priority: newPriority,
           max_posts_per_site: newMaxPostsPerSite || 1,
           scheduled_for: newScheduledFor ? new Date(newScheduledFor).toISOString() : null,
+          publish_from: newPublishFrom || null, publish_to: newPublishTo || null,
           spread_days: newSpreadDays || 0,
           proxy_selector: newProxySelector,
           site_langs: newSiteLangs.trim() || null, site_tlds: newSiteTlds.trim() || null,
@@ -969,6 +990,29 @@
         </div>
 
         <div>
+          <span class="block text-sm font-medium text-slate-700">
+            Окно публикации <span class="text-slate-400">(пусто <ArrowRight size={14} class="inline-block align-text-bottom" /> стандартное из настроек)</span>
+          </span>
+          <div class="mt-1 grid grid-cols-2 gap-2">
+            <input type="date" bind:value={newPublishFrom} max={newPublishTo || today} aria-label="Publish from"
+                   class="rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
+            <input type="date" bind:value={newPublishTo} min={newPublishFrom || undefined} max={today} aria-label="Publish to"
+                   class="rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
+          </div>
+          {#if newWindowInvalid}
+            <p class="mt-1 text-[11px] text-red-600">Заполни обе даты, From не позже To.</p>
+          {:else if newWindowFuture}
+            <p class="mt-1 text-[11px] text-amber-600">
+              <AlertTriangle size={12} class="inline-block align-text-bottom" /> Дата позже сегодня — посты уйдут в Scheduled. Выбери не позже сегодняшней.
+            </p>
+          {:else}
+            <p class="mt-1 text-[11px] text-slate-400">
+              Каждому посту воркер ставит случайную (прошедшую) дату внутри окна. Пусто — берётся стандартное окно из настроек.
+            </p>
+          {/if}
+        </div>
+
+        <div>
           <label for="nrr_spread" class="block text-sm font-medium text-slate-700">
             Разбить на дней <span class="text-slate-400">(0 <ArrowRight size={14} class="inline-block align-text-bottom" /> постить всё сразу)</span>
           </label>
@@ -1055,7 +1099,7 @@
                   class="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50">
             Cancel
           </button>
-          <button type="submit" disabled={createBusy || !newProjectId || !newFile}
+          <button type="submit" disabled={createBusy || !newProjectId || !newFile || newWindowInvalid || newWindowFuture}
                   class="rounded-md bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700 disabled:bg-slate-300">
             {createBusy ? 'Creating…' : (newTaskType === 'post' ? 'Create run' : 'Создать link-run')}
           </button>

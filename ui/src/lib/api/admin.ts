@@ -695,6 +695,8 @@ export const postings = {
       scheduled_for?: string | null
       spread_days?: number
       proxy_selector?: string | null
+      publish_from?: string | null
+      publish_to?: string | null
     },
   ) => {
     const fd = new FormData()
