@@ -28,6 +28,8 @@ from core.db import get_db_read, get_db_write
 from datetime import UTC, datetime
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import selectinload
+
+from core.config import settings
 from infrastructure.db.models import WpCredential
 from domain.wp_batches.service import (
     compute_batch_counters,
@@ -422,7 +424,8 @@ async def validate_endpoint(
     level = payload.level if is_super else "medium"
     proxy_id = payload.proxy_id if is_super else None
     provision_after = payload.provision_after if is_super else False
-    concurrency = payload.concurrency if is_super else 8
+    # super: явное значение из диалога или серверный дефолт; supplier: фикс 8.
+    concurrency = (payload.concurrency or settings.DEFAULT_VALIDATION_CONCURRENCY) if is_super else 8
 
     from workers.taskiq.cron_tasks import validate_batch_task
 
@@ -512,13 +515,20 @@ async def resume_endpoint(
     """Resume — пере-запуск валидации в scope='all' (cooldown сам пропустит
     тех, кого уже проверили)."""
     b = await _batch_or_404(session, batch_id, actor)
-    if b.status not in (WpBatchStatus.PAUSED.value, WpBatchStatus.DONE.value):
+    # VALIDATING тоже допускаем: батч мог застрять в "pausing" или осиротеть после
+    # рестарта воркера (деплой) — даём перезапустить. Снимаем флаг паузы.
+    if b.status not in (WpBatchStatus.PAUSED.value, WpBatchStatus.DONE.value,
+                        WpBatchStatus.VALIDATING.value):
         raise HTTPException(status_code=409, detail=f"Cannot resume in status '{b.status}'")
+    await session.execute(
+        update(WpImportBatch).where(WpImportBatch.id == batch_id).values(pause_requested=False))
+    await session.commit()
     from workers.taskiq.cron_tasks import validate_batch_task
     # super_admin — как было (default light→medium); supplier — фикс medium.
     level = "light" if actor.is_super_admin else "medium"
     await validate_batch_task.kiq(batch_id=batch_id, scope="all", actor_id=actor.id,
-                                  level=level, provision_after=False)
+                                  level=level, provision_after=False,
+                                  concurrency=settings.DEFAULT_VALIDATION_CONCURRENCY)
     log.info("batches.resume", actor_id=actor.id, batch_id=batch_id)
     return {"ok": True}
 

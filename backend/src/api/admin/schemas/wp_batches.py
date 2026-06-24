@@ -54,7 +54,8 @@ class CreateBatchImportResult(BaseModel):
 
 class ValidateBatchRequest(BaseModel):
     scope: str = Field(default="all", pattern="^(all|invalid|pending)$")
-    concurrency: int = Field(default=5, ge=1, le=50)
+    # None → берём DEFAULT_VALIDATION_CONCURRENCY из настроек сервера (per-server).
+    concurrency: int | None = Field(default=None, ge=1, le=50)
     proxy_id: int | None = None
     detect_language: bool = True
     # Уровень валидации:

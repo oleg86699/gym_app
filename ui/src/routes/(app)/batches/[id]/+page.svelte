@@ -235,7 +235,7 @@
 
   let validateOpen = $state(false)
   let vScope = $state<'all' | 'invalid' | 'pending'>('all')
-  let vConcurrency = $state(5)
+  let vConcurrency = $state<number | null>(null)  // пусто = серверный дефолт
   let vProxyId = $state<number | null>(null)
   let vDetectLang = $state(true)
   let vLevel = $state<'light' | 'medium' | 'full'>('full')   // по умолчанию полный цикл
@@ -252,7 +252,7 @@
     try {
       await batchesApi.validate(batchId, {
         scope: vScope,
-        concurrency: vConcurrency,
+        concurrency: vConcurrency ?? undefined,
         proxy_id: vProxyId,
         detect_language: vDetectLang,
         level: vLevel,
@@ -431,10 +431,10 @@
           <Pause size={14} class="inline-block align-text-bottom" /> Pause
         </button>
       {/if}
-      {#if batch.status === 'paused'}
+      {#if batch.status === 'paused' || (batch.status === 'validating' && batch.pause_requested)}
         <button onclick={doResume}
                 class="rounded-md border border-brand-300 bg-brand-50 px-3 py-1.5 text-sm font-medium text-brand-800 hover:bg-brand-100">
-          <Play size={14} class="inline-block align-text-bottom" /> Resume
+          <Play size={14} class="inline-block align-text-bottom" /> {batch.status === 'paused' ? 'Resume' : 'Resume (перезапустить)'}
         </button>
       {/if}
       {#if batch.status === 'done' && batch.invalid_count > 0}
@@ -895,8 +895,8 @@
           </p>
         </div>
         <div>
-          <label for="bv_conc" class="block text-xs font-medium text-slate-700">Concurrency</label>
-          <input id="bv_conc" type="number" bind:value={vConcurrency} min="1" max="50"
+          <label for="bv_conc" class="block text-xs font-medium text-slate-700">Concurrency <span class="text-slate-400">(пусто = по умолчанию сервера)</span></label>
+          <input id="bv_conc" type="number" bind:value={vConcurrency} min="1" max="50" placeholder="сервер"
                  class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
         </div>
         <div>

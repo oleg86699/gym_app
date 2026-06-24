@@ -71,6 +71,9 @@ class Settings(BaseSettings):
     CELERY_WORKER_CONCURRENCY: int = Field(default=2)
     TASKIQ_BROKER_URL: str = Field(default="redis://redis:6379/3")
     TASKIQ_RESULT_BACKEND: str = Field(default="redis://redis:6379/4")
+    # Дефолтная concurrency валидации батча (если в диалоге/resume не задано явно).
+    # Per-server: на мощном сервере подними в .env (напр. 30). 1 поток ≈ 1 кред параллельно.
+    DEFAULT_VALIDATION_CONCURRENCY: int = Field(default=5, ge=1, le=50)
 
     # ─── MinIO ─────────────────────────────────────────────────────
     MINIO_ENDPOINT: str = Field(default="minio:9000")
