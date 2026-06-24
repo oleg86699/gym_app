@@ -241,12 +241,16 @@ async def _external_gen_pending(run_id: int) -> int:
     return int(ungen or 0)
 
 
-def _run_site_filter(run) -> tuple[list[str] | None, list[str] | None]:
-    """(site_langs, site_tlds) из gen_params рана — фильтр пула сайтов."""
+def _run_site_filter(run):
+    """(site_langs, site_tlds, site_tags, site_domains) из gen_params рана —
+    фильтр пула сайтов: язык / TLD / теги кредов / явный список доменов."""
     gp = getattr(run, "gen_params", None) or {}
-    langs = gp.get("site_langs") or None
-    tlds = gp.get("site_tlds") or None
-    return langs, tlds
+    return (
+        gp.get("site_langs") or None,
+        gp.get("site_tlds") or None,
+        gp.get("site_tags") or None,
+        gp.get("site_domains") or None,
+    )
 
 
 async def _pick_candidate_sites(
@@ -258,6 +262,8 @@ async def _pick_candidate_sites(
     limit: int,
     site_langs: list[str] | None = None,
     site_tlds: list[str] | None = None,
+    site_tags: list[str] | None = None,
+    site_domains: list[str] | None = None,
 ) -> list[WpSite]:
     """
     Сайты которые:
@@ -277,17 +283,20 @@ async def _pick_candidate_sites(
     # ок) И подтверждённый КАНАЛ постинга (xmlrpc ИЛИ admin). Иначе в постинг
     # лезут сайты, где валидация уже решила, что постить нельзя (can_post_via_*
     # = False/NULL) — они стабильно падают и жгут попытки/таймауты.
-    has_valid_cred = exists().where(
-        and_(
-            WpCredential.site_id == WpSite.id,
-            WpCredential.cred_status == "valid",
-            WpCredential.deleted_at.is_(None),
-            or_(
-                WpCredential.can_post_via_xmlrpc.is_(True),
-                WpCredential.can_post_via_admin.is_(True),
-            ),
-        )
-    )
+    cred_conds = [
+        WpCredential.site_id == WpSite.id,
+        WpCredential.cred_status == "valid",
+        WpCredential.deleted_at.is_(None),
+        or_(
+            WpCredential.can_post_via_xmlrpc.is_(True),
+            WpCredential.can_post_via_admin.is_(True),
+        ),
+    ]
+    # Пул по тегам: сайт подходит, если у него есть валидный постабельный cred
+    # с одним из выбранных тегов (теги живут на credential, не на site).
+    if site_tags:
+        cred_conds.append(or_(*(WpCredential.tags.any(t) for t in site_tags)))
+    has_valid_cred = exists().where(and_(*cred_conds))
     # Подзапрос: сколько раз этот сайт уже использован в этом проекте
     used_count_subq = (
         select(func.count(ProjectWpUsed.id))
@@ -328,6 +337,9 @@ async def _pick_candidate_sites(
         stmt = stmt.where(WpSite.language.in_(site_langs))
     if site_tlds:
         stmt = stmt.where(or_(*(WpSite.domain.ilike(f"%.{t}") for t in site_tlds)))
+    # Свой список доменов: постим строго на эти домены (нормализованы при сохранении).
+    if site_domains:
+        stmt = stmt.where(WpSite.domain.in_(site_domains))
 
     return list((await session.execute(stmt)).scalars().unique().all())
 
@@ -1008,7 +1020,7 @@ async def _post_one_item(
         while attempts_budget > 0:
             attempts_budget -= 1
 
-            _f_langs, _f_tlds = _run_site_filter(run)
+            _f_langs, _f_tlds, _f_tags, _f_domains = _run_site_filter(run)
             async with WriteSession() as s:
                 candidates = await _pick_candidate_sites(
                     s,
@@ -1019,6 +1031,8 @@ async def _post_one_item(
                     limit=5,
                     site_langs=_f_langs,
                     site_tlds=_f_tlds,
+                    site_tags=_f_tags,
+                    site_domains=_f_domains,
                 )
 
             if not candidates:
@@ -1655,12 +1669,12 @@ async def _run_posting_async(run_id: int) -> dict:
                         batch = await _pick_pending_batch(s, run_id, need, require_text=True)
                     if batch:
                         # Перед запуском проверим, что вообще есть куда постить.
-                        _f_langs, _f_tlds = _run_site_filter(run)
+                        _f_langs, _f_tlds, _f_tags, _f_domains = _run_site_filter(run)
                         async with WriteSession() as s:
                             any_site = await _pick_candidate_sites(
                                 s, project_id=run.project_id, run_id=run.id,
                                 exclude_site_ids=set(), limit=1,
-                                site_langs=_f_langs, site_tlds=_f_tlds,
+                                site_langs=_f_langs, site_tlds=_f_tlds, site_tags=_f_tags, site_domains=_f_domains,
                             )
                         if not any_site:
                             # Вернуть забранные в pending; финализируем в
@@ -1765,12 +1779,12 @@ async def _run_posting_async(run_id: int) -> dict:
                     if cur_posted > last_posted_seen:
                         last_posted_seen = cur_posted
                     else:
-                        _f_langs, _f_tlds = _run_site_filter(run)
+                        _f_langs, _f_tlds, _f_tags, _f_domains = _run_site_filter(run)
                         async with WriteSession() as s:
                             fresh = await _pick_candidate_sites(
                                 s, project_id=run.project_id, run_id=run.id,
                                 exclude_site_ids=set(registry._exhausted), limit=1,
-                                site_langs=_f_langs, site_tlds=_f_tlds,
+                                site_langs=_f_langs, site_tlds=_f_tlds, site_tags=_f_tags, site_domains=_f_domains,
                             )
                         if not fresh:
                             # весь eligible-пул уже перепробован этим run-ом — ретраим
@@ -1781,7 +1795,7 @@ async def _run_posting_async(run_id: int) -> dict:
                                 any_global = await _pick_candidate_sites(
                                     s, project_id=run.project_id, run_id=run.id,
                                     exclude_site_ids=set(), limit=1,
-                                    site_langs=_f_langs, site_tlds=_f_tlds,
+                                    site_langs=_f_langs, site_tlds=_f_tlds, site_tags=_f_tags, site_domains=_f_domains,
                                 )
                             if not any_global:
                                 need_more_admins = True

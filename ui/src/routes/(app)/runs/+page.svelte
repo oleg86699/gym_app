@@ -8,6 +8,7 @@
     projects as projectsApi,
     proxies as proxiesApi,
     users as usersApi,
+    wpSites as wpSitesApi,
   } from '$lib/api/admin'
   import { ApiError } from '$lib/api/client'
   import { runModeLabel } from '$lib/runLabels'
@@ -181,6 +182,14 @@
     }
   }
 
+  async function loadCredentialTags() {
+    try {
+      availableTags = await wpSitesApi.credentialTags()
+    } catch {
+      availableTags = []
+    }
+  }
+
   onMount(async () => {
     await Promise.all([
       refresh(true),
@@ -189,6 +198,7 @@
       loadUsersForFilter(),
       loadAvailableProxies(),
       loadPoolStats(),
+      loadCredentialTags(),
     ])
     pollTimer = setInterval(tickPoll, 5000)
   })
@@ -261,6 +271,14 @@
   let advancedOpen = $state(false)  // сворачиваемые «Дополнительно»
   let newSiteLangs = $state('')     // фильтр пула: языки сайтов через запятую
   let newSiteTlds = $state('')      // фильтр пула: TLD через запятую
+  // Источник пула доступов: all = весь пул; tags = по тегам кредов; domains = свой список
+  let poolMode = $state<'all' | 'tags' | 'domains'>('all')
+  let newSiteTags = $state<string[]>([])   // выбранные теги (для poolMode='tags')
+  let newSiteDomains = $state('')           // свой список доменов (для poolMode='domains')
+  let availableTags = $state<string[]>([])  // все теги кредов (из credential-tags)
+  let domainCount = $derived(
+    newSiteDomains.split(/[\n,\s]+/).map((d) => d.trim()).filter(Boolean).length,
+  )
   // Селектор прокси-пула:
   //   "direct" — без прокси
   //   "all" — все active
@@ -342,6 +360,9 @@
     advancedOpen = false
     newSiteLangs = ''
     newSiteTlds = ''
+    poolMode = 'all'
+    newSiteTags = []
+    newSiteDomains = ''
     createOpen = true
   }
 
@@ -396,6 +417,8 @@
         proxy_selector: newProxySelector, posting_method: newPostingMethod,
         post_verify: newPostVerify,
         site_langs: newSiteLangs.trim() || null, site_tlds: newSiteTlds.trim() || null,
+        site_tags: poolMode === 'tags' ? (newSiteTags.join(',') || null) : null,
+        site_domains: poolMode === 'domains' ? (newSiteDomains.trim() || null) : null,
       }
       if (newTaskType === 'post' && postSource === 'zip') {
         const run = await postingsApi.create(newProjectId, newFile, base)
@@ -427,6 +450,8 @@
           spread_days: newSpreadDays || 0,
           proxy_selector: newProxySelector,
           site_langs: newSiteLangs.trim() || null, site_tlds: newSiteTlds.trim() || null,
+          site_tags: poolMode === 'tags' ? (newSiteTags.join(',') || null) : null,
+          site_domains: poolMode === 'domains' ? (newSiteDomains.trim() || null) : null,
         })
         showToast('success', `Link-run "${run.name}" создан (${run.total_texts} целей). Запусти кнопкой Start.`)
       }
@@ -979,6 +1004,43 @@
                    class="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-mono" />
           </div>
           <p class="mt-1 text-[11px] text-slate-400">Постим только на сайты пула с этим <b>языком</b> и <b>TLD</b> (несколько через запятую). Пусто = все доступные.</p>
+        </div>
+
+        <!-- Пул доступов: весь / по тегам кредов / свой список доменов -->
+        <div>
+          <span class="block text-sm font-medium text-slate-700">Пул доступов</span>
+          <select bind:value={poolMode}
+                  class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
+            <option value="all">Все доступы (весь пул) — по умолчанию</option>
+            <option value="tags">По тегам кредов</option>
+            <option value="domains">Свой список доменов</option>
+          </select>
+
+          {#if poolMode === 'tags'}
+            {#if availableTags.length === 0}
+              <p class="mt-2 text-[11px] text-slate-400">Тегов пока нет — добавь теги кредам/батчам, и они появятся здесь.</p>
+            {:else}
+              <div class="mt-2 flex flex-wrap gap-1.5">
+                {#each availableTags as tag}
+                  <button type="button"
+                          onclick={() => (newSiteTags = newSiteTags.includes(tag) ? newSiteTags.filter((t) => t !== tag) : [...newSiteTags, tag])}
+                          class="rounded-full border px-2.5 py-1 text-[12px] {newSiteTags.includes(tag) ? 'border-brand-400 bg-brand-50 text-brand-700' : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-50'}">
+                    {tag}
+                  </button>
+                {/each}
+              </div>
+              <p class="mt-1 text-[11px] text-slate-400">Берём сайты с валидным кредом, у которого есть хотя бы <b>один</b> из выбранных тегов. Не выбрано = весь пул.</p>
+            {/if}
+          {:else if poolMode === 'domains'}
+            <textarea bind:value={newSiteDomains} rows="4"
+                      placeholder="по домену в строке (или через запятую): example.com, blog.example.org"
+                      class="mt-2 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm font-mono"></textarea>
+            <p class="mt-1 text-[11px] text-slate-400">
+              Постим только на эти домены — креды к ним берём из базы (какие есть).
+              {#if domainCount > 0}<b>{domainCount}</b> домен(ов) в списке.{/if}
+              <span class="text-slate-300">Большой список файлом — добавим следующим шагом.</span>
+            </p>
+          {/if}
         </div>
         <!-- Расписание / drip / max-posts / прокси — для всех режимов (вкл. link) -->
         <div>

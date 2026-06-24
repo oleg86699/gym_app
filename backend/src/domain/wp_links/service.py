@@ -60,6 +60,7 @@ async def pick_admin_cred(session: AsyncSession, site_id: int) -> WpCredential |
 async def candidate_link_sites(
     session: AsyncSession, *, exclude_existing: bool = True, limit: int | None = None,
     site_langs: list[str] | None = None, site_tlds: list[str] | None = None,
+    site_tags: list[str] | None = None, site_domains: list[str] | None = None,
     exclude_site_ids: set[int] | None = None,
 ) -> list[int]:
     """Сайты-кандидаты под сквозную ссылку: активные, с валидным administrator,
@@ -86,6 +87,10 @@ async def candidate_link_sites(
         q = q.where(WpSite.language.in_(site_langs))
     if site_tlds:
         q = q.where(or_(*(WpSite.domain.ilike(f"%.{t}") for t in site_tlds)))
+    if site_tags:
+        q = q.where(or_(*(WpCredential.tags.any(t) for t in site_tags)))
+    if site_domains:
+        q = q.where(WpSite.domain.in_(site_domains))
     if exclude_site_ids:
         q = q.where(WpCredential.site_id.notin_(exclude_site_ids))
     if exclude_existing:
@@ -115,6 +120,7 @@ async def create_link_run(
     links: list[dict], concurrency: int, timeout_seconds: int,
     priority: str = "normal", max_sites: int | None = None,
     site_langs: list[str] | None = None, site_tlds: list[str] | None = None,
+    site_tags: list[str] | None = None, site_domains: list[str] | None = None,
     max_posts_per_site: int = 1, proxy_selector: str | None = None,
     spread_days: int = 0, scheduled_for: datetime | None = None,
     publish_from: date | None = None, publish_to: date | None = None,
@@ -141,6 +147,10 @@ async def create_link_run(
         gp["site_langs"] = site_langs
     if site_tlds:
         gp["site_tlds"] = site_tlds
+    if site_tags:
+        gp["site_tags"] = site_tags
+    if site_domains:
+        gp["site_domains"] = site_domains
 
     status = (PostingRunStatus.SCHEDULED if scheduled_for
               else PostingRunStatus.READY)
@@ -311,12 +321,15 @@ async def process_link_item(
 
     site_langs = gp.get("site_langs")
     site_tlds = gp.get("site_tlds")
+    site_tags = gp.get("site_tags")
+    site_domains = gp.get("site_domains")
     last_status, last_domain = "no_sites", None
     while True:
         async with WriteSession() as s:
             candidates = await candidate_link_sites(
                 s, exclude_existing=True, exclude_site_ids=set(used_sites),
-                site_langs=site_langs, site_tlds=site_tlds, limit=30)
+                site_langs=site_langs, site_tlds=site_tlds,
+                site_tags=site_tags, site_domains=site_domains, limit=30)
         # синхронный pick + claim: между next() и add() нет await → атомарно
         site_id = next((c for c in candidates if c not in used_sites), None)
         if site_id is None:

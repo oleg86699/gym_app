@@ -519,6 +519,10 @@ export interface CreateRunParams {
   // Фильтр пула сайтов (через запятую): lang "en,fr", tld "us,uk"
   site_langs?: string | null
   site_tlds?: string | null
+  // Пул доступов: по тегам кредов (через запятую) или свой список доменов
+  // (через запятую/перенос). Пусто = весь пул.
+  site_tags?: string | null
+  site_domains?: string | null
   // csv_direct: инжектить ли ссылку из строки в тело (по умолчанию false)
   csv_inject_link?: boolean
   // ─── csv_campaign (Content Engine) ───

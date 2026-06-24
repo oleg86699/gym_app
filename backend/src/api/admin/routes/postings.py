@@ -83,12 +83,44 @@ from infrastructure.db.models import AdminUser
 log = structlog.get_logger(__name__)
 
 
+def parse_tag_list(s: str | None) -> list[str]:
+    """'News, sports ,EU' → ['News','sports','EU'] (через запятую/перенос, без
+    lowercase — теги матчатся как есть). Дедуп с сохранением порядка."""
+    if not s:
+        return []
+    seen: dict[str, None] = {}
+    for raw in s.replace("\n", ",").split(","):
+        t = raw.strip()
+        if t:
+            seen.setdefault(t, None)
+    return list(seen)
+
+
+def parse_domain_list(s: str | None) -> list[str]:
+    """Свободный текст (через запятую/перенос/пробел) → нормализованные домены.
+    Невалидные строки отбрасываются. Дедуп с сохранением порядка."""
+    if not s:
+        return []
+    from domain.text_links.service import normalize_domain
+    seen: dict[str, None] = {}
+    for raw in s.replace("\n", ",").replace(" ", ",").split(","):
+        d = normalize_domain(raw)
+        if d:
+            seen.setdefault(d, None)
+    return list(seen)
+
+
 async def _store_site_filter(session: AsyncSession, run_id: int,
-                             site_langs: str | None, site_tlds: str | None) -> None:
-    """Сохранить фильтр пула сайтов (lang/tld) в gen_params рана. No-op если пусто."""
+                             site_langs: str | None, site_tlds: str | None,
+                             site_tags: str | None = None,
+                             site_domains: str | None = None) -> None:
+    """Сохранить фильтр пула сайтов (lang/tld/tags/domains) в gen_params рана.
+    No-op если всё пусто."""
     langs = parse_site_filter(site_langs)
     tlds = parse_site_filter(site_tlds)
-    if not langs and not tlds:
+    tags = parse_tag_list(site_tags)
+    domains = parse_domain_list(site_domains)
+    if not langs and not tlds and not tags and not domains:
         return
     gp = dict((await session.scalar(
         select(PostingRun.gen_params).where(PostingRun.id == run_id))) or {})
@@ -96,6 +128,10 @@ async def _store_site_filter(session: AsyncSession, run_id: int,
         gp["site_langs"] = langs
     if tlds:
         gp["site_tlds"] = tlds
+    if tags:
+        gp["site_tags"] = tags
+    if domains:
+        gp["site_domains"] = domains
     await session.execute(update(PostingRun).where(PostingRun.id == run_id).values(gen_params=gp))
     await session.commit()
 
@@ -237,7 +273,8 @@ async def create_project_run(
         max_posts_per_site=parsed.max_posts_per_site,
         post_verify=parsed.post_verify,
     )
-    await _store_site_filter(session, run.id, parsed.site_langs, parsed.site_tlds)
+    await _store_site_filter(session, run.id, parsed.site_langs, parsed.site_tlds,
+                             parsed.site_tags, parsed.site_domains)
 
     log.info(
         "postings.created",
@@ -330,7 +367,8 @@ async def create_csv_direct_run(
         max_posts_per_site=parsed.max_posts_per_site,
         post_verify=parsed.post_verify,
     )
-    await _store_site_filter(session, run.id, parsed.site_langs, parsed.site_tlds)
+    await _store_site_filter(session, run.id, parsed.site_langs, parsed.site_tlds,
+                             parsed.site_tags, parsed.site_domains)
     if parsed.csv_inject_link:
         # Флаг «инжектить ссылку из строки в текст» — читается воркером csv_direct.
         gp = (await session.scalar(
@@ -420,7 +458,9 @@ async def create_campaign_run(
     base_gp = {"rows": pc.rows, "prompt_template_id": parsed.prompt_template_id,
                "ai_model_id": parsed.ai_model_id, "language": parsed.language,
                **({"site_langs": parse_site_filter(parsed.site_langs)} if parse_site_filter(parsed.site_langs) else {}),
-               **({"site_tlds": parse_site_filter(parsed.site_tlds)} if parse_site_filter(parsed.site_tlds) else {})}
+               **({"site_tlds": parse_site_filter(parsed.site_tlds)} if parse_site_filter(parsed.site_tlds) else {}),
+               **({"site_tags": parse_tag_list(parsed.site_tags)} if parse_tag_list(parsed.site_tags) else {}),
+               **({"site_domains": parse_domain_list(parsed.site_domains)} if parse_domain_list(parsed.site_domains) else {})}
     from domain.content_engine import create_empty_campaign_items
     total, groups, main_ids = await create_empty_campaign_items(
         run.id, project.id, pc.rows, parsed.content_mode, parsed.language)
@@ -515,6 +555,8 @@ async def create_link_run_endpoint(
         timeout_seconds=app_cfg.default_timeout_seconds, priority=parsed.priority,
         site_langs=parse_site_filter(parsed.site_langs),
         site_tlds=parse_site_filter(parsed.site_tlds),
+        site_tags=parse_tag_list(parsed.site_tags),
+        site_domains=parse_domain_list(parsed.site_domains),
         max_posts_per_site=parsed.max_posts_per_site,
         proxy_selector=parsed.proxy_selector, spread_days=parsed.spread_days,
         scheduled_for=parsed.scheduled_for,

@@ -697,6 +697,8 @@ export const postings = {
       proxy_selector?: string | null
       publish_from?: string | null
       publish_to?: string | null
+      site_tags?: string | null
+      site_domains?: string | null
     },
   ) => {
     const fd = new FormData()
