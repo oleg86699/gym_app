@@ -48,6 +48,12 @@ class PostingRunResponse(BaseModel):
     spread_days: int = 0
     # параметры генерации (только для csv_campaign в детальном ответе)
     content_params: ContentParamsBrief | None = None
+    # Фильтр пула доступов (из gen_params) — для инфо в UI. Пусто всё = весь пул.
+    site_langs: list[str] | None = None
+    site_tlds: list[str] | None = None
+    site_tags: list[str] | None = None
+    site_domains_count: int | None = None   # inline-список доменов: сколько
+    site_domains_file: bool = False          # домены загружены файлом (MinIO)
 
     scheduled_for: datetime | None
     # Окно публикации (для аудита; берётся из app_settings при создании прогона).

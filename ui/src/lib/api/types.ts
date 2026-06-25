@@ -478,6 +478,12 @@ export interface PostingRun {
   scheduled_for: string | null
   publish_from: string | null  // ISO date "YYYY-MM-DD"
   publish_to: string | null
+  // Фильтр пула доступов (из gen_params) — пусто всё = весь пул
+  site_langs?: string[] | null
+  site_tlds?: string[] | null
+  site_tags?: string[] | null
+  site_domains_count?: number | null
+  site_domains_file?: boolean
   concurrency: number
   timeout_seconds: number
   max_posts_per_site: number   // сколько раз один сайт можно использовать в задаче (1 = «1 сайт = 1 пост»)

@@ -469,6 +469,18 @@
     run?.task_type === 'sitewide_link' || run?.task_type === 'homepage_link',
   )
 
+  // Какой пул доступов использует ран (фильтр из gen_params) — для инфо
+  let poolLabel = $derived.by(() => {
+    if (!run) return '—'
+    const parts: string[] = []
+    if (run.site_tags?.length) parts.push(`теги: ${run.site_tags.join(', ')}`)
+    if (run.site_domains_count) parts.push(`свой список: ${run.site_domains_count} дом.`)
+    else if (run.site_domains_file) parts.push('свой список (файл)')
+    if (run.site_langs?.length) parts.push(`язык: ${run.site_langs.join(',')}`)
+    if (run.site_tlds?.length) parts.push(`TLD: ${run.site_tlds.join(',')}`)
+    return parts.length ? parts.join(' · ') : 'Весь пул'
+  })
+
   let removingItem = $state<number | null>(null)
   async function removeLink(itemId: number) {
     if (!confirm('Снять размещённую сквозную ссылку с этого сайта?')) return
@@ -880,6 +892,10 @@
             <dd class="text-slate-800">{run.publish_from} → {run.publish_to}</dd>
           </div>
         {/if}
+        <div>
+          <dt class="text-xs text-slate-400">Пул доступов</dt>
+          <dd class="text-slate-800">{poolLabel}</dd>
+        </div>
         {#if run.content_params}
           <div>
             <dt class="text-xs text-slate-400">Язык</dt>

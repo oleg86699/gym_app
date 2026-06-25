@@ -176,6 +176,13 @@ def _apply_gen_progress(resp: PostingRunResponse, gen_params) -> PostingRunRespo
     gp = gen_params or {}
     resp.gen_done = gp.get("gen_done")
     resp.gen_total = gp.get("gen_total")
+    # Фильтр пула доступов — для инфо в UI
+    resp.site_langs = gp.get("site_langs") or None
+    resp.site_tlds = gp.get("site_tlds") or None
+    resp.site_tags = gp.get("site_tags") or None
+    _dom = gp.get("site_domains")
+    resp.site_domains_count = len(_dom) if _dom else None
+    resp.site_domains_file = bool(gp.get("site_domains_key"))
     return resp
 
 
