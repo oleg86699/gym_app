@@ -73,7 +73,9 @@
         Link.configure({
           openOnClick: false,
           autolink: true,
-          HTMLAttributes: { rel: 'noopener noreferrer nofollow', target: '_blank' },
+          // Backlink-инструмент: НЕ навешиваем rel/target на ссылки — money-ссылка
+          // должна оставаться dofollow, как в источнике. nofollow убивал ценность.
+          HTMLAttributes: { rel: null, target: null },
         }),
         Image.configure({ inline: false, allowBase64: false }),
         Placeholder.configure({ placeholder }),
