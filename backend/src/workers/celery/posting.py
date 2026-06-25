@@ -1073,12 +1073,21 @@ async def _post_one_item(
         now_ts = datetime.now(UTC)
         post_date = _compute_post_date(run.publish_from, run.publish_to, now_ts)
 
-        # 2. Подбирать сайты пока не запостим / не кончатся
+        # 2. Подбирать сайты, ПОКА не запостим ИЛИ не кончится пул кандидатов.
+        # Раньше тут стоял жёсткий потолок в 10 раундов (~50 сайтов): на волне
+        # транзиента (network/cf/503/timeout) текст падал в FAILED, хотя в пуле
+        # под его money-домен оставались сотни свежих ПОСТАТЕЛЬНЫХ сайтов. Теперь
+        # нормальный выход один — _pick_candidate_sites вернул пусто (→ release to
+        # pending → основной цикл сам решит need_more_admins vs done). Цикл строго
+        # сходится: каждый кандидат уходит в tried_sites | registry._exhausted
+        # (оба в exclude), пул монотонно сужается и заведомо опустеет. MAX_ROUNDS —
+        # лишь аварийный предохранитель от петли (в норме недостижим: пул конечен).
         tried_sites: set[int] = set()
-        attempts_budget = 10  # глобальный потолок попыток per item, защита от петель
+        MAX_ROUNDS = 2000  # safety-guard; реальный стоп — пустой пул кандидатов
+        rounds = 0
 
-        while attempts_budget > 0:
-            attempts_budget -= 1
+        while rounds < MAX_ROUNDS:
+            rounds += 1
 
             _f_langs, _f_tlds, _f_tags, _f_domains = _run_site_filter(run)
             async with WriteSession() as s:
@@ -1461,11 +1470,14 @@ async def _post_one_item(
                 return
             # никто из текущей пачки не сработал — запросим следующую
 
-        # Бюджет попыток исчерпан
-        log.warning("posting.item.attempts_exhausted", item_id=item.id, run_id=run.id)
+        # Аварийный потолок раундов исчерпан — в НОРМЕ недостижим: цикл выходит
+        # раньше через пустой пул кандидатов (release → pending). Если попали сюда —
+        # это аномалия (петля/деградация пула), помечаем FAILED терминально, чтобы
+        # не крутить редиспатч бесконечно.
+        log.error("posting.item.max_rounds_guard", item_id=item.id, run_id=run.id, rounds=rounds)
         async with WriteSession() as s:
             await _mark_text_failed(
-                s, item_id=item.id, error_message="no site succeeded after retries"
+                s, item_id=item.id, error_message="max rounds guard exhausted"
             )
             await _bump_run_counter(s, run.id, "failed_count")
 
