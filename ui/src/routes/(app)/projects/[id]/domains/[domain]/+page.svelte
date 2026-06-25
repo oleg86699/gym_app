@@ -6,6 +6,7 @@
   import { projects as projectsApi } from '$lib/api/admin'
   import { ApiError } from '$lib/api/client'
   import { runModeLabel } from '$lib/runLabels'
+  import { prettyUrl } from '$lib/url'
   import type { DomainPlacement, DomainRunRow, DomainSummary } from '$lib/api/types'
   import { showToast } from '$lib/stores/toast'
 
@@ -325,7 +326,7 @@
                               </td>
                               <td class="px-2 py-1">
                                 {#if it.posted_url}
-                                  <a href={it.posted_url} target="_blank" rel="noopener" class="break-all text-brand-600 hover:underline" title={it.posted_url} onclick={(e) => e.stopPropagation()}>{host(it.posted_url)}</a>
+                                  <a href={it.posted_url} target="_blank" rel="noopener" class="break-all text-brand-600 hover:underline" title={prettyUrl(it.posted_url)} onclick={(e) => e.stopPropagation()}>{host(it.posted_url)}</a>
                                 {:else}<span class="text-slate-400">— не размещено —</span>{/if}
                               </td>
                               <td class="px-2 py-1">

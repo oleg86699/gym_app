@@ -7,6 +7,7 @@
   import { ApiError } from '$lib/api/client'
   import TipTapEditor from '$lib/components/ui/TipTapEditor.svelte'
   import type { TextItemDetail, TextItemStatus } from '$lib/api/types'
+  import { prettyUrl } from '$lib/url'
   import { showToast } from '$lib/stores/toast'
 
   let runId = $derived(Number(page.params.id))
@@ -223,7 +224,7 @@
         {#if item.credential}<span>Credential: {item.credential.login}</span>{/if}
         {#if item.posted_url}
           <span>
-            Posted: <a class="text-brand-600 hover:underline" href={item.posted_url} target="_blank" rel="noopener noreferrer">{item.posted_url}</a>
+            Posted: <a class="text-brand-600 hover:underline" href={item.posted_url} target="_blank" rel="noopener noreferrer">{prettyUrl(item.posted_url)}</a>
           </span>
         {/if}
       </div>

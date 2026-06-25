@@ -8,6 +8,7 @@
   import { ApiError } from '$lib/api/client'
   import DropdownMenu from '$lib/components/ui/DropdownMenu.svelte'
   import { runModeLabel } from '$lib/runLabels'
+  import { prettyUrl } from '$lib/url'
   import type {
     PostingRun,
     PostingRunStatus,
@@ -1136,13 +1137,13 @@
                           </button>
                         {/if}
                       </div>
-                      {#if item.posted_url}<a href={item.posted_url} target="_blank" rel="noopener noreferrer" class="mt-0.5 block break-all text-[11px] text-brand-600 hover:underline">{item.posted_url}</a>{/if}
+                      {#if item.posted_url}<a href={item.posted_url} target="_blank" rel="noopener noreferrer" class="mt-0.5 block break-all text-[11px] text-brand-600 hover:underline">{prettyUrl(item.posted_url)}</a>{/if}
                     {:else if item.last_error}
                       <span class="text-red-600" title={item.last_error}>{item.last_error.slice(0, 120)}</span>
                     {:else}<span class="text-slate-400">—</span>{/if}
                   {:else if item.posted_url}
                     <a href={item.posted_url} target="_blank" rel="noopener noreferrer"
-                       class="break-all text-brand-600 hover:underline">{item.posted_url}</a>
+                       class="break-all text-brand-600 hover:underline">{prettyUrl(item.posted_url)}</a>
                     <div class="mt-0.5 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
                       {#if item.post_id}<span>post_id: {item.post_id}</span>{/if}
                       {#if item.link_verified === true}<span class="text-emerald-600" title="Ссылка подтверждена на странице">link ✓</span>
