@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,6 +43,11 @@ MAX_SITE_DISABLE_THRESHOLD = 200
 MIN_SITE_DISABLE_THRESHOLD_CF = 1
 MAX_SITE_DISABLE_THRESHOLD_CF = 100
 
+# Дефолтное окно публикации для свежей установки: [сегодня−N .. сегодня].
+# В ПРОШЛОМ (не в будущем!) — посты получают прошедшую дату и сразу видны,
+# а не уходят в Scheduled. Пользователь меняет под себя в настройках.
+DEFAULT_PUBLISH_WINDOW_DAYS = 45
+
 
 async def get_app_settings(session: AsyncSession) -> AppSettings:
     """
@@ -56,8 +61,8 @@ async def get_app_settings(session: AsyncSession) -> AppSettings:
             default_concurrency=25,
             default_timeout_seconds=30,
             global_posting_concurrency=80,
-            default_publish_from=None,
-            default_publish_to=None,
+            default_publish_from=date.today() - timedelta(days=DEFAULT_PUBLISH_WINDOW_DAYS),
+            default_publish_to=date.today(),
         )
         session.add(settings_row)
         await session.commit()
