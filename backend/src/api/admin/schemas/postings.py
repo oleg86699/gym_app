@@ -138,9 +138,25 @@ class QueueResponse(BaseModel):
 
 
 class UpdateRunParams(BaseModel):
-    """Редактирование задачи после создания. Пока — только лимит повторного
-    использования сайта (можно поднять, чтобы добрать сайты)."""
-    max_posts_per_site: int = Field(ge=1, le=1000)
+    """Редактирование задачи после создания. `max_posts_per_site` — в любом
+    статусе (воркер читает live). Остальные постинг-параметры — только пока
+    задача ещё НЕ начала постить (READY / SCHEDULED). Все поля опциональны:
+    меняем ТОЛЬКО явно переданные (определяем по model_fields_set), поэтому
+    None у scheduled_for/publish_* трактуется как «очистить»."""
+    max_posts_per_site: int | None = Field(default=None, ge=1, le=1000)
+    priority: str | None = Field(default=None, pattern="^(low|normal|high)$")
+    scheduled_for: datetime | None = None
+    spread_days: int | None = Field(default=None, ge=0, le=365)
+    posting_method: str | None = Field(default=None, pattern="^(auto|xmlrpc_only|admin_only)$")
+    post_verify: str | None = Field(default=None, pattern="^(mark|auto)$")
+    proxy_selector: str | None = Field(default=None, max_length=120)
+    publish_from: date | None = None
+    publish_to: date | None = None
+    site_langs: str | None = Field(default=None, max_length=200)
+    site_tlds: str | None = Field(default=None, max_length=200)
+    site_tags: str | None = Field(default=None, max_length=2000)
+    site_domains: str | None = Field(default=None, max_length=200_000)
+    site_domains_key: str | None = Field(default=None, max_length=300)
 
 
 class CreateRunParams(BaseModel):

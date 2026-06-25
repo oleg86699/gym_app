@@ -1577,6 +1577,14 @@ async def restart_run_endpoint(
     }
 
 
+def _set_or_del(gp: dict, key: str, value) -> None:
+    """В gen_params: задать ключ при непустом значении, иначе удалить (clear)."""
+    if value:
+        gp[key] = value
+    else:
+        gp.pop(key, None)
+
+
 @postings_router.patch("/{run_id}", response_model=PostingRunResponse)
 async def update_run_endpoint(
     run_id: int,
@@ -1584,20 +1592,64 @@ async def update_run_endpoint(
     viewer: AdminUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_write),
 ) -> PostingRunResponse:
-    """Изменить настройки задачи (сейчас: max_posts_per_site). Доступно в любом
-    статусе — можно поднять лимит на уже завершённой задаче, затем Retry/Resume,
-    чтобы добрать сайты из уже использованных. Воркер читает значение live."""
-    await _load_run_or_403(session, run_id, viewer, manage=True)
-    await session.execute(
-        update(PostingRun).where(PostingRun.id == run_id)
-        .values(max_posts_per_site=payload.max_posts_per_site)
-    )
-    await session.commit()
-    log.info("postings.updated", run_id=run_id, actor_id=viewer.id,
-             max_posts_per_site=payload.max_posts_per_site)
-    await audit_record(session, actor=viewer, action="postings.update",
-                       resource_type="run", resource_id=run_id,
-                       changes={"max_posts_per_site": payload.max_posts_per_site})
+    """Изменить настройки задачи. `max_posts_per_site` — в любом статусе (воркер
+    читает live). Остальные постинг-параметры (приоритет, метод, окно публикации,
+    расписание, drip, прокси, фильтр пула) — только пока задача ещё НЕ начала
+    постить (READY / SCHEDULED). Меняются ТОЛЬКО явно переданные поля."""
+    run, _ = await _load_run_or_403(session, run_id, viewer, manage=True)
+    sent = payload.model_fields_set
+
+    vals: dict = {}
+    if "max_posts_per_site" in sent and payload.max_posts_per_site is not None:
+        vals["max_posts_per_site"] = payload.max_posts_per_site
+
+    deep_fields = {
+        "priority", "scheduled_for", "spread_days", "posting_method", "post_verify",
+        "proxy_selector", "publish_from", "publish_to",
+        "site_langs", "site_tlds", "site_tags", "site_domains", "site_domains_key",
+    }
+    deep_sent = deep_fields & sent
+    if deep_sent:
+        if run.status not in (PostingRunStatus.READY.value, PostingRunStatus.SCHEDULED.value):
+            raise HTTPException(
+                status_code=409,
+                detail="Параметры можно менять только до старта постинга (READY / SCHEDULED)",
+            )
+        for f in ("priority", "spread_days", "posting_method", "post_verify",
+                  "proxy_selector", "publish_from", "publish_to"):
+            if f in sent:
+                vals[f] = getattr(payload, f)
+        # scheduled_for + согласованный переход статуса
+        if "scheduled_for" in sent:
+            vals["scheduled_for"] = payload.scheduled_for
+            if payload.scheduled_for is not None and run.status == PostingRunStatus.READY.value:
+                vals["status"] = PostingRunStatus.SCHEDULED.value
+            elif payload.scheduled_for is None and run.status == PostingRunStatus.SCHEDULED.value:
+                vals["status"] = PostingRunStatus.READY.value
+        # Фильтр пула → gen_params (мержим, контент-ключи кампании сохраняем)
+        if {"site_langs", "site_tlds", "site_tags", "site_domains", "site_domains_key"} & sent:
+            gp = dict(run.gen_params or {})
+            if "site_langs" in sent:
+                _set_or_del(gp, "site_langs", parse_site_filter(payload.site_langs))
+            if "site_tlds" in sent:
+                _set_or_del(gp, "site_tlds", parse_site_filter(payload.site_tlds))
+            if "site_tags" in sent:
+                _set_or_del(gp, "site_tags", parse_tag_list(payload.site_tags))
+            if "site_domains" in sent:
+                _set_or_del(gp, "site_domains", parse_domain_list(payload.site_domains))
+            if "site_domains_key" in sent:
+                _set_or_del(gp, "site_domains_key", payload.site_domains_key)
+            vals["gen_params"] = gp
+
+    if vals:
+        await session.execute(
+            update(PostingRun).where(PostingRun.id == run_id).values(**vals)
+        )
+        await session.commit()
+        log.info("postings.updated", run_id=run_id, actor_id=viewer.id, fields=sorted(vals))
+        await audit_record(session, actor=viewer, action="postings.update",
+                           resource_type="run", resource_id=run_id,
+                           changes={k: str(v)[:200] for k, v in vals.items()})
     fresh = await get_run(session, run_id)
     return _apply_gen_progress(PostingRunResponse.model_validate(fresh), fresh.gen_params)
 

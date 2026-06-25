@@ -658,8 +658,25 @@ export const postings = {
       `/admin/api/postings/${runId}/text-items`,
       query as Record<string, string | number | undefined>,
     ),
-  update: (runId: number, payload: { max_posts_per_site: number }) =>
-    api.patch<PostingRun>(`/admin/api/postings/${runId}`, payload),
+  update: (
+    runId: number,
+    payload: {
+      max_posts_per_site?: number
+      priority?: 'low' | 'normal' | 'high'
+      scheduled_for?: string | null
+      spread_days?: number
+      posting_method?: 'auto' | 'xmlrpc_only' | 'admin_only'
+      post_verify?: 'mark' | 'auto'
+      proxy_selector?: string | null
+      publish_from?: string | null
+      publish_to?: string | null
+      site_langs?: string | null
+      site_tlds?: string | null
+      site_tags?: string | null
+      site_domains?: string | null
+      site_domains_key?: string | null
+    },
+  ) => api.patch<PostingRun>(`/admin/api/postings/${runId}`, payload),
   start: (runId: number) =>
     api.post<{ ok: boolean; run_id: number; status: string }>(`/admin/api/postings/${runId}/start`),
   validateLinks: (runId: number) =>

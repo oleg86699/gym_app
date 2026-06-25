@@ -57,6 +57,60 @@
     }
   }
 
+  // ─── Edit run params (только до старта постинга: ready / scheduled) ──
+  let editOpen = $state(false)
+  let editBusy = $state(false)
+  let ePriority = $state<'low' | 'normal' | 'high'>('normal')
+  let eMethod = $state<'auto' | 'xmlrpc_only' | 'admin_only'>('auto')
+  let eVerify = $state<'mark' | 'auto'>('mark')
+  let eSchedFor = $state('')
+  let eSpread = $state(0)
+  let ePubFrom = $state('')
+  let ePubTo = $state('')
+  const editToday = new Date().toISOString().slice(0, 10)
+  let eWindowInvalid = $derived.by(() => {
+    const a = ePubFrom, b = ePubTo
+    if (!a && !b) return false
+    if (!a || !b) return true
+    return a > b
+  })
+  let eWindowFuture = $derived((!!ePubFrom && ePubFrom > editToday) || (!!ePubTo && ePubTo > editToday))
+  function isoToLocalInput(iso: string): string {
+    const d = new Date(iso)
+    const p = (n: number) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`
+  }
+  function openEdit() {
+    if (!run) return
+    ePriority = (run.priority ?? 'normal') as 'low' | 'normal' | 'high'
+    eMethod = (run.posting_method ?? 'auto') as 'auto' | 'xmlrpc_only' | 'admin_only'
+    eVerify = (run.post_verify ?? 'mark') as 'mark' | 'auto'
+    eSchedFor = run.scheduled_for ? isoToLocalInput(run.scheduled_for) : ''
+    eSpread = run.spread_days ?? 0
+    ePubFrom = run.publish_from ?? ''
+    ePubTo = run.publish_to ?? ''
+    editOpen = true
+  }
+  async function saveEdit() {
+    if (!run || editBusy || eWindowInvalid || eWindowFuture) return
+    editBusy = true
+    try {
+      run = await postingsApi.update(runId, {
+        priority: ePriority,
+        spread_days: eSpread || 0,
+        posting_method: eMethod,
+        post_verify: eVerify,
+        scheduled_for: eSchedFor ? new Date(eSchedFor).toISOString() : null,
+        publish_from: ePubFrom || null,
+        publish_to: ePubTo || null,
+      })
+      editOpen = false
+      showToast('success', 'Параметры обновлены')
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    } finally { editBusy = false }
+  }
+
   // SSE + fallback polling
   let eventSource: EventSource | null = null
   let pollTimer: ReturnType<typeof setInterval> | null = null
@@ -710,6 +764,13 @@
                 class="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40">
           {busyAction === 'retry' ? '…' : `Retry failed${progress?.failed ? ` (${progress.failed})` : ''}`}
         </button>
+        {#if run.status === 'ready' || run.status === 'scheduled'}
+          <button onclick={openEdit} disabled={busyAction !== null}
+                  class="rounded-md border border-brand-300 bg-brand-50 px-3 py-1.5 text-sm font-medium text-brand-700 hover:bg-brand-100 disabled:opacity-40"
+                  title="Изменить параметры задачи (до старта постинга)">
+            Edit
+          </button>
+        {/if}
         <button onclick={() => doAction('delete')} disabled={busyAction !== null}
                 class="rounded-md border border-red-300 bg-white px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-40"
                 title="Архивировать run (soft-delete). Активный — отменится.">
@@ -1134,4 +1195,77 @@
     </p>
   {/if}
 </div>
+
+<!-- Edit run params modal -->
+{#if editOpen && run}
+  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+  <div class="fixed inset-0 z-30 flex items-center justify-center bg-slate-900/40 p-4" onclick={() => (editOpen = false)}>
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="max-h-[90vh] w-full max-w-md overflow-auto rounded-lg bg-white p-6 shadow-xl" onclick={(e) => e.stopPropagation()}>
+      <h2 class="text-lg font-semibold text-slate-900">Изменить параметры · run #{run.id}</h2>
+      <p class="mt-1 text-xs text-slate-500">Доступно до старта постинга (статус: {run.status}).</p>
+      <div class="mt-4 space-y-3">
+        <div>
+          <span class="block text-sm font-medium text-slate-700">Priority</span>
+          <div class="mt-1 flex gap-1">
+            {#each [['low', 'Low'], ['normal', 'Normal'], ['high', 'High']] as [val, label]}
+              {@const on = ePriority === val}
+              <button type="button" onclick={() => (ePriority = val as 'low' | 'normal' | 'high')}
+                      class="flex-1 rounded-md border px-2 py-1.5 text-xs font-medium {on ? 'border-brand-600 bg-brand-50 text-brand-700' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}">{label}</button>
+            {/each}
+          </div>
+        </div>
+        <div>
+          <label for="ed_method" class="block text-sm font-medium text-slate-700">Метод постинга</label>
+          <select id="ed_method" bind:value={eMethod} class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
+            <option value="auto">Auto — XML-RPC → wp-admin</option>
+            <option value="xmlrpc_only">XML-RPC only</option>
+            <option value="admin_only">wp-admin only</option>
+          </select>
+        </div>
+        <div>
+          <label for="ed_verify" class="block text-sm font-medium text-slate-700">Валидация ссылки</label>
+          <select id="ed_verify" bind:value={eVerify} class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
+            <option value="mark">Отметка ✓/✗</option>
+            <option value="auto">Автовалидация (перепост)</option>
+          </select>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label for="ed_sched" class="block text-sm font-medium text-slate-700">Scheduled start <span class="text-slate-400">(пусто = сразу)</span></label>
+            <input id="ed_sched" type="datetime-local" bind:value={eSchedFor}
+                   class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
+          </div>
+          <div>
+            <label for="ed_spread" class="block text-sm font-medium text-slate-700">Разбить на дней</label>
+            <input id="ed_spread" type="number" min="0" max="365" bind:value={eSpread}
+                   class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
+          </div>
+        </div>
+        <div>
+          <span class="block text-sm font-medium text-slate-700">Окно публикации <span class="text-slate-400">(пусто = стандартное)</span></span>
+          <div class="mt-1 grid grid-cols-2 gap-2">
+            <input type="date" bind:value={ePubFrom} max={ePubTo || editToday} aria-label="Publish from"
+                   class="rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
+            <input type="date" bind:value={ePubTo} min={ePubFrom || undefined} max={editToday} aria-label="Publish to"
+                   class="rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
+          </div>
+          {#if eWindowInvalid}
+            <p class="mt-1 text-[11px] text-red-600">Заполни обе даты, From не позже To.</p>
+          {:else if eWindowFuture}
+            <p class="mt-1 text-[11px] text-amber-600">Дата позже сегодня — посты уйдут в Scheduled. Выбери не позже сегодняшней.</p>
+          {/if}
+        </div>
+        <div class="flex justify-end gap-2 pt-2">
+          <button type="button" onclick={() => (editOpen = false)}
+                  class="rounded-md border border-slate-300 px-3 py-1.5 text-sm">Cancel</button>
+          <button type="button" onclick={saveEdit} disabled={editBusy || eWindowInvalid || eWindowFuture}
+                  class="rounded-md bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700 disabled:bg-slate-300">
+            {editBusy ? 'Сохраняю…' : 'Сохранить'}
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+{/if}
 
