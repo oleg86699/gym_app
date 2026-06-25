@@ -1,5 +1,6 @@
 <script lang="ts">
   import { ArrowLeft, ArrowRight } from 'lucide-svelte'
+  import { goto } from '$app/navigation'
   import { page } from '$app/state'
   import { onDestroy, onMount } from 'svelte'
 
@@ -144,14 +145,9 @@
   })
 
   function openCreate() {
-    newTaskType = 'post'
-    newName = `Run ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`
-    newFile = null
-    newPriority = 'normal'
-    newScheduledFor = ''
-    linkRows = [{ url: '', anchor: '' }]
-    linkCandidates = null
-    createOpen = true
+    // Единая (новая) форма создания run'а живёт на /runs — ведём туда с
+    // предвыбранным проектом, чтобы не дублировать форму на странице проекта.
+    goto(`/runs?new=${projectId}`)
   }
 
   async function handleCreate(e: SubmitEvent) {

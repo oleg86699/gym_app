@@ -1,5 +1,6 @@
 <script lang="ts">
   import { AlertTriangle, ArrowRight, Check, HelpCircle, Play, X } from 'lucide-svelte'
+  import { page } from '$app/state'
   import { onDestroy, onMount } from 'svelte'
 
   import {
@@ -200,6 +201,14 @@
       loadPoolStats(),
       loadCredentialTags(),
     ])
+    // Пришли со страницы проекта (/runs?new=<projectId>) — открываем единую
+    // форму создания run'а с предвыбранным проектом.
+    const newParam = page.url.searchParams.get('new')
+    if (newParam) {
+      openCreate()
+      const pid = Number(newParam)
+      if (!Number.isNaN(pid)) newProjectId = pid
+    }
     pollTimer = setInterval(tickPoll, 5000)
   })
   onDestroy(() => {
