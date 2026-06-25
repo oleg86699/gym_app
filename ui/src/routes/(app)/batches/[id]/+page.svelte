@@ -8,6 +8,7 @@
   import { ApiError } from '$lib/api/client'
   import RoleLegend from '$lib/components/ui/RoleLegend.svelte'
   import type { BatchCredEntry, Proxy, WpBatch, WpBatchStatus } from '$lib/api/types'
+  import { copyText } from '$lib/clipboard'
   import { showToast } from '$lib/stores/toast'
   import { currentUser } from '$lib/stores/user'
 
@@ -99,12 +100,8 @@
     revealedCredIds = new Set(revealedCredIds)  // trigger reactivity
   }
   async function copyToClipboard(text: string, label: string) {
-    try {
-      await navigator.clipboard.writeText(text)
-      showToast('success', `${label} copied`)
-    } catch {
-      showToast('error', 'Clipboard access denied')
-    }
+    if (await copyText(text)) showToast('success', `${label} copied`)
+    else showToast('error', 'Clipboard access denied')
   }
 
   async function loadBatch() {

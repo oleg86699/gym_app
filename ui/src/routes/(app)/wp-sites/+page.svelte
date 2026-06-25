@@ -15,6 +15,7 @@
     WpSiteListItem,
     WpValidationState,
   } from '$lib/api/types'
+  import { copyText } from '$lib/clipboard'
   import { showToast } from '$lib/stores/toast'
   import { currentUser } from '$lib/stores/user'
 
@@ -459,12 +460,8 @@
   }
 
   async function copyToClipboard(text: string, label: string) {
-    try {
-      await navigator.clipboard.writeText(text)
-      showToast('success', `${label} скопирован в буфер`)
-    } catch (e) {
-      showToast('error', `Не получилось скопировать: ${e instanceof Error ? e.message : String(e)}`)
-    }
+    if (await copyText(text)) showToast('success', `${label} скопирован в буфер`)
+    else showToast('error', 'Не получилось скопировать')
   }
 
   async function handleCreateSite(e: SubmitEvent) {

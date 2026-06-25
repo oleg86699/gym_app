@@ -6,6 +6,7 @@
   import { wpSites as sitesApi } from '$lib/api/admin'
   import { ApiError } from '$lib/api/client'
   import type { SiteAnalytics, SiteEvent, WpSiteDetail } from '$lib/api/types'
+  import { copyText } from '$lib/clipboard'
   import { showToast } from '$lib/stores/toast'
   import { currentUser } from '$lib/stores/user'
 
@@ -44,12 +45,8 @@
     revealedCredIds = new Set(revealedCredIds)
   }
   async function copyToClipboard(text: string, label: string) {
-    try {
-      await navigator.clipboard.writeText(text)
-      showToast('success', `${label} copied`)
-    } catch {
-      showToast('error', 'Clipboard access denied')
-    }
+    if (await copyText(text)) showToast('success', `${label} copied`)
+    else showToast('error', 'Clipboard access denied')
   }
 
   function fullTs(iso: string | null | undefined): string {

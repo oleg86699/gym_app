@@ -3,6 +3,7 @@
   import { Check, Copy, Eye, EyeOff } from 'lucide-svelte'
   import { supplierAccess, type SupplierAccessCreated, type SupplierAccessItem } from '$lib/api/admin'
   import { ApiError } from '$lib/api/client'
+  import { copyText } from '$lib/clipboard'
   import { showToast } from '$lib/stores/toast'
 
   let items = $state<SupplierAccessItem[]>([])
@@ -66,11 +67,10 @@
   }
 
   async function copy(text: string, key: string) {
-    try {
-      await navigator.clipboard.writeText(text)
+    if (await copyText(text)) {
       copied = key
       setTimeout(() => (copied = null), 1500)
-    } catch { /* */ }
+    }
   }
 
   function fmt(d: string | null): string {

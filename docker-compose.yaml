@@ -283,7 +283,7 @@ services:
       #   prod → conf.d/default.prod.conf (UI = prod-контейнер :80)
       # Так в каждом окружении ровно один server-блок (без конфликтов на :80).
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1/health >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1/healthz >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 10

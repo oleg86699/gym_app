@@ -6,6 +6,7 @@
   import SupplierAccessPanel from '$lib/components/SupplierAccessPanel.svelte'
   import { ApiError } from '$lib/api/client'
   import type { CreatedInvitation, GroupListItem, Invitation, Role } from '$lib/api/types'
+  import { copyText } from '$lib/clipboard'
   import { showToast } from '$lib/stores/toast'
   import { currentUser } from '$lib/stores/user'
 
@@ -88,11 +89,10 @@
 
   async function copyUrl() {
     if (!createdInvite) return
-    try {
-      await navigator.clipboard.writeText(createdInvite.invite_url)
+    if (await copyText(createdInvite.invite_url)) {
       copied = true
       setTimeout(() => (copied = false), 2000)
-    } catch {
+    } else {
       showToast('error', 'Clipboard access denied')
     }
   }
