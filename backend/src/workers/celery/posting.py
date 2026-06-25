@@ -267,6 +267,7 @@ async def _pick_candidate_sites(
     site_tlds: list[str] | None = None,
     site_tags: list[str] | None = None,
     site_domains: list[str] | None = None,
+    target_domain: str | None = None,
 ) -> list[WpSite]:
     """
     Сайты которые:
@@ -304,16 +305,33 @@ async def _pick_candidate_sites(
             )
         )
     has_valid_cred = exists().where(and_(*cred_conds))
-    # Подзапрос: сколько раз этот сайт уже использован в этом проекте
-    used_count_subq = (
-        select(func.count(ProjectWpUsed.id))
-        .where(
-            ProjectWpUsed.project_id == project_id,
-            ProjectWpUsed.site_id == WpSite.id,
+    # Сколько раз этот сайт уже использован. Дедуп ПО ДОМЕНУ: считаем размещения
+    # только под ЭТОТ money-домен (1 сайт = max_posts_per_site бэклинков НА ДОМЕН,
+    # а не на проект) — тот же сайт может линковать на разные money-домены.
+    # Фолбэк на per-project, если у айтема нет target_domain.
+    if target_domain:
+        used_count_subq = (
+            select(func.count(ProjectWpUsed.id))
+            .select_from(ProjectWpUsed)
+            .join(TextItem, TextItem.id == ProjectWpUsed.text_item_id)
+            .where(
+                ProjectWpUsed.project_id == project_id,
+                ProjectWpUsed.site_id == WpSite.id,
+                TextItem.target_domain == target_domain,
+            )
+            .correlate(WpSite)
+            .scalar_subquery()
         )
-        .correlate(WpSite)
-        .scalar_subquery()
-    )
+    else:
+        used_count_subq = (
+            select(func.count(ProjectWpUsed.id))
+            .where(
+                ProjectWpUsed.project_id == project_id,
+                ProjectWpUsed.site_id == WpSite.id,
+            )
+            .correlate(WpSite)
+            .scalar_subquery()
+        )
     # max_posts_per_site ЗАДАЧИ (один scalar для всех сайтов; live-read —
     # поднятие лимита задачи сразу расширяет пул кандидатов)
     max_reuse_subq = (
@@ -349,6 +367,41 @@ async def _pick_candidate_sites(
         stmt = stmt.where(WpSite.domain.in_(site_domains))
 
     return list((await session.execute(stmt)).scalars().unique().all())
+
+
+async def _has_postable_pending(
+    session: AsyncSession,
+    *,
+    run,
+    exclude_site_ids: set[int],
+    site_langs: list[str] | None = None,
+    site_tlds: list[str] | None = None,
+    site_tags: list[str] | None = None,
+    site_domains: list[str] | None = None,
+) -> bool:
+    """Per-domain проверка «есть ли куда постить» (для need_more_admins): есть ли
+    хотя бы один НЕ-завершённый айтем (pending/posting), под чей money-домен ещё
+    остался свободный кандидат-сайт (с учётом фильтра пула и exclude). Если да —
+    раном не сдаёмся. При дедупе по домену нельзя проверять «любой сайт» — у
+    каждого money-домена свой остаток пула."""
+    domains = (await session.execute(
+        select(TextItem.target_domain).where(
+            TextItem.posting_run_id == run.id,
+            TextItem.status.in_([
+                TextItemStatus.PENDING.value, TextItemStatus.POSTING.value,
+            ]),
+        ).distinct()
+    )).scalars().all()
+    for d in domains:
+        got = await _pick_candidate_sites(
+            session, project_id=run.project_id, run_id=run.id,
+            exclude_site_ids=exclude_site_ids, limit=1,
+            site_langs=site_langs, site_tlds=site_tlds, site_tags=site_tags,
+            site_domains=site_domains, target_domain=d,
+        )
+        if got:
+            return True
+    return False
 
 
 async def _bump_run_counter(
@@ -1040,6 +1093,7 @@ async def _post_one_item(
                     site_tlds=_f_tlds,
                     site_tags=_f_tags,
                     site_domains=_f_domains,
+                    target_domain=item.target_domain,
                 )
 
             if not candidates:
@@ -1059,15 +1113,27 @@ async def _post_one_item(
                     continue
 
                 async with registry.claim(site.id):
-                    # Повторно проверим что site всё ещё имеет квоту в проекте —
+                    # Повторно проверим квоту site под ЭТОТ money-домен (per-domain) —
                     # могла успеть другая корутина запостить и забить лимит.
                     async with WriteSession() as s:
-                        already = await s.scalar(
-                            select(func.count(ProjectWpUsed.id)).where(
-                                ProjectWpUsed.project_id == run.project_id,
-                                ProjectWpUsed.site_id == site.id,
-                            )
-                        ) or 0
+                        if item.target_domain:
+                            already = await s.scalar(
+                                select(func.count(ProjectWpUsed.id))
+                                .select_from(ProjectWpUsed)
+                                .join(TextItem, TextItem.id == ProjectWpUsed.text_item_id)
+                                .where(
+                                    ProjectWpUsed.project_id == run.project_id,
+                                    ProjectWpUsed.site_id == site.id,
+                                    TextItem.target_domain == item.target_domain,
+                                )
+                            ) or 0
+                        else:
+                            already = await s.scalar(
+                                select(func.count(ProjectWpUsed.id)).where(
+                                    ProjectWpUsed.project_id == run.project_id,
+                                    ProjectWpUsed.site_id == site.id,
+                                )
+                            ) or 0
                         max_reuse = await s.scalar(
                             select(PostingRun.max_posts_per_site).where(
                                 PostingRun.id == run.id
@@ -1678,9 +1744,8 @@ async def _run_posting_async(run_id: int) -> dict:
                         # Перед запуском проверим, что вообще есть куда постить.
                         _f_langs, _f_tlds, _f_tags, _f_domains = _run_site_filter(run)
                         async with WriteSession() as s:
-                            any_site = await _pick_candidate_sites(
-                                s, project_id=run.project_id, run_id=run.id,
-                                exclude_site_ids=set(), limit=1,
+                            any_site = await _has_postable_pending(
+                                s, run=run, exclude_site_ids=set(),
                                 site_langs=_f_langs, site_tlds=_f_tlds, site_tags=_f_tags, site_domains=_f_domains,
                             )
                         if not any_site:
@@ -1788,9 +1853,8 @@ async def _run_posting_async(run_id: int) -> dict:
                     else:
                         _f_langs, _f_tlds, _f_tags, _f_domains = _run_site_filter(run)
                         async with WriteSession() as s:
-                            fresh = await _pick_candidate_sites(
-                                s, project_id=run.project_id, run_id=run.id,
-                                exclude_site_ids=set(registry._exhausted), limit=1,
+                            fresh = await _has_postable_pending(
+                                s, run=run, exclude_site_ids=set(registry._exhausted),
                                 site_langs=_f_langs, site_tlds=_f_tlds, site_tags=_f_tags, site_domains=_f_domains,
                             )
                         if not fresh:
@@ -1799,9 +1863,8 @@ async def _run_posting_async(run_id: int) -> dict:
                             # новые доступы.
                             registry._exhausted.clear()
                             async with WriteSession() as s:
-                                any_global = await _pick_candidate_sites(
-                                    s, project_id=run.project_id, run_id=run.id,
-                                    exclude_site_ids=set(), limit=1,
+                                any_global = await _has_postable_pending(
+                                    s, run=run, exclude_site_ids=set(),
                                     site_langs=_f_langs, site_tlds=_f_tlds, site_tags=_f_tags, site_domains=_f_domains,
                                 )
                             if not any_global:
