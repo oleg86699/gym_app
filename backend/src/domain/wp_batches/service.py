@@ -889,7 +889,10 @@ async def run_batch_validation(
         # и global queue) показывал прогресс ЭТОГО прогона, а не застывшие
         # старые статусы. Отдельной сессией, чтобы не экспайрить loaded `creds`
         # (их логин/пароль/site нужны дальше в цикле).
-        if creds:
+        # ВАЖНО: только для точечной перевалидации (scope='invalid'/'pending').
+        # scope='all' (resume/полный прогон) полагается на cooldown-skip уже
+        # проверенных — там сброс обнулил бы прогресс и перепроверил всё.
+        if scope != "all" and creds:
             async with WriteSession() as _rs:
                 await _reset_creds_validation(_rs, [c.id for c in creds])
                 await _rs.commit()
