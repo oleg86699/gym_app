@@ -884,6 +884,16 @@ async def run_batch_validation(
 
         creds = await _credentials_in_scope(s, batch_id, scope)
 
+        # Сброс перевалидируемых кредов в pending («как только поставили») —
+        # чистим вердикты/ошибки/capability, чтобы UI (бар/счётчики/строки,
+        # и global queue) показывал прогресс ЭТОГО прогона, а не застывшие
+        # старые статусы. Отдельной сессией, чтобы не экспайрить loaded `creds`
+        # (их логин/пароль/site нужны дальше в цикле).
+        if creds:
+            async with WriteSession() as _rs:
+                await _reset_creds_validation(_rs, [c.id for c in creds])
+                await _rs.commit()
+
         # CF Tier 3: кап одновременных браузеров (Patchright) — из AppSettings,
         # настраивается под мощность сервера. Читаем один раз на батч.
         from domain.app_settings.service import get_app_settings
@@ -1452,6 +1462,35 @@ async def request_pause(session: AsyncSession, batch_id: int) -> None:
         update(WpImportBatch).where(WpImportBatch.id == batch_id).values(pause_requested=True)
     )
     await session.commit()
+
+
+async def _reset_creds_validation(session: AsyncSession, cred_ids: list[int]) -> None:
+    """Сброс вердиктов/ошибок/capability у конкретных кредов → cred_status='pending'
+    («как только поставили»). Зовём при старте (re-)validate, чтобы бар/счётчики/
+    строки честно показывали прогресс прогона, а не застывшие старые вердикты.
+    Чанкуем по 1000 (лимит bind-параметров PG)."""
+    for i in range(0, len(cred_ids), 1000):
+        chunk = cred_ids[i:i + 1000]
+        await session.execute(
+            update(WpCredential)
+            .where(WpCredential.id.in_(chunk))
+            .values(
+                is_valid=True,            # + last_validated_at=None → cred_status='pending'
+                last_validated_at=None,
+                last_validation_kind=None,
+                last_error_message=None,
+                last_error_at=None,
+                error_counter=0,
+                error_cooldown_until=None,
+                can_xmlrpc=None,
+                can_admin_login=None,
+                can_post_via_xmlrpc=None,
+                can_post_via_admin=None,
+                can_create_users=None,
+                admin_role=None,
+                last_admin_check_at=None,
+            )
+        )
 
 
 async def reset_batch_validation(session: AsyncSession, batch_id: int) -> int:
