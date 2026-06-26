@@ -640,7 +640,7 @@
   let nowMs = $state(Date.now())
   let etaTimer: ReturnType<typeof setInterval> | null = null
 
-  function fmtDuration(ms: number): string {
+  function fmtMs(ms: number): string {
     if (!isFinite(ms) || ms < 0) return '—'
     const s = Math.round(ms / 1000)
     if (s < 60) return `${s}s`
@@ -978,10 +978,10 @@
       </div>
       {#if run.status === 'running'}
         <div class="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500">
-          <span title="С момента старта постинга">{fmtDuration(elapsedMs)} прошло</span>
+          <span title="С момента старта постинга">{fmtMs(elapsedMs)} прошло</span>
           {#if isFinite(etaMs) && etaMs > 0 && done < progress.total}
             <span class="text-slate-300">·</span>
-            <span class="text-slate-600" title="Примерно до конца (по скорости обработки)">~{fmtDuration(etaMs)} осталось</span>
+            <span class="text-slate-600" title="Примерно до конца (по скорости обработки)">~{fmtMs(etaMs)} осталось</span>
           {/if}
           {#if postsPerMin > 0}
             <span class="text-slate-300">·</span>
