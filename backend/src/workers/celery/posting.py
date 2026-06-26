@@ -1280,7 +1280,20 @@ async def _post_one_item(
                                             .where(TextItem.id == item.id)
                                             .values(link_verified=False,
                                                     verify_attempts=TextItem.verify_attempts + 1))
-                                        await s.commit()
+                                        # Пост создан, но бэклинк на живой странице не
+                                        # виден (сайт decoupled / в обслуживании / тема не
+                                        # рендерит контент). Штрафуем сайт как Part A:
+                                        # counter++ + cooldown — деградировавший сайт
+                                        # выпадает из пула. Иначе LRU-отбор (last_used_at
+                                        # ASC) вечно тащит такие «трупы» в голову очереди,
+                                        # и ран молотит их по кругу, не доходя до живых
+                                        # сайтов (диагноз run 32: 0/543). При пороге —
+                                        # auto-disable. Любой verified-успех/auth-fail
+                                        # сбросит счётчик, так что живой сайт не пострадает.
+                                        await _bump_site_failure(
+                                            s, site.id, kind="verify_failed",
+                                            disable_threshold=site_disable[0],
+                                            disable_threshold_cf=site_disable[1])
                                     log.info("posting.item.verify_failed_hop",
                                              run_id=run.id, item_id=item.id, site_id=site.id,
                                              post_url=outcome.posted_url)
