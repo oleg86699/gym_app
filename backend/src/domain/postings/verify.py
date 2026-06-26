@@ -20,7 +20,6 @@ import structlog
 
 log = structlog.get_logger(__name__)
 
-_HREF_RE = re.compile(r"""href=["']([^"']+)["']""", re.IGNORECASE)
 _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 
 
@@ -33,15 +32,18 @@ def _norm_domain(d: str | None) -> str:
 
 
 def domain_in_hrefs(html: str, domain: str) -> bool:
-    """Есть ли на странице href на этот домен (или его поддомен)?"""
+    """Есть ли наш money-домен в КОДЕ страницы?
+
+    По решению: проверяем НЕ парсингом href, а вхождением домена (как отдельного
+    хост-токена) в исходник страницы. Так verify устойчив к битому HTML
+    (`<a href=https://x/">` без кавычек и т.п.) и не плодит лишние посты при
+    auto-валидации (не отбрасывает реально размещённую ссылку из-за кривой
+    разметки). Граница `(?<![\\w.-]) … (?![\\w-])` — чтобы не ловить домен как
+    часть другого домена/слова."""
     d = _norm_domain(domain)
     if not html or not d:
         return False
-    for m in _HREF_RE.finditer(html):
-        host = _norm_domain(urlparse(m.group(1)).netloc)
-        if host and (host == d or host.endswith("." + d)):
-            return True
-    return False
+    return re.search(r"(?<![\w.-])" + re.escape(d) + r"(?![\w-])", html, re.IGNORECASE) is not None
 
 
 async def verify_post_link(

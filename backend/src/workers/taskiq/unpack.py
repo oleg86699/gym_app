@@ -164,9 +164,13 @@ async def unpack_archive(run_id: int) -> dict:
                     continue
 
                 title, body = _parse_text_file(raw)
+                # Санитизация: чиним битый HTML из источника (ссылки без кавычек,
+                # хвостовые кавычки в href, кривые теги) ДО анализа и хеша — чтобы
+                # link_url, content_hash и публикуемое тело были корректными.
+                from domain.text_links import analyze_text, sanitize_text_html
+                body = sanitize_text_html(body) or body
                 # Фаза A: разбор ссылок/анкоров + язык + disambiguation целевого
                 # бэклинка по доменам проекта. Неоднозначные → needs_review.
-                from domain.text_links import analyze_text
                 analysis = analyze_text(body, project_domains)
                 # Для дедупа — хешируем normalized content (body, title не учитываем)
                 content_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()

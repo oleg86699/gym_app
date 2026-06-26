@@ -5,6 +5,7 @@ from domain.text_links.service import (
     extract_links,
     inject_link,
     normalize_domain,
+    sanitize_text_html,
     spin,
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     "extract_links",
     "inject_link",
     "normalize_domain",
+    "sanitize_text_html",
     "spin",
 ]

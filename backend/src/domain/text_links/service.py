@@ -97,6 +97,43 @@ def extract_links(html: str | None) -> list[tuple[str, str]]:
     return out
 
 
+def _clean_url(u: str | None) -> str:
+    """Срезать обрамляющие/висячие кавычки, угловые скобки и пробелы из URL.
+    Чинит битый источник вида `https://x/"` (хвостовая кавычка) → `https://x/`."""
+    if not u:
+        return u or ""
+    return u.strip().strip("\"'").strip().rstrip("\"'>").strip()
+
+
+def sanitize_text_html(html: str | None) -> str | None:
+    """Привести HTML статьи в порядок и починить ссылки.
+
+    - Нормализуем разметку через BeautifulSoup: re-serialize чинит теги без
+      кавычек/незакрытые (`<a href=https://x/">` → `<a href="https://x/">`).
+    - Чистим URL в каждом <a href> (срезаем висячие кавычки/пробелы) — иначе
+      публикуемый бэклинк битый (404), а verify не находит ссылку.
+
+    Применяется при загрузке (unpack) ко ВСЕМ текстам и для починки уже залитых.
+    Возвращает почищенный HTML (или исходное значение, если парсить нечего)."""
+    if not html or "<" not in html:
+        return html
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+    except Exception:
+        return html
+    for a in soup.find_all("a"):
+        href = a.get("href")
+        if href is None:
+            continue
+        cleaned = _clean_url(href)
+        if cleaned != href:
+            if cleaned:
+                a["href"] = cleaned
+            else:
+                del a["href"]
+    return str(soup)
+
+
 def _project_set(project_domains) -> set[str]:
     out: set[str] = set()
     for d in project_domains or []:
