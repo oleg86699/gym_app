@@ -15,7 +15,7 @@ from core.config import settings
 from core.db import WriteSession
 from core.lang_detect import detect_language_from_html
 from core.storage import storage
-from domain.text_links import inject_link, normalize_domain
+from domain.text_links import inject_link, normalize_domain, sanitize_text_html
 from infrastructure.db.models import PostingRun, PostingRunStatus
 from core.taskiq_app import broker
 
@@ -73,6 +73,9 @@ async def process_csv_direct(run_id: int) -> dict:
         # обернуть анкор/значимое слово, иначе вставить в абзац). Иначе тело как есть.
         body = (inject_link(r["text"], r["link"], r.get("anchor") or r["link"])
                 if inject else r["text"])
+        # Санитизация: чиним битый HTML из CSV-текста (некавыченные/незакрытые теги,
+        # хвостовые кавычки в href) ДО хеша/сохранения.
+        body = sanitize_text_html(body) or body
         batch.append({
             "posting_run_id": run_id,
             "project_id": project_id,

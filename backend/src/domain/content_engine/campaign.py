@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.db import WriteSession
 from domain.ai import GenerationError, generate_text, pick_model, render_prompt
 from domain.content_engine.service import fanout_materialize, make_variant
-from domain.text_links import normalize_domain
+from domain.text_links import normalize_domain, sanitize_text_html
 from domain.texts import create_texts
 from infrastructure.concurrency import RedisConcurrencyLimiter
 from infrastructure.db.models import (
@@ -85,6 +85,9 @@ def _parse_generated(raw: str) -> tuple[str | None, str]:
     else:
         # нет <text> — берём всё, но вычищаем title-тег из тела
         body = _TITLE_RE.sub("", raw).strip()
+    # Санитизация AI-вывода: чиним битый HTML (некавыченные/незакрытые теги,
+    # хвостовые кавычки в href) сразу при генерации.
+    body = sanitize_text_html(body) or body
     return title, body
 
 

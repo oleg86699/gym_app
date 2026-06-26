@@ -21,7 +21,7 @@ import structlog
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from domain.text_links import inject_link, normalize_domain, spin
+from domain.text_links import inject_link, normalize_domain, sanitize_text_html, spin
 from domain.texts import create_texts
 from infrastructure.db.models import Text, TextItem, TextItemStatus
 
@@ -30,9 +30,12 @@ log = structlog.get_logger(__name__)
 
 def make_variant(original_body: str, spin_formula: str | None,
                  link: str, anchor: str, rng=None) -> str:
-    """Готовое тело одного размещения: расшивка спина (если есть) + инжект ссылки."""
+    """Готовое тело одного размещения: расшивка спина (если есть) + инжект ссылки.
+    Финально санитизируем — чиним битый HTML (в т.ч. из старых/переиспользуемых
+    оригиналов), чтобы публикуемое тело и бэклинк были корректными."""
     base = spin(spin_formula, rng=rng) if spin_formula else (original_body or "")
-    return inject_link(base, link, anchor or link)
+    out = inject_link(base, link, anchor or link)
+    return sanitize_text_html(out) or out
 
 
 async def fanout_materialize(
