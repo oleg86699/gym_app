@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ArrowLeft, ArrowRight } from 'lucide-svelte'
+  import { ArrowLeft, ArrowRight, Check, Pencil, X } from 'lucide-svelte'
   import { goto } from '$app/navigation'
   import { page } from '$app/state'
   import { onDestroy, onMount } from 'svelte'
@@ -98,6 +98,33 @@
     if (p.owner.id === u.id) return true
     if (u.roles.some((r) => r.name === 'group_admin') && p.owner_group?.id === u.group?.id) return true
     return false
+  }
+
+  // ─── Rename (владелец / group_admin / super_admin) ─────────────────
+  let renaming = $state(false)
+  let renameValue = $state('')
+  let renameBusy = $state(false)
+
+  function startRename() {
+    renameValue = project?.name ?? ''
+    renaming = true
+  }
+  function focusOnMount(node: HTMLElement) { node.focus() }
+  async function saveRename() {
+    const name = renameValue.trim()
+    if (!project) return
+    if (!name || name === project.name) { renaming = false; return }
+    renameBusy = true
+    try {
+      const updated = await projectsApi.update(project.id, { name })
+      project = { ...project, name: updated.name }
+      renaming = false
+      showToast('success', 'Проект переименован')
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    } finally {
+      renameBusy = false
+    }
   }
 
   async function loadProject() {
@@ -224,9 +251,25 @@
 <div class="space-y-6">
   <div>
     <a href="/projects" class="text-sm text-slate-500 hover:text-slate-700"><ArrowLeft size={14} class="inline-block align-text-bottom" /> Projects</a>
-    <h1 class="mt-1 text-2xl font-semibold text-slate-900">
-      {project?.name ?? '…'}
-    </h1>
+    {#if renaming}
+      <div class="mt-1 flex items-center gap-2">
+        <input bind:value={renameValue} maxlength="200" use:focusOnMount
+               onkeydown={(e) => { if (e.key === 'Enter') saveRename(); if (e.key === 'Escape') renaming = false }}
+               class="w-full max-w-md rounded-md border border-slate-300 px-2 py-1 text-2xl font-semibold text-slate-900 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500" />
+        <button type="button" onclick={saveRename} disabled={renameBusy} title="Сохранить"
+                class="rounded-md bg-brand-600 p-1.5 text-white hover:bg-brand-700 disabled:opacity-50"><Check size={18} /></button>
+        <button type="button" onclick={() => (renaming = false)} title="Отмена"
+                class="rounded-md border border-slate-300 p-1.5 text-slate-600 hover:bg-slate-50"><X size={18} /></button>
+      </div>
+    {:else}
+      <h1 class="mt-1 flex items-center gap-2 text-2xl font-semibold text-slate-900">
+        {project?.name ?? '…'}
+        {#if canManage(project)}
+          <button type="button" onclick={startRename} title="Переименовать проект"
+                  class="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700"><Pencil size={16} /></button>
+        {/if}
+      </h1>
+    {/if}
     {#if project?.description}
       <p class="mt-1 text-sm text-slate-500">{project.description}</p>
     {/if}
