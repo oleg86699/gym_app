@@ -8,6 +8,8 @@
   import TipTapEditor from '$lib/components/ui/TipTapEditor.svelte'
   import type { TextItemDetail, TextItemStatus } from '$lib/api/types'
   import { prettyUrl } from '$lib/url'
+  import { formatHtml } from '$lib/html-format'
+  import HtmlSourceEditor from '$lib/components/ui/HtmlSourceEditor.svelte'
   import { showToast } from '$lib/stores/toast'
 
   let runId = $derived(Number(page.params.id))
@@ -22,6 +24,14 @@
 
   let formTitle = $state('')
   let formContent = $state('')
+  // Буфер для HTML-source: pretty-print при переключении в html (только для
+  // показа/правки исходника; в formContent уезжает то, что реально набрали).
+  let sourceText = $state('')
+
+  function switchMode(m: 'visual' | 'html') {
+    if (m === 'html' && mode !== 'html') sourceText = formatHtml(formContent)
+    mode = m
+  }
 
   let dirty = $derived(
     item !== null &&
@@ -319,7 +329,7 @@
       <div class="inline-flex overflow-hidden rounded-md border border-slate-300 text-xs font-medium">
         {#each ['visual', 'html'] as m}
           {@const isOn = mode === m}
-          <button type="button" onclick={() => (mode = m as typeof mode)}
+          <button type="button" onclick={() => switchMode(m as typeof mode)}
                   class="px-3 py-1.5 transition"
                   class:bg-brand-600={isOn}
                   class:text-white={isOn}
@@ -376,11 +386,10 @@
       <div class="flex flex-col">
         <div class="mb-1 flex items-center justify-between text-xs font-medium uppercase tracking-wider text-slate-500">
           <span>HTML source</span>
-          <span class="font-mono normal-case text-slate-400">{formContent.length} chars</span>
+          <span class="font-mono normal-case text-slate-400">{sourceText.length} chars</span>
         </div>
-        <textarea bind:value={formContent} readonly={!item.editable} spellcheck="false"
-                  class="min-h-[60vh] w-full rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-[13px] leading-snug text-slate-800 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500 read-only:bg-slate-50"
-        ></textarea>
+        <HtmlSourceEditor bind:value={sourceText} readonly={!item.editable}
+                          oninput={(v) => { if (item.editable) formContent = v }} />
       </div>
     {/if}
 

@@ -6,7 +6,9 @@
   import { texts as textsApi } from '$lib/api/admin'
   import { ApiError } from '$lib/api/client'
   import TipTapEditor from '$lib/components/ui/TipTapEditor.svelte'
+  import HtmlSourceEditor from '$lib/components/ui/HtmlSourceEditor.svelte'
   import type { TextDetail } from '$lib/api/types'
+  import { formatHtml } from '$lib/html-format'
   import { showToast } from '$lib/stores/toast'
 
   let textId = $derived(Number(page.params.id))
@@ -18,6 +20,14 @@
 
   let formTitle = $state('')
   let formBody = $state('')
+  // Буфер HTML-source: pretty-print при переключении в html (только для показа/
+  // правки исходника; в formBody уезжает реально набранное).
+  let sourceText = $state('')
+
+  function switchMode(m: 'visual' | 'html') {
+    if (m === 'html' && mode !== 'html') sourceText = formatHtml(formBody)
+    mode = m
+  }
 
   let dirty = $derived(
     text !== null && (formTitle !== (text.title ?? '') || formBody !== text.body),
@@ -92,7 +102,7 @@
       <div class="inline-flex overflow-hidden rounded-md border border-slate-300 text-xs font-medium">
         {#each ['visual', 'html'] as m}
           {@const isOn = mode === m}
-          <button type="button" onclick={() => (mode = m as typeof mode)}
+          <button type="button" onclick={() => switchMode(m as typeof mode)}
                   class="px-3 py-1.5 transition" class:bg-brand-600={isOn} class:text-white={isOn}
                   class:bg-white={!isOn} class:text-slate-700={!isOn}>
             {m === 'visual' ? 'Visual' : 'HTML'}
@@ -127,11 +137,9 @@
       <div class="flex flex-col">
         <div class="mb-1 flex items-center justify-between text-xs font-medium uppercase tracking-wider text-slate-500">
           <span>HTML source</span>
-          <span class="font-mono normal-case text-slate-400">{formBody.length} chars</span>
+          <span class="font-mono normal-case text-slate-400">{sourceText.length} chars</span>
         </div>
-        <textarea bind:value={formBody} spellcheck="false"
-                  class="min-h-[60vh] w-full rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-[13px] leading-snug text-slate-800 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
-        ></textarea>
+        <HtmlSourceEditor bind:value={sourceText} oninput={(v) => (formBody = v)} />
       </div>
     {/if}
 
