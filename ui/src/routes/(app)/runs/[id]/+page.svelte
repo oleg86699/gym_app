@@ -367,9 +367,14 @@
     await refresh(true)
     startSSE()
     pollTimer = setInterval(tickPoll, 10000)
+    // 1-сек тик для elapsed/ETA — обновляем только пока ран активен.
+    etaTimer = setInterval(() => {
+      if (isActiveStatus(run?.status)) nowMs = Date.now()
+    }, 1000)
   })
   onDestroy(() => {
     if (pollTimer) clearInterval(pollTimer)
+    if (etaTimer) clearInterval(etaTimer)
     if (itemsReloadTimer) clearTimeout(itemsReloadTimer)
     if (linkCheckTimer) clearInterval(linkCheckTimer)
     stopSSE()
@@ -629,6 +634,43 @@
   )
   let canRetry = $derived(!!progress && progress.failed > 0)
   let canDownload = $derived(!!run && run.total_texts > 0)
+
+  // ─── ETA + скорость постинга (как в батчах) ────────────────────────
+  // 1-сек тик пересчитывает elapsed/ETA только пока ран активен.
+  let nowMs = $state(Date.now())
+  let etaTimer: ReturnType<typeof setInterval> | null = null
+
+  function fmtDuration(ms: number): string {
+    if (!isFinite(ms) || ms < 0) return '—'
+    const s = Math.round(ms / 1000)
+    if (s < 60) return `${s}s`
+    const m = Math.floor(s / 60); const sr = s % 60
+    if (m < 60) return sr > 0 ? `${m}m ${sr}s` : `${m}m`
+    const h = Math.floor(m / 60); const mr = m % 60
+    return mr > 0 ? `${h}h ${mr}m` : `${h}h`
+  }
+
+  let elapsedMs = $derived(
+    run?.started_at ? nowMs - new Date(run.started_at).getTime() : 0,
+  )
+  // done = терминальные айтемы (для ETA по скорости обработки)
+  let doneSoFar = $derived(
+    (progress?.posted ?? 0) + (progress?.failed ?? 0) + (progress?.skipped ?? 0),
+  )
+  // скорость именно ПОСТИНГА — успешные посты в минуту
+  let postsPerMin = $derived(
+    elapsedMs > 1000 && (progress?.posted ?? 0) > 0
+      ? (progress!.posted) / (elapsedMs / 60000)
+      : 0,
+  )
+  let procRatePerSec = $derived(
+    elapsedMs > 1000 && doneSoFar > 0 ? doneSoFar / (elapsedMs / 1000) : 0,
+  )
+  let etaMs = $derived(
+    progress && procRatePerSec > 0
+      ? Math.max(0, (progress.total - doneSoFar) / procRatePerSec) * 1000
+      : Infinity,
+  )
 
   // ─── Перепроверка проставленных ссылок (link-check) ────────────────
   let validating = $state(false)
@@ -934,6 +976,19 @@
         </div>
         <span class="text-sm font-semibold text-slate-700">{totalPct}%</span>
       </div>
+      {#if run.status === 'running'}
+        <div class="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500">
+          <span title="С момента старта постинга">{fmtDuration(elapsedMs)} прошло</span>
+          {#if isFinite(etaMs) && etaMs > 0 && done < progress.total}
+            <span class="text-slate-300">·</span>
+            <span class="text-slate-600" title="Примерно до конца (по скорости обработки)">~{fmtDuration(etaMs)} осталось</span>
+          {/if}
+          {#if postsPerMin > 0}
+            <span class="text-slate-300">·</span>
+            <span title="Скорость постинга">{postsPerMin.toFixed(1)} постов/мин</span>
+          {/if}
+        </div>
+      {/if}
       {#if isGenRun}
         <!-- Бар: зелёный=постинг · оранжевый=генерация (ждёт постинга) · красный=ошибки -->
         <div class="mt-3 flex h-2.5 w-full overflow-hidden rounded-full bg-slate-100">
