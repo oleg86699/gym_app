@@ -21,6 +21,11 @@
 
   let items = $state<WpSiteListItem[]>([])
   let total = $state(0)
+  // Пагинация (cursor-based): подгружаем следующие страницы кнопкой «Load more».
+  const PER_PAGE = 200
+  let nextCursor = $state<string | null>(null)
+  let hasMore = $state(false)
+  let loadingMore = $state(false)
   let summary = $state<WpPoolSummary>({
     sites_total: 0,
     sites_active: 0,
@@ -353,7 +358,7 @@
     try {
       const [list, s] = await Promise.all([
         sitesApi.list({
-          limit: 200,
+          limit: PER_PAGE,
           search: search || undefined,
           status: filterStatus,
           sort: sortBy,
@@ -362,11 +367,37 @@
       ])
       items = list.items
       total = list.total
+      nextCursor = list.next_cursor
+      hasMore = list.has_more
       summary = s
     } catch (e) {
       showToast('error', e instanceof ApiError ? e.message : String(e))
     } finally {
       loading = false
+    }
+  }
+
+  // Подгрузить следующую страницу (append). Фильтр/поиск/сорт берём текущие —
+  // они совпадают с тем, что отдал refresh (cursor валиден для той же выборки).
+  async function loadMore() {
+    if (!hasMore || !nextCursor || loadingMore) return
+    loadingMore = true
+    try {
+      const list = await sitesApi.list({
+        cursor: nextCursor,
+        limit: PER_PAGE,
+        search: search || undefined,
+        status: filterStatus,
+        sort: sortBy,
+      })
+      items = [...items, ...list.items]
+      total = list.total
+      nextCursor = list.next_cursor
+      hasMore = list.has_more
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    } finally {
+      loadingMore = false
     }
   }
   // ─── Live counter heartbeat ──────────────────────────────────────────
@@ -1211,7 +1242,15 @@
         </tbody>
       </table>
     </div>
-    <p class="text-xs text-slate-500">Showing {items.length} of {total}</p>
+    <div class="mt-3 flex flex-wrap items-center justify-center gap-3">
+      <span class="text-xs text-slate-500">Showing {items.length} of {total}</span>
+      {#if hasMore}
+        <button type="button" onclick={loadMore} disabled={loadingMore}
+                class="rounded-md border border-brand-300 bg-brand-50 px-3 py-1.5 text-xs font-medium text-brand-700 hover:bg-brand-100 disabled:opacity-50">
+          {loadingMore ? 'Загрузка…' : `Показать ещё (+${PER_PAGE})`}
+        </button>
+      {/if}
+    </div>
   {/if}
 </div>
 
