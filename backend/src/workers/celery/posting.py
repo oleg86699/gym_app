@@ -1085,6 +1085,7 @@ async def _post_one_item(
         tried_sites: set[int] = set()
         MAX_ROUNDS = 2000  # safety-guard; реальный стоп — пустой пул кандидатов
         rounds = 0
+        _ctrl_check_at = 0.0  # троттлинг чтения pause/cancel-флагов (раз в ~2с)
 
         while rounds < MAX_ROUNDS:
             rounds += 1
@@ -1117,6 +1118,18 @@ async def _post_one_item(
 
             posted = False
             for site in candidates:
+                # Отзывчивость на pause/cancel: per-item цикл (retry «пока пул не
+                # опустеет») иначе заставлял стоп ждать перебора всего пула. Читаем
+                # флаги не чаще раза в ~2с; на pause/cancel — выходим сразу, вернув
+                # айтем в pending (главный цикл финализирует статус рана).
+                _now = time.monotonic()
+                if _now - _ctrl_check_at >= 2.0:
+                    _ctrl_check_at = _now
+                    _paused, _cancelled = await _read_control_flags(run.id)
+                    if _paused or _cancelled:
+                        async with WriteSession() as s:
+                            await _release_text_back_to_pending(s, item_id=item.id)
+                        return
                 if registry.is_exhausted(site.id):
                     tried_sites.add(site.id)
                     continue
