@@ -351,12 +351,16 @@ async def _pick_candidate_sites(
             has_valid_cred,
             used_count_subq < max_reuse_subq,
         )
-        # LRU + random: сначала давно/никогда не использованные сайты (ровный
-        # делёж бэклинков по пулу со временем), random() как tiebreak — чтобы
-        # 25 параллельных айтемов не толпились на одних и тех же id и не долбили
-        # одни сайты concurrently (отсюда были 503/500). Порядок на корректность
-        # не влияет (каждый сайт всё равно используется max_posts_per_site раз).
-        .order_by(WpSite.last_used_at.asc().nulls_first(), func.random())
+        # ЧИСТО СЛУЧАЙНЫЙ отбор по пулу — каждый параллельный айтем берёт РАЗНЫЕ
+        # сайты. Раньше тут было `last_used_at ASC, random()`, но last_used_at —
+        # первичный ключ сортировки, а времена у сайтов разные, поэтому random()
+        # фактически не срабатывал: ВСЕ параллельные айтемы получали один и тот же
+        # топ самых старых сайтов и долбили их concurrently. Особенно больно с
+        # деградировавшим/битым сайтом (постинг ок, но verify не проходит): десятки
+        # айтемов постили в один и тот же мёртвый сайт до cooldown-а, ран висел на 0
+        # и не доходил до живых сайтов (diag run 32). Корректность не страдает —
+        # дедуп per-domain (max_posts_per_site) не даёт двойных ссылок с сайта.
+        .order_by(func.random())
         .limit(limit)
     )
     if exclude_site_ids:
@@ -1185,6 +1189,20 @@ async def _post_one_item(
 
                     if fresh_site is None:
                         tried_sites.add(site.id)
+                        continue
+
+                    # Пока ждали claim, другой айтем мог остудить/выключить сайт.
+                    # verify-fail ставит cooldown, но НЕ пишет project_wp_used —
+                    # поэтому quota-чек выше его не отсекает, и очередь ожидавших
+                    # айтемов иначе долбит уже мёртвый сайт по кругу (был backlog
+                    # под 40 хитов на один битый сайт — diag run 32). Перепроверяем.
+                    _claim_now = datetime.now(UTC)
+                    if (not fresh_site.is_active) or (
+                        fresh_site.posting_cooldown_until is not None
+                        and fresh_site.posting_cooldown_until > _claim_now
+                    ):
+                        tried_sites.add(site.id)
+                        registry.mark_exhausted(site.id)
                         continue
 
                     # Берём только подтверждённо рабочие cred (cred_status='valid'),
