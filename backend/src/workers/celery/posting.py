@@ -338,12 +338,16 @@ async def _pick_candidate_sites(
         select(PostingRun.max_posts_per_site).where(PostingRun.id == run_id).scalar_subquery()
     )
 
+    _now = datetime.now(UTC)
     stmt = (
         select(WpSite)
         .options(selectinload(WpSite.credentials))
         .where(
             WpSite.deleted_at.is_(None),
             WpSite.is_active.is_(True),
+            # временный лок (транзиент/429) — сайт вне пула до истечения cooldown
+            or_(WpSite.posting_cooldown_until.is_(None),
+                WpSite.posting_cooldown_until <= _now),
             has_valid_cred,
             used_count_subq < max_reuse_subq,
         )
@@ -554,6 +558,7 @@ async def _mark_text_posted(
     # last_used_at → для LRU-отбора в _pick_candidate_sites (ровный делёж пула).
     site_values: dict = {
         "consecutive_site_failures": 0, "last_working_at": now, "last_used_at": now,
+        "posting_cooldown_until": None,  # успех снимает временный лок
     }
     if outcome.working_xmlrpc_url:
         site_values["last_working_url"] = outcome.working_xmlrpc_url
@@ -667,10 +672,16 @@ async def _bump_site_failure(
     if site is None:
         return
     new_count = (site.consecutive_site_failures or 0) + 1
+    # Временный лок сайта на постинг: backoff растёт со счётчиком (упорно-битый
+    # уходит из пула надолго, разовый блип — ненадолго). rate_limited — короткий
+    # (сайт перегружен сейчас, быстро оживает). Залоченные исключаются из
+    # _pick_candidate_sites → задача встаёт в need_more_admins, а не грайндит.
+    _cd_min = 20 if kind == "rate_limited" else min(20 * new_count, 360)
     values: dict = {
         "consecutive_site_failures": new_count,
         "last_site_failure_at": now,
         "last_site_failure_kind": kind,
+        "posting_cooldown_until": now + timedelta(minutes=_cd_min),
     }
     # CF отдельно агрессивнее — сайт под Cloudflare почти не «оживает», а каждый
     # headful-фейл стоит ~30 сек.
@@ -1351,10 +1362,11 @@ async def _post_one_item(
                                     )
                                 )
                                 # Site-failure-счётчик сбрасываем — сайт ответил XML-RPC-ом,
-                                # значит он жив.
+                                # значит он жив (и снимаем временный лок).
                                 await s.execute(
                                     update(WpSite).where(WpSite.id == site.id)
-                                    .values(consecutive_site_failures=0)
+                                    .values(consecutive_site_failures=0,
+                                            posting_cooldown_until=None)
                                 )
                                 new_errs = await _bump_credential_error(s, cred.id)
                                 if new_errs >= CREDENTIAL_ERROR_THRESHOLD:
@@ -1419,16 +1431,22 @@ async def _post_one_item(
                             break
 
                         if outcome.error == ErrorKind.RATE_LIMITED:
-                            # 429: сайт/прокси перегружены ПРЯМО СЕЙЧАС — это НЕ мёртвый
-                            # сайт. Помечаем exhausted на ЭТОТ прогон (остальные потоки
-                            # пропустят его и разъедутся по другим сайтам, без 429-шторма),
-                            # но НЕ бьём по счётчику авто-выключения (времянка — в следующем
-                            # прогоне сайт снова доступен).
+                            # 429: сайт перегружен ПРЯМО СЕЙЧАС. Ставим временный
+                            # лок (короткий cooldown) + счётчик — чтобы ни этот, ни
+                            # другие раны не грайндили его, пока не остынет. После
+                            # cooldown снова доступен; упорный 429 в итоге уйдёт в
+                            # авто-дисейбл. Залоченный исключается из кандидатов →
+                            # задача встаёт в need_more_admins, а не крутится.
                             log.info(
                                 "posting.item.rate_limited",
                                 run_id=run.id, item_id=item.id, site_id=site.id,
                                 cred_id=cred.id,
                             )
+                            async with WriteSession() as s:
+                                await _bump_site_failure(
+                                    s, site.id, kind="rate_limited",
+                                    disable_threshold=site_disable[0],
+                                    disable_threshold_cf=site_disable[1])
                             registry.mark_exhausted(site.id)
                             site_done = True
                             break

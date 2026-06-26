@@ -522,8 +522,18 @@ async def resume_endpoint(
     if b.status not in (WpBatchStatus.PAUSED.value, WpBatchStatus.DONE.value,
                         WpBatchStatus.VALIDATING.value):
         raise HTTPException(status_code=409, detail=f"Cannot resume in status '{b.status}'")
+    # Осиротевший после рестарта воркера батч остаётся 'validating' — а
+    # run_batch_validation отбивает повторный запуск гардом «already running»,
+    # пока статус == 'validating». Выводим его из этого статуса (→ 'paused'),
+    # иначе enqueue ниже тихо ничего не сделает.
+    new_status = (
+        WpBatchStatus.PAUSED.value
+        if b.status == WpBatchStatus.VALIDATING.value
+        else b.status
+    )
     await session.execute(
-        update(WpImportBatch).where(WpImportBatch.id == batch_id).values(pause_requested=False))
+        update(WpImportBatch).where(WpImportBatch.id == batch_id).values(
+            pause_requested=False, status=new_status))
     await session.commit()
     from workers.taskiq.cron_tasks import validate_batch_task
     # Валидация ВСЕГДА полным циклом: super_admin — full (как импорт/ручной

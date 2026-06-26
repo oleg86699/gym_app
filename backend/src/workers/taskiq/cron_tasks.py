@@ -103,17 +103,32 @@ async def dispatch_scheduled_runs() -> dict:
 )
 async def recover_stalled_runs() -> dict:
     """
-    Найти runs со status='running' и worker_heartbeat_at старше HEARTBEAT_STALE_S.
-    Пометить как 'interrupted'. Пользователь решит — рестартовать или нет
-    (для рестарта потом можно сделать ручку POST /postings/{id}/retry).
+    Найти runs со status='running' и worker_heartbeat_at старше HEARTBEAT_STALE_S
+    (heartbeat пишется каждые 10с — устаревший >90с значит воркер умер, обычно
+    деплой/рестарт).
+
+    АВТО-RESUME: вместо пометки 'interrupted' + ручного Restart — сразу возвращаем
+    ран в очередь (status='queued' + повторный enqueue Celery), чтобы постинг
+    продолжился сам после рестарта воркера. Залипшие в 'posting' text_items
+    возвращаем в 'pending', иначе их никто не подберёт.
+
+    Исключение: если на ране на момент смерти стоял pause/cancel_requested —
+    НЕ воскрешаем (уважаем намерение пользователя), помечаем 'interrupted'.
     """
-    threshold = datetime.now(UTC) - timedelta(seconds=HEARTBEAT_STALE_S)
+    now = datetime.now(UTC)
+    threshold = now - timedelta(seconds=HEARTBEAT_STALE_S)
+    resume: list[tuple[int, str]] = []
     interrupted: list[int] = []
 
     async with WriteSession() as s:
         rows = (
             await s.execute(
-                select(PostingRun.id).where(
+                select(
+                    PostingRun.id,
+                    PostingRun.priority,
+                    PostingRun.pause_requested,
+                    PostingRun.cancel_requested,
+                ).where(
                     PostingRun.status == PostingRunStatus.RUNNING.value,
                     PostingRun.deleted_at.is_(None),
                     or_(
@@ -122,43 +137,154 @@ async def recover_stalled_runs() -> dict:
                     ),
                 )
             )
-        ).scalars().all()
-        interrupted = list(rows)
+        ).all()
+        if not rows:
+            return {"ok": True, "resumed": 0, "interrupted": 0}
 
-        if not interrupted:
-            return {"ok": True, "interrupted": 0}
+        for rid, prio, paused, cancelled in rows:
+            if paused or cancelled:
+                interrupted.append(int(rid))
+            else:
+                resume.append((int(rid), str(prio or "normal")))
+        resume_ids = [rid for rid, _ in resume]
 
-        await s.execute(
-            update(PostingRun)
-            .where(PostingRun.id.in_(interrupted))
-            .values(
-                status=PostingRunStatus.INTERRUPTED.value,
-                finished_at=datetime.now(UTC),
+        if interrupted:
+            await s.execute(
+                update(PostingRun)
+                .where(PostingRun.id.in_(interrupted))
+                .values(
+                    status=PostingRunStatus.INTERRUPTED.value,
+                    finished_at=now,
+                )
             )
-        )
+        if resume_ids:
+            await s.execute(
+                update(PostingRun)
+                .where(PostingRun.id.in_(resume_ids))
+                .values(
+                    status=PostingRunStatus.QUEUED.value,
+                    finished_at=None,
+                )
+            )
         # Залипшие text_items в статусе 'posting' (воркер начал, но не дописал)
-        # возвращаем в pending — иначе после Resume их никто не подберёт.
+        # — по ВСЕМ затронутым ранам (и resume, и interrupted) обратно в pending.
         reset_result = await s.execute(
             update(TextItem)
             .where(
-                TextItem.posting_run_id.in_(interrupted),
+                TextItem.posting_run_id.in_(resume_ids + interrupted),
                 TextItem.status == TextItemStatus.POSTING.value,
             )
             .values(status=TextItemStatus.PENDING.value)
         )
         await s.commit()
 
+    # Повторный enqueue вне SQL-сессии (как dispatch_scheduled_runs).
+    if resume:
+        from core.celery_app import celery_app
+
+        for rid, prio_name in resume:
+            try:
+                celery_app.send_task(
+                    "postings.run_posting",
+                    args=[rid],
+                    priority=CELERY_PRIORITY_MAP.get(prio_name, 5),
+                )
+            except Exception as e:
+                log.warning("recover.celery_enqueue_failed", run_id=rid, error=str(e))
+
     log.warning(
-        "scheduler.interrupted",
-        count=len(interrupted),
-        ids=interrupted,
+        "scheduler.recovered_runs",
+        resumed=resume_ids,
+        interrupted=interrupted,
         text_items_reset=int(reset_result.rowcount or 0),
     )
     return {
         "ok": True,
+        "resumed": len(resume),
         "interrupted": len(interrupted),
         "text_items_reset": int(reset_result.rowcount or 0),
     }
+
+
+# Батчи heartbeat не пишут — застрявшую валидацию ловим по прогрессу: батч в
+# 'validating', стартовал давно и за BATCH_STALE_S ни одна cred не получила свежий
+# last_validated_at → воркер мёртв (деплой). Берём с запасом (10 мин): пул=5
+# параллельно, даже CF-tier3 ~минута/cred — реального простоя 10 мин у живого
+# воркера не бывает, так что ложно «живой» батч не дёрнем.
+BATCH_STALE_S = 600
+
+
+@broker.task(
+    task_name="batches.recover_stalled_batches",
+    schedule=[{"cron": "* * * * *"}],
+)
+async def recover_stalled_batches() -> dict:
+    """
+    Авто-resume осиротевшей валидации батча после смерти воркера (деплой).
+
+    run_batch_validation отбивает повторный запуск гардом «already running» пока
+    статус 'validating', поэтому сперва выводим батч из 'validating' (→ 'paused'),
+    затем переочередь validate_batch_task(scope='all') — cooldown сам пропустит
+    уже проверенных. provision_after=False: в авто-recovery НЕ создаём
+    пользователей на сайтах без ведома оператора.
+    """
+    from infrastructure.db.models import WpBatchStatus, WpCredential, WpImportBatch
+
+    now = datetime.now(UTC)
+    threshold = now - timedelta(seconds=BATCH_STALE_S)
+    # «есть свежий прогресс» — хоть одна cred батча валидировалась после threshold
+    recent_progress = (
+        select(WpCredential.id)
+        .where(
+            WpCredential.import_batch_id == WpImportBatch.id,
+            WpCredential.deleted_at.is_(None),
+            WpCredential.last_validated_at.isnot(None),
+            WpCredential.last_validated_at >= threshold,
+        )
+        .exists()
+    )
+    stale_ids: list[int] = []
+    async with WriteSession() as s:
+        rows = (
+            await s.execute(
+                select(WpImportBatch.id).where(
+                    WpImportBatch.status == WpBatchStatus.VALIDATING.value,
+                    WpImportBatch.deleted_at.is_(None),
+                    WpImportBatch.pause_requested.is_(False),
+                    or_(
+                        WpImportBatch.validation_started_at.is_(None),
+                        WpImportBatch.validation_started_at < threshold,
+                    ),
+                    ~recent_progress,
+                )
+            )
+        ).scalars().all()
+        stale_ids = [int(x) for x in rows]
+        if not stale_ids:
+            return {"ok": True, "recovered": 0}
+
+        # Выводим из 'validating' (иначе гард в run_batch_validation отобьёт).
+        await s.execute(
+            update(WpImportBatch)
+            .where(WpImportBatch.id.in_(stale_ids))
+            .values(status=WpBatchStatus.PAUSED.value, pause_requested=False)
+        )
+        await s.commit()
+
+    for bid in stale_ids:
+        try:
+            await validate_batch_task.kiq(
+                batch_id=bid,
+                scope="all",
+                level="full",
+                provision_after=False,
+                concurrency=settings.DEFAULT_VALIDATION_CONCURRENCY,
+            )
+        except Exception as e:
+            log.warning("recover.batch_enqueue_failed", batch_id=bid, error=str(e))
+
+    log.warning("scheduler.recovered_batches", ids=stale_ids, count=len(stale_ids))
+    return {"ok": True, "recovered": len(stale_ids)}
 
 
 @broker.task(task_name="content.generate_campaign")

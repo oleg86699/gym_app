@@ -74,6 +74,14 @@ class WpSite(Base, SoftDeletableMixin):
     auto_disabled_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Временный лок постинга: транзиент-фейл (503/415/429/network/CF/timeout)
+    # ставит сайт на cooldown — он выпадает из пула на постинг до истечения, не
+    # блокируя задачу (та встаёт в need_more_admins вместо грайнда по кругу).
+    # OK-ответ сбрасывает. Авто-дисейбл (consecutive_site_failures ≥ порог) —
+    # постоянное выключение, это про временное.
+    posting_cooldown_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # ─── Site-level capability discovery (заполняется Tier 2 / Tier 3) ──
     # None = ещё не проверяли, False = проверили и нет, True = да.
