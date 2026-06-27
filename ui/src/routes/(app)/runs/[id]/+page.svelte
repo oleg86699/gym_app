@@ -24,6 +24,14 @@
   let run = $state<PostingRun | null>(null)
   let progress = $state<RunProgress | null>(null)
   let items = $state<TextItem[]>([])
+  // Пагинация айтемов (cursor, MAX_LIMIT=200). loadedPages — сколько страниц
+  // подгружено; живой реролл перечитывает их ВСЕ (сохраняя глубину просмотра и
+  // свежие статусы). next_cursor стабилен (sort_key ≈ id).
+  const PER_PAGE = 200
+  let nextCursor = $state<string | null>(null)
+  let hasMore = $state(false)
+  let loadingMore = $state(false)
+  let loadedPages = $state(1)
   let loading = $state(true)
 
   // Сводка доменов needs_review-задач прогона (массовый резолв «по домену»).
@@ -146,17 +154,54 @@
   // Токен против гонок: во время прогона loadItems зовётся из SSE + поллинга;
   // устаревший (медленный) ответ не должен перетирать свежий (posted → posting флик).
   let itemsReqToken = 0
-  async function loadItems() {
-    const token = ++itemsReqToken
-    const statusParam = filterStatus === 'all' ? undefined
+  function currentStatusParam(): string | undefined {
+    return filterStatus === 'all' ? undefined
       : filterStatus === 'in_progress' ? 'pending,posting'
       : filterStatus
+  }
+
+  async function loadItems() {
+    const token = ++itemsReqToken
+    const statusParam = currentStatusParam()
     try {
-      const res = await postingsApi.textItems(runId, { limit: 200, status: statusParam })
-      if (token !== itemsReqToken) return  // пришёл устаревший ответ — игнорируем
-      items = res.items
+      // Перечитываем все уже загруженные страницы (cursor) — реролл во время
+      // прогона обновляет статусы по всей глубине, не сбрасывая просмотр.
+      const acc: TextItem[] = []
+      let cursor: string | undefined
+      let more = false
+      let last: string | null = null
+      for (let p = 0; p < loadedPages; p++) {
+        const res = await postingsApi.textItems(runId, { limit: PER_PAGE, status: statusParam, cursor })
+        if (token !== itemsReqToken) return  // пришёл устаревший ответ — игнорируем
+        acc.push(...res.items)
+        more = res.has_more
+        last = res.next_cursor
+        if (!res.has_more || !res.next_cursor) break
+        cursor = res.next_cursor
+      }
+      items = acc
+      nextCursor = last
+      hasMore = more
     } catch (e) {
       if (token === itemsReqToken) showToast('error', e instanceof ApiError ? e.message : String(e))
+    }
+  }
+
+  async function loadMore() {
+    if (!hasMore || !nextCursor || loadingMore) return
+    loadingMore = true
+    const token = itemsReqToken
+    try {
+      const res = await postingsApi.textItems(runId, { limit: PER_PAGE, status: currentStatusParam(), cursor: nextCursor })
+      if (token !== itemsReqToken) return  // пока грузили — был реролл, игнорируем
+      items = [...items, ...res.items]
+      nextCursor = res.next_cursor
+      hasMore = res.has_more
+      loadedPages += 1
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    } finally {
+      loadingMore = false
     }
   }
 
@@ -427,6 +472,9 @@
 
   function changeStatusFilter(s: TextItemStatus | 'all' | 'in_progress') {
     filterStatus = s
+    loadedPages = 1
+    nextCursor = null
+    hasMore = false
     loadItems()
   }
 
@@ -1257,6 +1305,14 @@
             {/each}
           </tbody>
         </table>
+      </div>
+    {/if}
+    {#if hasMore}
+      <div class="mt-3 flex justify-center">
+        <button type="button" onclick={loadMore} disabled={loadingMore}
+                class="rounded-md border border-slate-300 px-4 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-50">
+          {loadingMore ? 'Загрузка…' : `Показать ещё (+${PER_PAGE})`}
+        </button>
       </div>
     {/if}
   </section>
