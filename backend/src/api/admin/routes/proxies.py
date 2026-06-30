@@ -20,6 +20,7 @@ from api.admin.schemas.proxies import (
     ProxyResponse,
     SourceMetadata,
 )
+from api.common.pagination import CursorParams, encode_cursor
 from core.db import get_db_read, get_db_write
 from domain.audit.service import record as audit_record
 from domain.proxies.service import (
@@ -52,16 +53,26 @@ async def list_endpoint(
     search: str | None = Query(default=None, max_length=200),
     provider: str | None = Query(default=None, max_length=100),
     status_filter: str | None = Query(default=None, alias="status", max_length=20),
-    limit: int = Query(default=200, ge=1, le=1000),
+    cursor: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=200),
     _: AdminUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_read),
 ) -> ProxyListResponse:
+    after_id = CursorParams(cursor=cursor).after_id()
     rows = await list_proxies(
-        session, search=search, provider=provider, status=status_filter, limit=limit
+        session, search=search, provider=provider, status=status_filter,
+        after_id=after_id, limit=limit,
     )
+    # list_proxies берёт limit+1 — лишний элемент сигналит «есть ещё»; обрезаем.
+    has_more = len(rows) > limit
+    if has_more:
+        rows = rows[:limit]
+    next_cursor = encode_cursor(rows[-1].id) if has_more and rows else None
     return ProxyListResponse(
         items=[ProxyResponse.model_validate(p) for p in rows],
         total=len(rows),
+        next_cursor=next_cursor,
+        has_more=has_more,
     )
 
 

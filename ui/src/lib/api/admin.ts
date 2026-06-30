@@ -488,7 +488,7 @@ export const audit = {
 // ─── Proxies ─────────────────────────────────────────────────────────
 
 export const proxies = {
-  list: (query?: { search?: string; provider?: string; status?: string; limit?: number }) =>
+  list: (query?: { cursor?: string; search?: string; provider?: string; status?: string; limit?: number }) =>
     api.get<ProxyListResponse>('/admin/api/proxies', query as Record<string, string | number | undefined>),
   providers: () => api.get<ProxyProviderStat[]>('/admin/api/proxies/providers'),
   sources: () => api.get<ProxySourceMeta[]>('/admin/api/proxies/sources'),

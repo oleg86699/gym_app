@@ -17,6 +17,11 @@
   let providers = $state<ProxyProviderStat[]>([])
   let sources = $state<ProxySourceMeta[]>([])
   let loading = $state(true)
+  // Пагинация (cursor): 200 на страницу + «Показать ещё», как на wp-sites/runs.
+  const PER_PAGE = 200
+  let nextCursor = $state<string | null>(null)
+  let hasMore = $state(false)
+  let loadingMore = $state(false)
 
   // Filters
   let search = $state('')
@@ -37,16 +42,39 @@
           search: search || undefined,
           status: filterStatus === 'all' ? undefined : filterStatus,
           provider: filterProvider || undefined,
-          limit: 500,
+          limit: PER_PAGE,
         }),
         proxApi.providers(),
       ])
       items = list.items
+      nextCursor = list.next_cursor
+      hasMore = list.has_more
       providers = prov
     } catch (e) {
       showToast('error', e instanceof ApiError ? e.message : String(e))
     } finally {
       loading = false
+    }
+  }
+
+  async function loadMore() {
+    if (!hasMore || !nextCursor || loadingMore) return
+    loadingMore = true
+    try {
+      const list = await proxApi.list({
+        search: search || undefined,
+        status: filterStatus === 'all' ? undefined : filterStatus,
+        provider: filterProvider || undefined,
+        cursor: nextCursor,
+        limit: PER_PAGE,
+      })
+      items = [...items, ...list.items]
+      nextCursor = list.next_cursor
+      hasMore = list.has_more
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    } finally {
+      loadingMore = false
     }
   }
 
@@ -460,6 +488,14 @@
           {/each}
         </tbody>
       </table>
+    </div>
+  {/if}
+  {#if hasMore}
+    <div class="mt-3 flex justify-center">
+      <button type="button" onclick={loadMore} disabled={loadingMore}
+              class="rounded-md border border-slate-300 px-4 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-50">
+        {loadingMore ? 'Загрузка…' : `Показать ещё (+${PER_PAGE})`}
+      </button>
     </div>
   {/if}
 </div>

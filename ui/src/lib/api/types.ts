@@ -382,6 +382,8 @@ export interface Proxy {
 export interface ProxyListResponse {
   items: Proxy[]
   total: number
+  next_cursor: string | null
+  has_more: boolean
 }
 
 export interface ProxyProviderStat {

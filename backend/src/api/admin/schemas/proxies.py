@@ -35,6 +35,8 @@ class ProxyResponse(BaseModel):
 class ProxyListResponse(BaseModel):
     items: list[ProxyResponse]
     total: int
+    next_cursor: str | None = None
+    has_more: bool = False
 
 
 class CreateProxyRequest(BaseModel):

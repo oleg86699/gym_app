@@ -117,7 +117,6 @@
   let newNote = $state('')
   let newCost = $state<string>('')
   let newCurrency = $state('USD')
-  let newAutoFull = $state(true)   // сразу полный цикл: full-валидация + provision
 
   function openCreate() {
     newFile = null
@@ -126,7 +125,6 @@
     newNote = ''
     newCost = ''
     newCurrency = 'USD'
-    newAutoFull = true
     createOpen = true
   }
 
@@ -141,13 +139,13 @@
         note: newNote || undefined,
         cost_total: newCost ? Number(newCost) : undefined,
         cost_currency: newCost ? newCurrency : undefined,
-        auto_validate: newAutoFull,
-        auto_provision: newAutoFull,
+        auto_validate: false,
+        auto_provision: false,
       })
       showToast(
         'success',
         `Batch #${res.batch_id}: ${res.credentials_new} new, ${res.credentials_duplicate} duplicates, ${res.sites_created} new sites` +
-          (res.validation_started ? ' · полная валидация + provision запущены' : ''),
+          ' · запусти проверку кнопкой Validate',
       )
       createOpen = false
       await refresh()
@@ -219,10 +217,12 @@
   <div class="flex items-start justify-between gap-4">
     <div>
       <h1 class="text-2xl font-semibold text-slate-900">Import batches ({items.length})</h1>
-      <p class="mt-1 text-sm text-slate-500">
-        Загружаешь CSV <ArrowRight size={14} class="inline-block align-text-bottom" /> создаётся batch <ArrowRight size={14} class="inline-block align-text-bottom" /> проверка <ArrowRight size={14} class="inline-block align-text-bottom" /> отчёт. Доступы попадают в общий пул
-        <a href="/wp-sites" class="text-brand-600 hover:underline">/wp-sites</a>.
-      </p>
+      {#if isSuper}
+        <p class="mt-1 text-sm text-slate-500">
+          Загружаешь CSV <ArrowRight size={14} class="inline-block align-text-bottom" /> создаётся batch <ArrowRight size={14} class="inline-block align-text-bottom" /> проверка <ArrowRight size={14} class="inline-block align-text-bottom" /> отчёт. Доступы попадают в общий пул
+          <a href="/wp-sites" class="text-brand-600 hover:underline">/wp-sites</a>.
+        </p>
+      {/if}
     </div>
     <div class="flex shrink-0 items-center gap-2">
       <button type="button" onclick={() => (helpOpen = true)}
@@ -498,29 +498,16 @@
                    class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
           </div>
         </div>
-        <label class="flex items-start gap-2 rounded-md border border-brand-200 bg-brand-50/60 p-3 text-xs text-slate-700">
-          <input type="checkbox" bind:checked={newAutoFull} class="mt-0.5 rounded border-slate-300" />
-          <span>
-            <b>Сразу запустить полный цикл</b> после загрузки: full-валидация всего батча
-            (XML-RPC → admin-вход → роль → capabilities) <b>и создание нашего author-аккаунта</b>
-            (provision) на admin-сайтах. Это рекомендуемый режим — полная картина по каждому
-            доступу + доп. аккаунт без отдельной кнопки.
-            <span class="mt-1 block text-slate-400">
-              Сними галочку, если хочешь только импортировать, а валидацию запустить позже вручную.
-            </span>
-          </span>
-        </label>
-        {:else}
-          <p class="rounded-md border border-slate-200 bg-slate-50 p-2 text-[11px] text-slate-500">
-            После загрузки автоматически запустится проверка каждого доступа (XML-RPC + админ-вход, включая обход Cloudflare).
-          </p>
         {/if}
+        <p class="rounded-md border border-slate-200 bg-slate-50 p-2 text-[11px] text-slate-500">
+          После загрузки запусти проверку кнопкой <b>Validate</b> на странице батча — всегда полный цикл (XML-RPC → admin-вход, включая обход Cloudflare).
+        </p>
         <div class="flex justify-end gap-2 pt-2">
           <button type="button" onclick={() => (createOpen = false)}
                   class="rounded-md border border-slate-300 px-3 py-1.5 text-sm">Cancel</button>
           <button type="submit" disabled={createBusy || !newFile}
                   class="rounded-md bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700 disabled:bg-slate-300">
-            {createBusy ? 'Uploading…' : (newAutoFull ? 'Upload + Validate' : 'Upload')}
+            {createBusy ? 'Uploading…' : 'Upload'}
           </button>
         </div>
       </form>

@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     SUPER_ADMIN_EMAIL: str = Field(default="")
 
     # ─── Лимиты ────────────────────────────────────────────────────
-    MAX_ACTIVE_RUNS_PER_USER: int = Field(default=5)
+    MAX_ACTIVE_RUNS_PER_USER: int = Field(default=15)
 
     # ─── Шифрование секретов ───────────────────────────────────────
     # Fernet key (urlsafe base64, 32 bytes). Если пусто — приложение откажется
