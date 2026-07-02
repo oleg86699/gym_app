@@ -1,12 +1,18 @@
 <script lang="ts">
-  import { ArrowLeft } from 'lucide-svelte'
+  import { ArrowLeft, X } from 'lucide-svelte'
   import { page } from '$app/state'
   import { onMount } from 'svelte'
 
-  import { groups as groupsApi, projects as projectsApi, users as usersApi } from '$lib/api/admin'
+  import {
+    groups as groupsApi,
+    projects as projectsApi,
+    users as usersApi,
+    wpSites as wpSitesApi,
+  } from '$lib/api/admin'
   import { ApiError } from '$lib/api/client'
   import type { Group, Project, User } from '$lib/api/types'
   import { showToast } from '$lib/stores/toast'
+  import { currentUser } from '$lib/stores/user'
 
   let groupId = $derived(Number(page.params.id))
 
@@ -14,6 +20,56 @@
   let members = $state<User[]>([])
   let projectsList = $state<Project[]>([])
   let loading = $state(true)
+
+  // ─── tag-access RBAC (super_admin only) ─────────────────────────────
+  // Потолок разрешённых команде тегов. null = все теги; [] = ни одного;
+  // [..] = только выбранные. Внутри команды group_admin раздаёт юзерам теги
+  // ⊆ этого набора.
+  let isSuper = $derived($currentUser?.is_super_admin ?? false)
+  let availableTags = $state<string[]>([])
+  let f_tags_restricted = $state(false)
+  let f_allowed_tags = $state<string[]>([])
+  let tagSearch = $state('')
+  let savingTags = $state(false)
+  const TAG_RESULTS_CAP = 24
+  let filteredTags = $derived.by(() => {
+    const q = tagSearch.trim().toLowerCase()
+    return q ? availableTags.filter((t) => t.toLowerCase().includes(q)) : availableTags
+  })
+  let tagResultsAll = $derived(filteredTags.filter((t) => !f_allowed_tags.includes(t)))
+  let tagResults = $derived(tagResultsAll.slice(0, TAG_RESULTS_CAP))
+  let tagResultsMore = $derived(Math.max(0, tagResultsAll.length - TAG_RESULTS_CAP))
+  function toggleAllowedTag(tag: string) {
+    f_allowed_tags = f_allowed_tags.includes(tag)
+      ? f_allowed_tags.filter((t) => t !== tag)
+      : [...f_allowed_tags, tag]
+  }
+  function allowedTagsEqual(a: string[] | null, b: string[] | null): boolean {
+    if (a === null || b === null) return a === b
+    if (a.length !== b.length) return false
+    const sa = [...a].sort()
+    const sb = [...b].sort()
+    return sa.every((v, i) => v === sb[i])
+  }
+  let tagsDirty = $derived(
+    !!group && !allowedTagsEqual(f_tags_restricted ? f_allowed_tags : null, group.allowed_tags),
+  )
+
+  async function saveTags() {
+    if (!groupId || !group) return
+    savingTags = true
+    try {
+      await groupsApi.update(groupId, {
+        allowed_tags: f_tags_restricted ? f_allowed_tags : null,
+      })
+      showToast('success', 'Теги команды обновлены')
+      await refresh()
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    } finally {
+      savingTags = false
+    }
+  }
 
   // Add members modal
   let addMembersOpen = $state(false)
@@ -32,6 +88,9 @@
       group = g
       members = m
       projectsList = p
+      // tag-access: null → все теги; массив → allowlist включён
+      f_tags_restricted = g.allowed_tags !== null
+      f_allowed_tags = g.allowed_tags ?? []
     } catch (e) {
       showToast('error', e instanceof ApiError ? e.message : String(e))
     } finally {
@@ -39,7 +98,17 @@
     }
   }
 
-  onMount(refresh)
+  onMount(async () => {
+    await refresh()
+    // Теги грузим только super_admin (единственный, кто видит эту секцию).
+    if ($currentUser?.is_super_admin) {
+      try {
+        availableTags = await wpSitesApi.credentialTags()
+      } catch {
+        availableTags = []
+      }
+    }
+  })
 
   async function openAddMembers() {
     try {
@@ -234,6 +303,76 @@
         </div>
       {/if}
     </section>
+
+    <!-- Tag access (RBAC) — super_admin only -->
+    {#if isSuper}
+      <section>
+        <div class="mb-2 flex items-center justify-between">
+          <h2 class="text-lg font-medium text-slate-900">Доступ по тегам батчей</h2>
+          <button onclick={saveTags} disabled={!tagsDirty || savingTags}
+                  class="rounded-md border border-brand-300 bg-brand-50 px-3 py-1 text-sm font-medium text-brand-700 hover:bg-brand-100 disabled:opacity-40">
+            {savingTags ? 'Сохранение…' : 'Сохранить теги'}
+          </button>
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
+          <p class="text-xs text-slate-500">
+            Потолок разрешённых команде тегов (батчей сайтов). По умолчанию — все теги.
+            group_admin внутри команды может раздавать своим юзерам только теги из этого набора.
+          </p>
+
+          <div class="mt-3 flex items-center gap-2">
+            <button type="button" onclick={() => (f_tags_restricted = false)}
+                    class="rounded-full border px-3 py-1 text-xs font-medium {!f_tags_restricted ? 'border-brand-400 bg-brand-50 text-brand-700' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}">
+              Все теги
+            </button>
+            <button type="button" onclick={() => (f_tags_restricted = true)}
+                    class="rounded-full border px-3 py-1 text-xs font-medium {f_tags_restricted ? 'border-brand-400 bg-brand-50 text-brand-700' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}">
+              Только выбранные
+            </button>
+            {#if !f_tags_restricted}<span class="text-[11px] text-slate-400">сейчас: все теги</span>{/if}
+          </div>
+
+          {#if f_tags_restricted}
+            {#if availableTags.length === 0}
+              <p class="mt-3 text-[11px] text-slate-400">Тегов пока нет — добавь теги батчам.</p>
+            {:else}
+              {#if f_allowed_tags.length}
+                <div class="mt-3 flex flex-wrap items-center gap-1.5">
+                  {#each f_allowed_tags as tag}
+                    <button type="button" onclick={() => toggleAllowedTag(tag)}
+                            class="flex items-center gap-1 rounded-full border border-brand-400 bg-brand-50 px-2.5 py-1 text-[12px] text-brand-700">
+                      {tag} <X size={11} class="inline-block" />
+                    </button>
+                  {/each}
+                  <button type="button" onclick={() => (f_allowed_tags = [])} class="px-1 text-[11px] text-slate-400 hover:text-slate-600">сбросить</button>
+                </div>
+              {/if}
+              <input bind:value={tagSearch} placeholder={`поиск среди ${availableTags.length} тегов…`}
+                     class="mt-2 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
+              <div class="mt-2 flex max-h-32 flex-wrap gap-1.5 overflow-auto">
+                {#each tagResults as tag}
+                  <button type="button" onclick={() => toggleAllowedTag(tag)}
+                          class="rounded-full border border-slate-300 bg-white px-2.5 py-1 text-[12px] text-slate-600 hover:bg-slate-50">
+                    + {tag}
+                  </button>
+                {/each}
+                {#if tagResults.length === 0}
+                  <p class="text-[11px] text-slate-400">{tagSearch.trim() ? 'Ничего не найдено.' : 'Все теги выбраны.'}</p>
+                {/if}
+              </div>
+              {#if tagResultsMore > 0}
+                <p class="mt-1 text-[11px] text-slate-400">…ещё {tagResultsMore} — уточни поиск.</p>
+              {/if}
+              {#if f_allowed_tags.length === 0}
+                <p class="mt-2 text-[11px] text-amber-600">⚠ Пустой список = команда не сможет постить ни по одному тегу.</p>
+              {:else}
+                <p class="mt-1 text-[11px] text-slate-400">Выбрано: <b>{f_allowed_tags.length}</b> тег(ов).</p>
+              {/if}
+            {/if}
+          {/if}
+        </div>
+      </section>
+    {/if}
   {/if}
 </div>
 

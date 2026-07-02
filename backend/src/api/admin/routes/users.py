@@ -168,6 +168,7 @@ async def get_user_endpoint(
         **base,
         shared_projects=[ProjectBrief.model_validate(p) for p in shared],
         direct_page_ids=[p.id for p in target.direct_pages],
+        allowed_tags=target.allowed_tags,
     )
 
 
@@ -236,6 +237,32 @@ async def update_user_endpoint(
             )
         await set_user_direct_pages(session, user_id, payload.page_ids)
         log.info("users.direct_pages_updated", actor_id=viewer.id, target_id=user_id, count=len(payload.page_ids))
+
+    # tag-access RBAC: персональный allowlist батч-тегов. super_admin — любому;
+    # group_admin — только юзеру СВОЕЙ группы и только теги ⊆ своего эффективного
+    # набора (нельзя выдать больше, чем есть у самого). "не трогать" vs "задать"
+    # различаем по model_fields_set (null = снять ограничение, [] = нет доступа).
+    if "allowed_tags" in payload.model_fields_set:
+        if not viewer.is_super_admin:
+            if not (viewer.is_group_admin and target.group_id == viewer.group_id):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Теги может назначать super_admin или group_admin своей группы",
+                )
+            if payload.allowed_tags:
+                from domain.wp_sites.service import effective_allowed_tags
+                ceiling = await effective_allowed_tags(session, viewer)
+                if ceiling is not None:
+                    bad = [t for t in payload.allowed_tags if t not in set(ceiling)]
+                    if bad:
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail=f"Теги вне разрешённых вашей группе: {', '.join(bad)}",
+                        )
+        target.allowed_tags = payload.allowed_tags
+        await session.commit()
+        log.info("users.allowed_tags_updated", actor_id=viewer.id, target_id=user_id,
+                 tags=payload.allowed_tags)
 
     log.info("users.updated", actor_id=viewer.id, target_id=user_id)
     # Перечитываем для актуальных связей

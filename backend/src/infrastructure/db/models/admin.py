@@ -24,6 +24,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from infrastructure.db.base import Base, SoftDeletableMixin, TimestampedMixin
@@ -110,6 +111,9 @@ class AdminGroup(Base, SoftDeletableMixin):
     name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # tag-access RBAC (миграция 0052): потолок разрешённых батч-тегов для команды.
+    # NULL = без ограничения (все теги). Задаёт super_admin.
+    allowed_tags: Mapped[list[str] | None] = mapped_column(ARRAY(String(100)), nullable=True)
 
     users: Mapped[list[AdminUser]] = relationship("AdminUser", back_populates="group")
 
@@ -208,6 +212,10 @@ class AdminUser(Base, SoftDeletableMixin):
     full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # tag-access RBAC (миграция 0052): персональный allowlist батч-тегов (сужение
+    # внутри группы). NULL = наследует потолок группы. Эффективный набор =
+    # пересечение user.allowed_tags ∩ group.allowed_tags (NULL = «все» на уровне).
+    allowed_tags: Mapped[list[str] | None] = mapped_column(ARRAY(String(100)), nullable=True)
 
     # Временный доступ (напр. поставщик доступов): после expires_at логин и токен
     # невалидны (проверяется в get_current_user / authenticate). is_temporary —

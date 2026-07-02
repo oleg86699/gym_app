@@ -51,6 +51,8 @@ export interface ProjectBrief {
 export interface UserDetail extends User {
   shared_projects: ProjectBrief[]
   direct_page_ids: number[]
+  // tag-access RBAC: персональный allowlist батч-тегов. null = без ограничения.
+  allowed_tags: string[] | null
 }
 
 export interface ProjectChip {
@@ -466,6 +468,9 @@ export interface PostingRun {
   id: number
   project: { id: number; name: string }
   creator: { id: number; username: string; full_name: string | null } | null
+  deleted_at?: string | null   // two-level delete: soft-deleted
+  deleted_by?: number | null   // кто скрыл (super-аудит)
+  deleted_by_user?: { id: number; username: string; full_name: string | null } | null
   name: string
   status: PostingRunStatus
   task_type?: 'post' | 'sitewide_link' | 'homepage_link'
@@ -620,6 +625,9 @@ export interface ProjectDomain {
   id: number
   domain: string
   created_at: string
+  deleted_at?: string | null
+  deleted_by?: number | null
+  deleted_by_user?: { id: number; username: string; full_name: string | null } | null
 }
 export interface AddDomainResult {
   domain: string
@@ -923,6 +931,8 @@ export interface Group {
   description: string | null
   is_active: boolean
   created_at: string
+  // tag-access RBAC: потолок разрешённых команде батч-тегов. null = все теги.
+  allowed_tags: string[] | null
 }
 
 export interface Permission {
@@ -974,6 +984,9 @@ export interface Project {
   description: string | null
   is_active: boolean
   created_at: string
+  deleted_at?: string | null   // two-level delete: soft-deleted
+  deleted_by?: number | null   // кто скрыл (super-аудит)
+  deleted_by_user?: { id: number; username: string; full_name: string | null } | null
   owner: UserBrief
   owner_group: GroupBrief | null
   shared_with_users: UserBrief[]

@@ -102,6 +102,7 @@ export const users = {
       role_ids?: number[]
       project_ids?: number[]
       page_ids?: number[]
+      allowed_tags?: string[] | null
     },
   ) => api.patch<User>(`/admin/api/users/${id}`, payload),
   remove: (id: number) => api.del(`/admin/api/users/${id}`),
@@ -125,6 +126,7 @@ export const groups = {
       description?: string
       is_active?: boolean
       shared_project_ids?: number[]
+      allowed_tags?: string[] | null
     },
   ) => api.patch<Group>(`/admin/api/groups/${id}`, payload),
   remove: (id: number) => api.del(`/admin/api/groups/${id}`),
@@ -133,9 +135,12 @@ export const groups = {
 // ─── Projects ────────────────────────────────────────────────────────
 
 export const projects = {
-  list: (query?: { cursor?: string; limit?: number; search?: string; owner_id?: number }) =>
-    api.get<Paginated<Project>>('/admin/api/projects', query as Record<string, string | number | undefined>),
+  list: (query?: { cursor?: string; limit?: number; search?: string; owner_id?: number; include_deleted?: boolean }) =>
+    api.get<Paginated<Project>>('/admin/api/projects', query as Record<string, string | number | boolean | undefined>),
   get: (id: number) => api.get<Project>(`/admin/api/projects/${id}`),
+  // Two-level delete (super_admin only): restore soft-deleted / purge hard
+  restore: (id: number) => api.post(`/admin/api/projects/${id}/restore`, {}),
+  purge: (id: number) => api.del(`/admin/api/projects/${id}/purge`),
   reassignOwner: (id: number, new_owner_id: number) =>
     api.post<Project>(`/admin/api/projects/${id}/reassign-owner`, { new_owner_id }),
   create: (payload: { name: string; description?: string }) =>
@@ -150,14 +155,19 @@ export const projects = {
   shareWithGroups: (id: number, group_ids: number[]) =>
     api.patch<Project>(`/admin/api/projects/${id}/share/groups`, { group_ids }),
   // Фаза A: целевые домены проекта
-  listDomains: (id: number) =>
-    api.get<ProjectDomain[]>(`/admin/api/projects/${id}/domains`),
+  listDomains: (id: number, query?: { include_deleted?: boolean }) =>
+    api.get<ProjectDomain[]>(`/admin/api/projects/${id}/domains`, query as Record<string, boolean | undefined>),
   addDomain: (id: number, domain: string) =>
     api.post<AddDomainResult>(`/admin/api/projects/${id}/domains`, { domain }),
   addDomains: (id: number, domains: string[]) =>
     api.post<BulkAddDomainsResult>(`/admin/api/projects/${id}/domains/bulk`, { domains }),
   removeDomain: (id: number, domainId: number) =>
     api.del(`/admin/api/projects/${id}/domains/${domainId}`),
+  // Two-level delete (super_admin only) для money-домена
+  restoreDomain: (id: number, domainId: number) =>
+    api.post(`/admin/api/projects/${id}/domains/${domainId}/restore`, {}),
+  purgeDomain: (id: number, domainId: number) =>
+    api.del(`/admin/api/projects/${id}/domains/${domainId}/purge`),
   domainAnalytics: (id: number) =>
     api.get<DomainAnalyticsRow[]>(`/admin/api/projects/${id}/domain-analytics`),
   domainSummary: (id: number, domain: string) =>
@@ -600,6 +610,7 @@ export const postings = {
     project_id?: number
     created_by?: number
     search?: string
+    include_deleted?: boolean
   }) => {
     // statuses передаём как multi-query — собираем URL вручную
     const url = new URL('/admin/api/postings', window.location.origin)
@@ -608,6 +619,7 @@ export const postings = {
     if (query?.project_id) url.searchParams.set('project_id', String(query.project_id))
     if (query?.created_by) url.searchParams.set('created_by', String(query.created_by))
     if (query?.search) url.searchParams.set('search', query.search)
+    if (query?.include_deleted) url.searchParams.set('include_deleted', 'true')
     if (query?.statuses) for (const s of query.statuses) url.searchParams.append('statuses', s)
     return api.get<Paginated<PostingRun>>(url.pathname + url.search)
   },
@@ -695,6 +707,9 @@ export const postings = {
       `/admin/api/postings/${runId}/retry-failed`,
     ),
   remove: (runId: number) => api.del(`/admin/api/postings/${runId}`),
+  // Two-level delete (super_admin only)
+  restore: (runId: number) => api.post(`/admin/api/postings/${runId}/restore`, {}),
+  purge: (runId: number) => api.del(`/admin/api/postings/${runId}/purge`),
   // ─── Link runs (sitewide / homepage) ───
   linkCandidates: (projectId: number) =>
     api.get<{ candidates: number }>(`/admin/api/projects/${projectId}/postings/link-candidates`),

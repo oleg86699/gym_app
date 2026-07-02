@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import structlog
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import distinct, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from domain.text_links import normalize_domain
 from infrastructure.db.models import (
@@ -31,11 +35,15 @@ _REDISPATCH_FROM = {
 }
 
 
-async def list_domains(session: AsyncSession, project_id: int) -> list[ProjectDomain]:
-    return list((await session.scalars(
-        select(ProjectDomain).where(ProjectDomain.project_id == project_id)
-        .order_by(ProjectDomain.domain)
-    )).all())
+async def list_domains(
+    session: AsyncSession, project_id: int, *, include_deleted: bool = False,
+) -> list[ProjectDomain]:
+    """Домены проекта. include_deleted (только super_admin) — показать и soft-deleted."""
+    stmt = (select(ProjectDomain).where(ProjectDomain.project_id == project_id)
+            .options(selectinload(ProjectDomain.deleted_by_user)))
+    if not include_deleted:
+        stmt = stmt.where(ProjectDomain.deleted_at.is_(None))
+    return list((await session.scalars(stmt.order_by(ProjectDomain.domain))).all())
 
 
 async def _redispatch_runs(run_ids: set[int]) -> None:
@@ -84,7 +92,9 @@ async def _auto_resolve(session: AsyncSession, project_id: int) -> set[int]:
     Возвращает set затронутых run_id (для пере-дёрга)."""
     pset = {d for d in (
         normalize_domain(x) for x in (await session.scalars(
-            select(ProjectDomain.domain).where(ProjectDomain.project_id == project_id)
+            select(ProjectDomain.domain).where(
+                ProjectDomain.project_id == project_id,
+                ProjectDomain.deleted_at.is_(None))
         )).all()
     ) if d}
     if not pset:
@@ -116,13 +126,24 @@ async def add_domain(session: AsyncSession, project_id: int, domain: str) -> dic
     nd = normalize_domain(domain)
     if not nd:
         raise ValueError(f"invalid domain: {domain!r}")
-    exists = await session.scalar(
-        select(ProjectDomain.id).where(
-            ProjectDomain.project_id == project_id, ProjectDomain.domain == nd)
+    active = await session.scalar(
+        select(ProjectDomain).where(
+            ProjectDomain.project_id == project_id, ProjectDomain.domain == nd,
+            ProjectDomain.deleted_at.is_(None))
     )
     created = False
-    if not exists:
-        session.add(ProjectDomain(project_id=project_id, domain=nd))
+    if active is None:
+        # если домен был soft-deleted — восстанавливаем ту же запись, не плодим дубль
+        soft = await session.scalar(
+            select(ProjectDomain).where(
+                ProjectDomain.project_id == project_id, ProjectDomain.domain == nd,
+                ProjectDomain.deleted_at.is_not(None)).order_by(ProjectDomain.id.desc())
+        )
+        if soft is not None:
+            soft.deleted_at = None
+            soft.deleted_by = None
+        else:
+            session.add(ProjectDomain(project_id=project_id, domain=nd))
         await session.commit()
         created = True
     resolved_runs = await _auto_resolve(session, project_id)
@@ -133,11 +154,11 @@ async def add_domain(session: AsyncSession, project_id: int, domain: str) -> dic
 async def add_domains(session: AsyncSession, project_id: int, domains: list[str]) -> dict:
     """Добавить СПИСОК доменов разом (по одному на строку / через запятую).
     Нормализуем, дедупим, вставляем новые, затем ОДИН авто-резолв на всё."""
-    existing = {
-        d for d in (await session.scalars(
-            select(ProjectDomain.domain).where(ProjectDomain.project_id == project_id)
-        )).all()
-    }
+    rows = list((await session.scalars(
+        select(ProjectDomain).where(ProjectDomain.project_id == project_id)
+    )).all())
+    active = {r.domain for r in rows if r.deleted_at is None}
+    soft_by_domain = {r.domain: r for r in rows if r.deleted_at is not None}
     added: list[str] = []
     duplicates: list[str] = []
     invalid: list[str] = []
@@ -148,11 +169,16 @@ async def add_domains(session: AsyncSession, project_id: int, domains: list[str]
             if raw.strip():
                 invalid.append(raw.strip()[:255])
             continue
-        if nd in existing or nd in seen:
+        if nd in active or nd in seen:
             duplicates.append(nd)
             continue
         seen.add(nd)
-        session.add(ProjectDomain(project_id=project_id, domain=nd))
+        soft = soft_by_domain.get(nd)
+        if soft is not None:  # был soft-deleted — восстанавливаем
+            soft.deleted_at = None
+            soft.deleted_by = None
+        else:
+            session.add(ProjectDomain(project_id=project_id, domain=nd))
         added.append(nd)
     if added:
         await session.commit()
@@ -196,16 +222,46 @@ async def autobind_link_domains(
         return 0
 
 
-async def remove_domain(session: AsyncSession, project_id: int, domain_id: int) -> bool:
+async def remove_domain(
+    session: AsyncSession, project_id: int, domain_id: int, *, actor_id: int | None = None,
+) -> bool:
+    """Soft-delete money-домена: скрываем из списков (super_admin видит с
+    include_deleted). Полное удаление из БД — purge_domain (только super_admin)."""
+    row = await session.scalar(
+        select(ProjectDomain).where(
+            ProjectDomain.id == domain_id, ProjectDomain.project_id == project_id,
+            ProjectDomain.deleted_at.is_(None))
+    )
+    if row is None:
+        return False
+    row.deleted_at = datetime.now(UTC)
+    row.deleted_by = actor_id
+    await session.commit()
+    return True
+
+
+async def restore_domain(session: AsyncSession, project_id: int, domain_id: int) -> bool:
+    """super_admin: вернуть soft-deleted money-домен обратно в проект."""
     row = await session.scalar(
         select(ProjectDomain).where(
             ProjectDomain.id == domain_id, ProjectDomain.project_id == project_id)
     )
     if row is None:
         return False
-    await session.delete(row)
+    row.deleted_at = None
+    row.deleted_by = None
     await session.commit()
     return True
+
+
+async def purge_domain(session: AsyncSession, project_id: int, domain_id: int) -> bool:
+    """super_admin: полное (hard) удаление money-домена из БД."""
+    res = await session.execute(
+        sa_delete(ProjectDomain).where(
+            ProjectDomain.id == domain_id, ProjectDomain.project_id == project_id)
+    )
+    await session.commit()
+    return (res.rowcount or 0) > 0
 
 
 async def resolve_item(
@@ -273,7 +329,9 @@ async def needs_review_domains(session: AsyncSession, run_id: int) -> list[dict]
     if project_id is not None:
         pset = {d for d in (
             normalize_domain(x) for x in (await session.scalars(
-                select(ProjectDomain.domain).where(ProjectDomain.project_id == project_id)
+                select(ProjectDomain.domain).where(
+                ProjectDomain.project_id == project_id,
+                ProjectDomain.deleted_at.is_(None))
             )).all()
         ) if d}
     cand_lists = (await session.scalars(

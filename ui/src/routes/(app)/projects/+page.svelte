@@ -28,6 +28,8 @@
 
   // Переназначение владельца — только super_admin
   let isSuper = $derived($currentUser?.is_super_admin ?? false)
+  // Two-level delete: super_admin может смотреть удалённые + restore/purge
+  let showDeleted = $state(false)
   let reassignOpen = $state<ProjectListItem | null>(null)
   let reassignToId = $state<number | null>(null)
   let reassignBusy = $state(false)
@@ -51,7 +53,8 @@
   async function refresh() {
     loading = true
     try {
-      const r = await projectsApi.list({ search, limit: 100 })
+      const r = await projectsApi.list({ search, limit: 100,
+        include_deleted: (isSuper && showDeleted) || undefined })
       items = r.items as ProjectListItem[]
     } catch (e) {
       showToast('error', e instanceof ApiError ? e.message : String(e))
@@ -144,6 +147,30 @@
     }
   }
 
+  // Two-level delete (super_admin): вернуть soft-deleted / удалить полностью
+  async function restoreProject(p: Project) {
+    try {
+      await projectsApi.restore(p.id)
+      showToast('success', `Проект «${p.name}» восстановлен`)
+      await refresh()
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    }
+  }
+  async function purgeProject(p: Project) {
+    if (!confirm(
+      `ПОЛНОСТЬЮ удалить проект «${p.name}» из БД?\n\n` +
+      `Необратимо — сотрёт все его прогоны, тексты-айтемы, результаты и money-домены.`,
+    )) return
+    try {
+      await projectsApi.purge(p.id)
+      showToast('success', `Проект «${p.name}» удалён полностью`)
+      await refresh()
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    }
+  }
+
   function openShare(p: Project) {
     shareOpen = p
     shareUserIds = p.shared_with_users.map((u) => u.id)
@@ -213,6 +240,15 @@
       Search
     </button>
   </form>
+
+  {#if isSuper}
+    <label class="flex items-center gap-1.5 text-xs text-slate-600"
+           title="Показать soft-deleted проекты (только super_admin)">
+      <input type="checkbox" bind:checked={showDeleted} onchange={refresh}
+             class="rounded border-slate-300" />
+      Показать удалённые
+    </label>
+  {/if}
 
   {#if loading}
     <div class="rounded-lg border border-slate-200 bg-white p-8 text-center text-sm text-slate-500">Loading…</div>
@@ -318,15 +354,25 @@
                 </span>
               </td>
               <td class="px-4 py-2 text-right whitespace-nowrap">
-                {#if canShare(p)}
-                  <button onclick={() => openShare(p)} class="mr-2 text-xs text-brand-600 hover:underline">
-                    Share
-                  </button>
-                {/if}
-                {#if canManage(p)}
-                  <button onclick={() => handleDelete(p)} class="text-xs text-red-600 hover:text-red-800">
-                    Delete
-                  </button>
+                {#if p.deleted_at}
+                  {#if p.deleted_by_user}<span class="mr-1 text-[11px] text-slate-400">@{p.deleted_by_user.username}</span>{/if}
+                  <span class="mr-2 rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-medium uppercase text-red-700"
+                        title={`Удалено ${new Date(p.deleted_at).toLocaleString()}`}>удалено</span>
+                  {#if isSuper}
+                    <button onclick={() => restoreProject(p)} class="mr-2 text-xs text-slate-600 hover:underline">Restore</button>
+                    <button onclick={() => purgeProject(p)} class="text-xs text-red-600 hover:text-red-800">Purge</button>
+                  {/if}
+                {:else}
+                  {#if canShare(p)}
+                    <button onclick={() => openShare(p)} class="mr-2 text-xs text-brand-600 hover:underline">
+                      Share
+                    </button>
+                  {/if}
+                  {#if canManage(p)}
+                    <button onclick={() => handleDelete(p)} class="text-xs text-red-600 hover:text-red-800">
+                      Delete
+                    </button>
+                  {/if}
                 {/if}
               </td>
             </tr>

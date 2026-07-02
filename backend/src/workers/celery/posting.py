@@ -268,6 +268,7 @@ async def _pick_candidate_sites(
     site_tags: list[str] | None = None,
     site_domains: list[str] | None = None,
     target_domain: str | None = None,
+    creator_allowed_tags: list[str] | None = None,
 ) -> list[WpSite]:
     """
     Сайты которые:
@@ -302,6 +303,16 @@ async def _pick_candidate_sites(
         cred_conds.append(
             WpCredential.import_batch_id.in_(
                 select(WpImportBatch.id).where(WpImportBatch.tag.in_(site_tags))
+            )
+        )
+    # tag-access RBAC: жёсткое ограничение по тегам СОЗДАТЕЛЯ рана — всегда
+    # пересекаем пул с его allowed_tags (ANDится с site_tags выше). Закрывает
+    # обход через «свой список доменов» / «все теги». None = без ограничения;
+    # пустой список → ни один cred не подойдёт (нужен доступ у super_admin).
+    if creator_allowed_tags is not None:
+        cred_conds.append(
+            WpCredential.import_batch_id.in_(
+                select(WpImportBatch.id).where(WpImportBatch.tag.in_(creator_allowed_tags))
             )
         )
     has_valid_cred = exists().where(and_(*cred_conds))
@@ -386,6 +397,7 @@ async def _has_postable_pending(
     site_tlds: list[str] | None = None,
     site_tags: list[str] | None = None,
     site_domains: list[str] | None = None,
+    creator_allowed_tags: list[str] | None = None,
 ) -> bool:
     """Per-domain проверка «есть ли куда постить» (для need_more_admins): есть ли
     хотя бы один НЕ-завершённый айтем (pending/posting), под чей money-домен ещё
@@ -406,10 +418,31 @@ async def _has_postable_pending(
             exclude_site_ids=exclude_site_ids, limit=1,
             site_langs=site_langs, site_tlds=site_tlds, site_tags=site_tags,
             site_domains=site_domains, target_domain=d,
+            creator_allowed_tags=creator_allowed_tags,
         )
         if got:
             return True
     return False
+
+
+async def _creator_allowed_tags(
+    session: AsyncSession, created_by: int | None
+) -> list[str] | None:
+    """Эффективные разрешённые батч-теги СОЗДАТЕЛЯ рана (tag-access RBAC).
+    None = без ограничения (все теги); пустой список = нет доступа ни к одному
+    тегу. Считается один раз на ран и прокидывается в подбор кандидатов."""
+    if created_by is None:
+        return None
+    from domain.wp_sites.service import effective_allowed_tags
+    from infrastructure.db.models import AdminUser
+
+    user = await session.scalar(
+        select(AdminUser).options(selectinload(AdminUser.roles))
+        .where(AdminUser.id == created_by)
+    )
+    if user is None:
+        return None
+    return await effective_allowed_tags(session, user)
 
 
 async def _bump_run_counter(
@@ -1061,6 +1094,7 @@ async def _post_one_item(
         DEFAULT_SITE_DISABLE_THRESHOLD,
         DEFAULT_SITE_DISABLE_THRESHOLD_CF,
     ),
+    creator_allowed_tags: list[str] | None = None,
 ) -> None:
     async with semaphore:
         # 1. Загрузить тело текста: из texts (B1) с fallback на MinIO
@@ -1119,6 +1153,7 @@ async def _post_one_item(
                     site_tags=_f_tags,
                     site_domains=_f_domains,
                     target_domain=item.target_domain,
+                    creator_allowed_tags=creator_allowed_tags,
                 )
 
             if not candidates:
@@ -1696,6 +1731,10 @@ async def _run_posting_async(run_id: int) -> dict:
     # прогона; реальный размер окна адаптивно меньше при многих активных прогонах.
     global_limit, conc_floor, sd_general, sd_cf = await _read_posting_tuning()
     site_disable = (sd_general, sd_cf)
+    # tag-access RBAC: разрешённые теги создателя рана (один раз на ран). None =
+    # без ограничения; жёстко пересекается с пулом в _pick_candidate_sites.
+    async with WriteSession() as _s:
+        creator_tags = await _creator_allowed_tags(_s, run.created_by)
     conc_ceiling = max(1, run.concurrency)
     semaphore = asyncio.Semaphore(conc_ceiling)
     registry = SiteClaimRegistry()
@@ -1821,6 +1860,7 @@ async def _run_posting_async(run_id: int) -> dict:
                             any_site = await _has_postable_pending(
                                 s, run=run, exclude_site_ids=set(),
                                 site_langs=_f_langs, site_tlds=_f_tlds, site_tags=_f_tags, site_domains=_f_domains,
+                                creator_allowed_tags=creator_tags,
                             )
                         if not any_site:
                             # Вернуть забранные в pending; финализируем в
@@ -1843,6 +1883,7 @@ async def _run_posting_async(run_id: int) -> dict:
                                     client_pool=client_pool, registry=registry,
                                     semaphore=semaphore, global_limit=global_limit,
                                     site_disable=site_disable,
+                                    creator_allowed_tags=creator_tags,
                                 ))
                                 inflight.add(t)
 
@@ -1930,6 +1971,7 @@ async def _run_posting_async(run_id: int) -> dict:
                             fresh = await _has_postable_pending(
                                 s, run=run, exclude_site_ids=set(registry._exhausted),
                                 site_langs=_f_langs, site_tlds=_f_tlds, site_tags=_f_tags, site_domains=_f_domains,
+                                creator_allowed_tags=creator_tags,
                             )
                         if not fresh:
                             # весь eligible-пул уже перепробован этим run-ом — ретраим
@@ -1940,6 +1982,7 @@ async def _run_posting_async(run_id: int) -> dict:
                                 any_global = await _has_postable_pending(
                                     s, run=run, exclude_site_ids=set(),
                                     site_langs=_f_langs, site_tlds=_f_tlds, site_tags=_f_tags, site_domains=_f_domains,
+                                    creator_allowed_tags=creator_tags,
                                 )
                             if not any_global:
                                 need_more_admins = True
@@ -2122,6 +2165,8 @@ async def _post_one_item_standalone(item_id: int, *, is_repost: bool) -> dict:
         registry.mark_exhausted(old_site_id)  # старый сайт исключаем из подбора
     client_pool = HttpxClientPool(proxy_urls, timeout_seconds=run.timeout_seconds)
     global_limit = await _read_global_posting_limit()
+    async with WriteSession() as _s:
+        creator_tags = await _creator_allowed_tags(_s, run.created_by)  # tag-access RBAC
     sem = asyncio.Semaphore(1)
     async with httpx.AsyncClient(
         timeout=run.timeout_seconds, follow_redirects=True,
@@ -2132,7 +2177,8 @@ async def _post_one_item_standalone(item_id: int, *, is_repost: bool) -> dict:
             proxy_url=proxy_urls[0] if proxy_urls else None)
         await _post_one_item(
             item=item, run=run, poster=poster, client_pool=client_pool,
-            registry=registry, semaphore=sem, global_limit=global_limit)
+            registry=registry, semaphore=sem, global_limit=global_limit,
+            creator_allowed_tags=creator_tags)
     async with WriteSession() as s:
         st = await s.scalar(select(TextItem.status).where(TextItem.id == item_id))
     return {"ok": st == TextItemStatus.POSTED.value, "status": st, "item_id": item_id}

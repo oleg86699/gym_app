@@ -78,7 +78,12 @@ async def candidate_link_sites(
             WpCredential.deleted_at.is_(None),
             WpCredential.admin_role == "administrator",
             WpCredential.cred_status == "valid",
-            WpCredential.can_admin_login.isnot(False),
+            # Ссылки ставятся ТОЛЬКО через wp-admin → нужен ПОДТВЕРЖДённый
+            # admin-логин (Tier 2). Раньше было .isnot(False) — тянуло и
+            # неподтверждённые (null), ран долбился в логины, которых никто не
+            # проверял → login_unknown, выжигание пула, no_sites. Теперь только
+            # can_admin_login=True. Пул растёт за счёт full-валидации.
+            WpCredential.can_admin_login.is_(True),
             WpCredential.provisioned.is_(False),
             WpSite.deleted_at.is_(None),
             WpSite.is_active.is_(True),

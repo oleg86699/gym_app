@@ -44,6 +44,10 @@ class UserDetailResponse(UserResponse):
     # Не включает страницы, доступные через роли.
     direct_page_ids: list[int] = Field(default_factory=list)
 
+    # tag-access RBAC: персональный allowlist батч-тегов. null = без ограничения
+    # (наследует потолок группы).
+    allowed_tags: list[str] | None = None
+
 
 class CreateUserRequest(BaseModel):
     username: str = Field(min_length=3, max_length=100)
@@ -72,6 +76,10 @@ class UpdateUserRequest(BaseModel):
     project_ids: list[int] | None = None
     # Полный replace списка индивидуально выданных страниц.
     page_ids: list[int] | None = None
+    # tag-access RBAC: null → без ограничения; [..] → ограничить. «не трогать» vs
+    # «задать» различаем по model_fields_set в хендлере. Гейт: super, либо
+    # group_admin своей группы (теги ⊆ разрешённых группе).
+    allowed_tags: list[str] | None = None
 
 
 class ResetPasswordRequest(BaseModel):

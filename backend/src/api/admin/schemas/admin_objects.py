@@ -17,6 +17,8 @@ class GroupResponse(BaseModel):
     description: str | None
     is_active: bool
     created_at: datetime
+    # tag-access RBAC: потолок разрешённых команде батч-тегов. null = все теги.
+    allowed_tags: list[str] | None = None
 
 
 class ProjectChip(BaseModel):
@@ -45,6 +47,10 @@ class UpdateGroupRequest(BaseModel):
     is_active: bool | None = None
     # Полная замена списка проектов, явно расшаренных группе (group_projects).
     shared_project_ids: list[int] | None = None
+    # tag-access RBAC: потолок разрешённых команде батч-тегов (super_admin only).
+    # null → снять ограничение; [..] → задать. «не трогать» vs «задать» — по
+    # model_fields_set.
+    allowed_tags: list[str] | None = None
 
 
 # ─── Roles ────────────────────────────────────────────────────────────

@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 
 from sqlalchemy import BigInteger, case, func, literal, select, update
+from sqlalchemy import delete as sa_delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -98,6 +99,7 @@ def _run_load_opts():
     return (
         selectinload(PostingRun.project),
         selectinload(PostingRun.creator),
+        selectinload(PostingRun.deleted_by_user),
     )
 
 
@@ -111,6 +113,7 @@ async def list_runs_for_viewer(
     project_id: int | None = None,
     created_by: int | None = None,
     search: str | None = None,
+    include_deleted: bool = False,
 ) -> list[PostingRun]:
     """
     Все runs которые viewer может видеть.
@@ -124,11 +127,12 @@ async def list_runs_for_viewer(
 
     stmt = (
         select(PostingRun)
-        .where(PostingRun.deleted_at.is_(None))
         .options(*_run_load_opts())
         .order_by(PostingRun.id.desc())
         .limit(limit + 1)
     )
+    if not (include_deleted and viewer.is_super_admin):
+        stmt = stmt.where(PostingRun.deleted_at.is_(None))
 
     project_filter = _visible_projects_filter(viewer)
     if project_filter is not None:
@@ -154,28 +158,28 @@ async def list_runs_for_project(
     project_id: int,
     after_id: int | None = None,
     limit: int = 100,
+    include_deleted: bool = False,
 ) -> list[PostingRun]:
     stmt = (
         select(PostingRun)
-        .where(
-            PostingRun.project_id == project_id,
-            PostingRun.deleted_at.is_(None),
-        )
+        .where(PostingRun.project_id == project_id)
         .options(*_run_load_opts())
         .order_by(PostingRun.id.desc())
         .limit(limit + 1)
     )
+    if not include_deleted:
+        stmt = stmt.where(PostingRun.deleted_at.is_(None))
     if after_id:
         stmt = stmt.where(PostingRun.id < after_id)
     return list((await session.execute(stmt)).scalars().all())
 
 
-async def get_run(session: AsyncSession, run_id: int) -> PostingRun | None:
-    stmt = (
-        select(PostingRun)
-        .where(PostingRun.id == run_id, PostingRun.deleted_at.is_(None))
-        .options(*_run_load_opts())
-    )
+async def get_run(
+    session: AsyncSession, run_id: int, *, include_deleted: bool = False,
+) -> PostingRun | None:
+    stmt = select(PostingRun).where(PostingRun.id == run_id).options(*_run_load_opts())
+    if not include_deleted:
+        stmt = stmt.where(PostingRun.deleted_at.is_(None))
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
@@ -379,13 +383,34 @@ async def request_cancel(session: AsyncSession, run_id: int) -> None:
     await session.commit()
 
 
-async def soft_delete_run(session: AsyncSession, run_id: int) -> None:
-    """Архивируем run — `deleted_at = now()`. Списки runs фильтруют по NULL."""
+async def soft_delete_run(
+    session: AsyncSession, run_id: int, *, actor_id: int | None = None,
+) -> None:
+    """Архивируем run — `deleted_at = now()` (+ кто удалил). Списки фильтруют по
+    NULL; super_admin может смотреть с include_deleted. Полное удаление —
+    purge_run (super only)."""
     await session.execute(
         update(PostingRun)
         .where(PostingRun.id == run_id)
-        .values(deleted_at=datetime.now(UTC))
+        .values(deleted_at=datetime.now(UTC), deleted_by=actor_id)
     )
+    await session.commit()
+
+
+async def restore_run(session: AsyncSession, run_id: int) -> None:
+    """super_admin: вернуть soft-deleted run из архива."""
+    await session.execute(
+        update(PostingRun)
+        .where(PostingRun.id == run_id)
+        .values(deleted_at=None, deleted_by=None)
+    )
+    await session.commit()
+
+
+async def purge_run(session: AsyncSession, run_id: int) -> None:
+    """super_admin: полное (hard) удаление run из БД. БД-каскад сносит его
+    text_items и project_wp_used."""
+    await session.execute(sa_delete(PostingRun).where(PostingRun.id == run_id))
     await session.commit()
 
 

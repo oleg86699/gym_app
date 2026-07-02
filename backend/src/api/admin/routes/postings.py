@@ -30,7 +30,7 @@ from sqlalchemy.orm import selectinload
 
 from core.realtime import subscribe_run_events
 
-from api.admin.middleware.auth import get_current_user
+from api.admin.middleware.auth import get_current_user, require_super_admin
 from api.admin.schemas.postings import (
     CreateLinkRunFileParams,
     CreateRunParams,
@@ -62,9 +62,11 @@ from domain.postings.service import (
     list_runs_for_project,
     list_runs_for_viewer,
     list_text_items_for_run,
+    purge_run,
     request_cancel,
     request_pause,
     request_resume,
+    restore_run,
     retry_failed_items,
     run_progress_counts,
     soft_delete_run,
@@ -137,6 +139,25 @@ async def _store_site_filter(session: AsyncSession, run_id: int,
         gp["site_domains_key"] = site_domains_key
     await session.execute(update(PostingRun).where(PostingRun.id == run_id).values(gen_params=gp))
     await session.commit()
+
+
+async def _require_tags_allowed(session: AsyncSession, viewer, site_tags_raw) -> None:
+    """tag-access RBAC: 403 если юзер выбрал батч-теги вне своего allowlist.
+    Вызывать ДО создания рана. Если юзер тегов не выбрал (= «все») — ок, воркер
+    сам заскоупит пул по эффективному allowlist создателя."""
+    tags = parse_tag_list(site_tags_raw)
+    if not tags:
+        return
+    from domain.wp_sites.service import effective_allowed_tags
+    allowed = await effective_allowed_tags(session, viewer)
+    if allowed is None:
+        return  # без ограничения
+    bad = [t for t in tags if t not in set(allowed)]
+    if bad:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Недоступные теги: {', '.join(bad)}. Разрешены: {', '.join(allowed) or '—'}",
+        )
 
 
 # Один роутер с двумя prefix-ами: nested /projects/{id}/postings и flat /postings/{id}
@@ -241,6 +262,7 @@ async def create_project_run(
         raise HTTPException(status_code=404, detail="Project not found")
     if not can_manage_project(viewer, project):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot create runs in this project")
+    await _require_tags_allowed(session, viewer, parsed.site_tags)
 
     # 3. Backpressure
     max_active = settings.MAX_ACTIVE_RUNS_PER_USER
@@ -371,6 +393,7 @@ async def create_csv_direct_run(
         raise HTTPException(status_code=404, detail="Project not found")
     if not can_manage_project(viewer, project):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot create runs in this project")
+    await _require_tags_allowed(session, viewer, parsed.site_tags)
     max_active = settings.MAX_ACTIVE_RUNS_PER_USER
     if await count_active_runs_for_user(session, viewer.id) >= max_active:
         raise HTTPException(status_code=429, detail=f"Too many active runs. Limit: {max_active}")
@@ -450,6 +473,7 @@ async def create_campaign_run(
         raise HTTPException(status_code=404, detail="Project not found")
     if not can_manage_project(viewer, project):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot create runs in this project")
+    await _require_tags_allowed(session, viewer, parsed.site_tags)
     if await count_active_runs_for_user(session, viewer.id) >= settings.MAX_ACTIVE_RUNS_PER_USER:
         raise HTTPException(status_code=429, detail="Too many active runs")
     fn = (file.filename or "").lower()
@@ -563,6 +587,7 @@ async def create_link_run_endpoint(
         raise HTTPException(status_code=404, detail="Project not found")
     if not can_manage_project(viewer, project):
         raise HTTPException(status_code=403, detail="Cannot create runs in this project")
+    await _require_tags_allowed(session, viewer, parsed.site_tags)
     fn = (file.filename or "").lower()
     if not fn.endswith((".csv", ".xlsx", ".xlsm")):
         raise HTTPException(status_code=400, detail="Нужен .csv или .xlsx (anchor,link,count)")
@@ -1016,6 +1041,7 @@ async def list_runs_endpoint(
     project_id: int | None = Query(default=None),
     created_by: int | None = Query(default=None),
     search: str | None = Query(default=None, max_length=200),
+    include_deleted: bool = Query(default=False, description="super_admin: показать soft-deleted"),
     viewer: AdminUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_read),
 ) -> PaginatedResponse[PostingRunResponse]:
@@ -1029,6 +1055,7 @@ async def list_runs_endpoint(
         project_id=project_id,
         created_by=created_by,
         search=search,
+        include_deleted=include_deleted,
     )
     has_more = len(rows) > limit
     if has_more:
@@ -1767,13 +1794,46 @@ async def delete_run_endpoint(
         # Сигнализируем воркеру остановиться, а сами архивируем — воркер
         # увидит deleted_at + cancel_requested и корректно завершит.
         await request_cancel(session, run_id)
-    await soft_delete_run(session, run_id)
+    await soft_delete_run(session, run_id, actor_id=viewer.id)
     log.info("postings.deleted", run_id=run_id, actor_id=viewer.id, prev_status=run.status)
     await audit_record(
         session, actor=viewer, action="postings.delete",
         resource_type="run", resource_id=run_id,
         changes={"prev_status": run.status},
     )
+
+
+@postings_router.post("/{run_id}/restore", status_code=status.HTTP_204_NO_CONTENT)
+async def restore_run_endpoint(
+    run_id: int,
+    actor: AdminUser = Depends(require_super_admin),
+    session: AsyncSession = Depends(get_db_write),
+):
+    """super_admin: вернуть soft-deleted run из архива."""
+    run = await get_run(session, run_id, include_deleted=True)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    await restore_run(session, run_id)
+    log.info("postings.restored", run_id=run_id, actor_id=actor.id)
+    await audit_record(session, actor=actor, action="postings.restore",
+                       resource_type="run", resource_id=run_id)
+
+
+@postings_router.delete("/{run_id}/purge", status_code=status.HTTP_204_NO_CONTENT)
+async def purge_run_endpoint(
+    run_id: int,
+    actor: AdminUser = Depends(require_super_admin),
+    session: AsyncSession = Depends(get_db_write),
+):
+    """super_admin: полное (hard) удаление run из БД (каскад: text_items,
+    project_wp_used)."""
+    run = await get_run(session, run_id, include_deleted=True)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    await purge_run(session, run_id)
+    log.warning("postings.purged", run_id=run_id, actor_id=actor.id)
+    await audit_record(session, actor=actor, action="postings.purge",
+                       resource_type="run", resource_id=run_id)
 
 
 # ─── Экспорт результатов run-а ──────────────────────────────────────

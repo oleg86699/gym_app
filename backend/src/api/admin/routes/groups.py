@@ -157,6 +157,10 @@ async def update_group(
         group.description = payload.description
     if payload.is_active is not None:
         group.is_active = payload.is_active
+    # tag-access RBAC: потолок разрешённых команде тегов (super_admin only —
+    # эндпоинт под require_super_admin). null = снять ограничение.
+    if "allowed_tags" in payload.model_fields_set:
+        group.allowed_tags = payload.allowed_tags
 
     try:
         await session.commit()

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ArrowLeft } from 'lucide-svelte'
+  import { ArrowLeft, X } from 'lucide-svelte'
   import { goto } from '$app/navigation'
   import { page } from '$app/state'
   import { onMount } from 'svelte'
@@ -9,6 +9,7 @@
     projects as projectsApi,
     roles as rolesApi,
     users as usersApi,
+    wpSites as wpSitesApi,
   } from '$lib/api/admin'
   import { ApiError } from '$lib/api/client'
   import type { Group, Project, ProjectListItem, Role, User, UserDetail } from '$lib/api/types'
@@ -34,8 +35,42 @@
   let f_role_ids = $state<number[]>([])
   let f_project_ids = $state<number[]>([])
 
+  // ─── tag-access RBAC ────────────────────────────────────────────────
+  // null = без ограничения (наследует потолок группы); [] = нет доступа ни к
+  // одному тегу; [..] = только выбранные. availableTags приходит из
+  // credential-tags, уже сужен бэкендом до потолка текущего юзера-редактора —
+  // group_admin физически не увидит теги вне своей группы.
+  let availableTags = $state<string[]>([])
+  let f_tags_restricted = $state(false)   // включён ли allowlist
+  let f_allowed_tags = $state<string[]>([]) // выбранные теги (когда restricted)
+  let tagSearch = $state('')
+  const TAG_RESULTS_CAP = 24
+
   let isSuper = $derived($currentUser?.is_super_admin ?? false)
   let isSelf = $derived($currentUser?.id === userId)
+  let isGroupAdmin = $derived(
+    $currentUser?.roles?.some((r) => r.name === 'group_admin') ?? false,
+  )
+  // Кто может править теги этого юзера: super_admin — любому; group_admin —
+  // только юзеру своей группы. Зеркалит гейт в бэкенде.
+  let canEditTags = $derived(
+    isSuper ||
+      (isGroupAdmin &&
+        !!$currentUser?.group &&
+        $currentUser?.group?.id === (user?.group?.id ?? null)),
+  )
+  let filteredTags = $derived.by(() => {
+    const q = tagSearch.trim().toLowerCase()
+    return q ? availableTags.filter((t) => t.toLowerCase().includes(q)) : availableTags
+  })
+  let tagResultsAll = $derived(filteredTags.filter((t) => !f_allowed_tags.includes(t)))
+  let tagResults = $derived(tagResultsAll.slice(0, TAG_RESULTS_CAP))
+  let tagResultsMore = $derived(Math.max(0, tagResultsAll.length - TAG_RESULTS_CAP))
+  function toggleAllowedTag(tag: string) {
+    f_allowed_tags = f_allowed_tags.includes(tag)
+      ? f_allowed_tags.filter((t) => t !== tag)
+      : [...f_allowed_tags, tag]
+  }
 
   // ─── Проекты во владении + переназначение (super_admin only) ────────
   // Деривим из уже загруженного allProjects (тот же источник, что и «Project
@@ -80,6 +115,9 @@
       f_is_active = u.is_active
       f_role_ids = u.roles.map((r) => r.id)
       f_project_ids = u.shared_projects.map((p) => p.id)
+      // tag-access: null → без ограничения; массив → allowlist включён
+      f_tags_restricted = u.allowed_tags !== null
+      f_allowed_tags = u.allowed_tags ?? []
     } catch (e) {
       showToast('error', e instanceof ApiError ? e.message : String(e))
     } finally {
@@ -103,6 +141,13 @@
     } catch {
       /* noop */
     }
+    // Доступные теги — уже сужены бэкендом до потолка редактора (group_admin
+    // видит только теги своей группы). Отдельный try, чтобы 403 не ронял остальное.
+    try {
+      availableTags = await wpSitesApi.credentialTags()
+    } catch {
+      availableTags = []
+    }
   }
 
   onMount(async () => {
@@ -115,6 +160,13 @@
     saving = true
 
     const wasRemovedFromGroup = user.group !== null && f_group_id === null
+
+    // tag-access: желаемое значение (restricted → массив, иначе null); шлём только
+    // при изменении и если есть право (canEditTags). null явно передаётся, поэтому
+    // отличаем «не менять» (undefined) от «снять ограничение» (null).
+    const desiredTags: string[] | null = f_tags_restricted ? f_allowed_tags : null
+    const tagsChanged =
+      canEditTags && !allowedTagsEqual(desiredTags, user.allowed_tags)
 
     try {
       await usersApi.update(user.id, {
@@ -129,6 +181,7 @@
         project_ids: !arraysEqual(f_project_ids, user.shared_projects.map((p) => p.id))
           ? f_project_ids
           : undefined,
+        allowed_tags: tagsChanged ? desiredTags : undefined,
       })
       showToast('success', 'User updated')
       await load()
@@ -140,6 +193,15 @@
   }
 
   function arraysEqual(a: number[], b: number[]): boolean {
+    if (a.length !== b.length) return false
+    const sa = [...a].sort()
+    const sb = [...b].sort()
+    return sa.every((v, i) => v === sb[i])
+  }
+
+  // Сравнение allowlist'ов тегов с учётом null (= без ограничения).
+  function allowedTagsEqual(a: string[] | null, b: string[] | null): boolean {
+    if (a === null || b === null) return a === b
     if (a.length !== b.length) return false
     const sa = [...a].sort()
     const sb = [...b].sort()
@@ -312,6 +374,71 @@
           </div>
         {/if}
       </section>
+
+      <!-- Tag access (RBAC) block -->
+      {#if canEditTags}
+        <section class="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
+          <h2 class="text-base font-medium text-slate-900">Доступ по тегам батчей</h2>
+          <p class="mt-1 text-xs text-slate-500">
+            Ограничь, какие теги (батчи сайтов) этот юзер может использовать при постинге.
+            По умолчанию — все теги. Итог = пересечение с потолком его группы.
+            {#if isGroupAdmin && !isSuper}
+              Тебе доступны только теги твоей команды.
+            {/if}
+          </p>
+
+          <div class="mt-3 flex items-center gap-2">
+            <button type="button" onclick={() => (f_tags_restricted = false)}
+                    class="rounded-full border px-3 py-1 text-xs font-medium {!f_tags_restricted ? 'border-brand-400 bg-brand-50 text-brand-700' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}">
+              Все теги
+            </button>
+            <button type="button" onclick={() => (f_tags_restricted = true)}
+                    class="rounded-full border px-3 py-1 text-xs font-medium {f_tags_restricted ? 'border-brand-400 bg-brand-50 text-brand-700' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}">
+              Только выбранные
+            </button>
+            {#if !f_tags_restricted}<span class="text-[11px] text-slate-400">сейчас: все теги</span>{/if}
+          </div>
+
+          {#if f_tags_restricted}
+            {#if availableTags.length === 0}
+              <p class="mt-3 text-[11px] text-slate-400">Тегов пока нет — добавь теги батчам.</p>
+            {:else}
+              {#if f_allowed_tags.length}
+                <div class="mt-3 flex flex-wrap items-center gap-1.5">
+                  {#each f_allowed_tags as tag}
+                    <button type="button" onclick={() => toggleAllowedTag(tag)}
+                            class="flex items-center gap-1 rounded-full border border-brand-400 bg-brand-50 px-2.5 py-1 text-[12px] text-brand-700">
+                      {tag} <X size={11} class="inline-block" />
+                    </button>
+                  {/each}
+                  <button type="button" onclick={() => (f_allowed_tags = [])} class="px-1 text-[11px] text-slate-400 hover:text-slate-600">сбросить</button>
+                </div>
+              {/if}
+              <input bind:value={tagSearch} placeholder={`поиск среди ${availableTags.length} тегов…`}
+                     class="mt-2 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
+              <div class="mt-2 flex max-h-32 flex-wrap gap-1.5 overflow-auto">
+                {#each tagResults as tag}
+                  <button type="button" onclick={() => toggleAllowedTag(tag)}
+                          class="rounded-full border border-slate-300 bg-white px-2.5 py-1 text-[12px] text-slate-600 hover:bg-slate-50">
+                    + {tag}
+                  </button>
+                {/each}
+                {#if tagResults.length === 0}
+                  <p class="text-[11px] text-slate-400">{tagSearch.trim() ? 'Ничего не найдено.' : 'Все теги выбраны.'}</p>
+                {/if}
+              </div>
+              {#if tagResultsMore > 0}
+                <p class="mt-1 text-[11px] text-slate-400">…ещё {tagResultsMore} — уточни поиск.</p>
+              {/if}
+              {#if f_allowed_tags.length === 0}
+                <p class="mt-2 text-[11px] text-amber-600">⚠ Пустой список = юзер не сможет постить ни по одному тегу.</p>
+              {:else}
+                <p class="mt-1 text-[11px] text-slate-400">Выбрано: <b>{f_allowed_tags.length}</b> тег(ов).</p>
+              {/if}
+            {/if}
+          {/if}
+        </section>
+      {/if}
     </form>
 
     <!-- Проекты во владении + переназначение (super_admin only) -->

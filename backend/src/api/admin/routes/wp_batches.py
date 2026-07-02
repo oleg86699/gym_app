@@ -392,7 +392,7 @@ async def create_endpoint(
             proxy_id=None,
             detect_lang=True,
             actor_id=actor.id,
-            level="full" if is_super else "medium",
+            level="full",  # валидация всегда full (для всех ролей)
             provision_after=auto_provision,
             provision_role="author",
         )
@@ -420,10 +420,10 @@ async def validate_endpoint(
     if b.status == WpBatchStatus.VALIDATING.value:
         raise HTTPException(status_code=409, detail="Validation already running")
 
-    # Полный цикл ВСЕГДА: super_admin валидирует на full И создаёт наши аккаунты
-    # (provision) — другого варианта нет. Поставщик: фикс medium, без провижна.
+    # Валидация ВСЕГДА full (для всех ролей) — light/medium убраны. super_admin
+    # вдобавок создаёт наши аккаунты (provision). Поставщик: full, без провижна.
     is_super = actor.is_super_admin
-    level = "full" if is_super else "medium"
+    level = "full"
     proxy_id = payload.proxy_id if is_super else None
     provision_after = is_super
     # super: явное значение из диалога или серверный дефолт; supplier: фикс 8.
@@ -536,10 +536,10 @@ async def resume_endpoint(
             pause_requested=False, status=new_status))
     await session.commit()
     from workers.taskiq.cron_tasks import validate_batch_task
-    # Валидация ВСЕГДА полным циклом: super_admin — full (как импорт/ручной
-    # запуск), supplier — фикс medium (ограничение поставщика). Раньше resume
-    # форсил light — легаси-артефакт, ронял xmlrpc-disabled сайты в transient.
-    level = "full" if actor.is_super_admin else "medium"
+    # Валидация ВСЕГДА full (для всех ролей) — light/medium убраны. super_admin
+    # вдобавок provision. Раньше resume форсил light — легаси-артефакт, ронял
+    # xmlrpc-disabled сайты в transient.
+    level = "full"
     await validate_batch_task.kiq(batch_id=batch_id, scope="all", actor_id=actor.id,
                                   level=level, provision_after=actor.is_super_admin,
                                   concurrency=settings.DEFAULT_VALIDATION_CONCURRENCY)
@@ -555,8 +555,8 @@ async def revalidate_failed_endpoint(
 ) -> dict:
     b = await _batch_or_404(session, batch_id, actor)
     from workers.taskiq.cron_tasks import validate_batch_task
-    # Полный цикл (full) для super_admin, medium для поставщика — см. resume.
-    level = "full" if actor.is_super_admin else "medium"
+    # Валидация ВСЕГДА full (для всех ролей) — см. resume. super_admin вдобавок provision.
+    level = "full"
     await validate_batch_task.kiq(batch_id=batch_id, scope="invalid", actor_id=actor.id,
                                   level=level, provision_after=actor.is_super_admin,
                                   concurrency=settings.DEFAULT_VALIDATION_CONCURRENCY)

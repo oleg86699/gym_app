@@ -175,6 +175,12 @@ class PostingRun(Base, SoftDeletableMixin):
     pause_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
+    # Two-level delete (миграция 0051): кто выполнил soft-delete (deleted_at —
+    # из SoftDeletableMixin). NULL пока ран не удалён.
+    deleted_by: Mapped[int | None] = mapped_column(
+        ForeignKey("admin_users.id", ondelete="SET NULL"), nullable=True
+    )
+
     # Денормализованные счётчики (ADR-003) — атомарный UPDATE col=col+1
     total_texts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     posted_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -207,6 +213,7 @@ class PostingRun(Base, SoftDeletableMixin):
     # Relationships
     project = relationship("Project", foreign_keys=[project_id])
     creator = relationship("AdminUser", foreign_keys=[created_by])
+    deleted_by_user = relationship("AdminUser", foreign_keys=[deleted_by])
 
     __table_args__ = (
         Index("ix_posting_runs_project_status", "project_id", "status"),

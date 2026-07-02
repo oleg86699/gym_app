@@ -6,6 +6,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from api.admin.schemas.projects import UserBrief
+
 
 class ProjectDomainResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -13,6 +15,9 @@ class ProjectDomainResponse(BaseModel):
     id: int
     domain: str
     created_at: datetime
+    deleted_at: datetime | None = None   # two-level delete: soft-deleted
+    deleted_by: int | None = None        # admin_user.id, кто скрыл (super-аудит)
+    deleted_by_user: UserBrief | None = None  # кто скрыл (для показа @username)
 
 
 class AddProjectDomainRequest(BaseModel):

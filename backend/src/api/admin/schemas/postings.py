@@ -34,6 +34,9 @@ class PostingRunResponse(BaseModel):
     id: int
     project: ProjectBrief
     creator: UserBrief | None
+    deleted_at: datetime | None = None   # two-level delete: soft-deleted
+    deleted_by: int | None = None        # admin_user.id, кто скрыл (super-аудит)
+    deleted_by_user: UserBrief | None = None  # кто скрыл (для показа @username)
 
     name: str
     status: str

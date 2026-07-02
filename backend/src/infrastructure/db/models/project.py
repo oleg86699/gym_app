@@ -21,12 +21,13 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Table,
     Text,
-    UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -111,9 +112,16 @@ class Project(Base, SoftDeletableMixin):
     # NB: лимит «сколько раз один WP-сайт можно использовать» переехал на ЗАДАЧУ
     # (posting_runs.max_posts_per_site, default 1) — см. миграцию 0040.
 
+    # Two-level delete: кто выполнил soft-delete (для аудита super_admin).
+    # NULL пока проект не удалён. deleted_at — из SoftDeletableMixin.
+    deleted_by: Mapped[int | None] = mapped_column(
+        ForeignKey("admin_users.id", ondelete="SET NULL"), nullable=True
+    )
+
     # Relationships
     owner = relationship("AdminUser", foreign_keys=[owner_user_id])
     owner_group = relationship("AdminGroup", foreign_keys=[owner_group_id])
+    deleted_by_user = relationship("AdminUser", foreign_keys=[deleted_by])
 
     shared_with_groups = relationship(
         "AdminGroup",
@@ -136,7 +144,14 @@ class ProjectDomain(Base):
     """
 
     __tablename__ = "project_domains"
-    __table_args__ = (UniqueConstraint("project_id", "domain", name="uq_project_domain"),)
+    # Уникальность (project_id, domain) — только среди НЕ удалённых, чтобы
+    # удалённый money-домен можно было добавить/восстановить заново (миграция 0051).
+    __table_args__ = (
+        Index(
+            "uq_project_domain_active", "project_id", "domain",
+            unique=True, postgresql_where=text("deleted_at IS NULL"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(
@@ -146,3 +161,11 @@ class ProjectDomain(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    # Two-level delete (миграция 0051): soft-delete money-домена.
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    deleted_by: Mapped[int | None] = mapped_column(
+        ForeignKey("admin_users.id", ondelete="SET NULL"), nullable=True
+    )
+    deleted_by_user = relationship("AdminUser", foreign_keys=[deleted_by])

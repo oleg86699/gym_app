@@ -184,7 +184,9 @@ async def credential_tags_endpoint(
     session: AsyncSession = Depends(get_db_read),
 ) -> list[str]:
     _check_can_view(viewer)
-    return await list_credential_tags(session)
+    from domain.wp_sites.service import effective_allowed_tags
+    allowed = await effective_allowed_tags(session, viewer)
+    return await list_credential_tags(session, allowed=allowed)
 
 
 # ─── Sites: CRUD ─────────────────────────────────────────────────────

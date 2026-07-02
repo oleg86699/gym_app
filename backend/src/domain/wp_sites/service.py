@@ -756,10 +756,40 @@ async def refresh_pool_summary_mv(session: AsyncSession) -> None:
         await session.commit()
 
 
-async def list_credential_tags(session: AsyncSession) -> list[str]:
+async def effective_allowed_tags(session: AsyncSession, user) -> list[str] | None:
+    """Разрешённые батч-теги для юзера (tag-access RBAC, миграция 0052).
+
+    None = без ограничения (все теги). super_admin → None. Иначе пересечение
+    потолка группы и персонального allowlist: NULL на уровне = «без ограничения
+    на этом уровне». Пустой список после пересечения = доступа нет ни к одному
+    тегу (юзер физически ничего не постит)."""
+    if getattr(user, "is_super_admin", False):
+        return None
+    from infrastructure.db.models import AdminGroup
+
+    group_tags: list[str] | None = None
+    if getattr(user, "group_id", None) is not None:
+        group_tags = await session.scalar(
+            select(AdminGroup.allowed_tags).where(AdminGroup.id == user.group_id))
+    user_tags: list[str] | None = getattr(user, "allowed_tags", None)
+    if group_tags is None and user_tags is None:
+        return None
+    if group_tags is None:
+        return list(user_tags)
+    if user_tags is None:
+        return list(group_tags)
+    return sorted(set(group_tags) & set(user_tags))
+
+
+async def list_credential_tags(
+    session: AsyncSession, *, allowed: list[str] | None = None,
+) -> list[str]:
     """Теги БАТЧЕЙ (WpImportBatch.tag — то, что видно в списке батчей) для
     фильтра пула доступов прогона, по свежести — новые сверху. Теги кредов
-    (provisioned/role/ручные) пока НЕ включаем — только батч-теги."""
+    (provisioned/role/ручные) пока НЕ включаем — только батч-теги.
+
+    allowed (tag-access RBAC) — если задан, отдаём только теги из этого набора
+    (эффективный allowlist юзера). None = без ограничения."""
     from sqlalchemy import func as _f
 
     rows = (
@@ -770,7 +800,11 @@ async def list_credential_tags(session: AsyncSession) -> list[str]:
             .order_by(_f.max(WpImportBatch.created_at).desc())
         )
     ).all()
-    return [r[0] for r in rows if r[0]]
+    tags = [r[0] for r in rows if r[0]]
+    if allowed is not None:
+        allow = set(allowed)
+        tags = [t for t in tags if t in allow]
+    return tags
 
 
 # ─── Site analytics ───────────────────────────────────────────────────

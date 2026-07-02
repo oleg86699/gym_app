@@ -813,7 +813,7 @@ async def run_batch_validation(
     proxy_id: int | None = None,
     detect_lang: bool = True,
     actor_id: int | None = None,
-    level: str = "light",
+    level: str = "full",  # игнорируется — форсится в full внутри (см. ниже)
     provision_after: bool = False,
     provision_role: str = "author",
 ) -> dict:
@@ -821,25 +821,20 @@ async def run_batch_validation(
     Главный entry-point для TaskIQ task.
 
     scope: 'all' | 'invalid' | 'pending'
-    level:
-      - 'light' — только XML-RPC валидация (Tier 1, ~1 запрос на cred). Default.
-      - 'medium' — XML-RPC + admin form-login (Tier 2). Ловит cred-ы где
-        XML-RPC отключён но wp-admin работает. +2-3 запроса на cred.
-      - 'full' — medium + capability probes (theme-editor / widgets / pages /
-        wp_version / role). +5-6 запросов на cred.
+    level: ИГНОРИРУЕТСЯ — валидация всегда идёт на 'full' (форс ниже). full =
+      XML-RPC (Tier 1) + admin form-login (Tier 2, подтверждает can_admin_login
+      + роль) + capability probes (theme-editor / widgets / pages / wp_version).
+      light/medium убраны: medium оставлял can_admin_login=null → битый пул.
     """
     assert scope in ("all", "invalid", "pending")
-    assert level in ("light", "medium", "full")
 
-    # Провижн при валидации: чтобы корректно отобрать сайты под создание нашего
-    # юзера, нужно ПОДТВЕРДИТЬ admin-логин (can_admin_login) и роль для каждого
-    # креда — даже когда XML-RPC уже ответил OK. Поэтому форсим Tier 2 и
-    # поднимаем light→medium.
-    force_tier2 = False
-    if provision_after:
-        force_tier2 = True
-        if level == "light":
-            level = "medium"
+    # Валидация ВСЕГДА full — light/medium убраны (директива). Только full
+    # запускает Tier 2 admin-логин, который подтверждает can_admin_login. medium
+    # оставлял can_admin_login=null у чистых XML-RPC-кредов → битый пул под ссылки
+    # и ложные «administrator». Единая точка форса: любой переданный level
+    # игнорируется, всегда full. force_tier2 сохраняем для provision-семантики.
+    level = "full"
+    force_tier2 = bool(provision_after)
 
     # 0. Load batch + proxy
     async with WriteSession() as s:

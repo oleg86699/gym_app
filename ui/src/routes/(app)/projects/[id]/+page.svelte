@@ -25,10 +25,14 @@
   let domainAnalytics = $state<DomainAnalyticsRow[]>([])
   let newDomain = $state('')
   let domainBusy = $state(false)
+  // Two-level delete: super_admin может смотреть удалённые money-домены + restore/purge
+  let isSuper = $derived($currentUser?.is_super_admin ?? false)
+  let showDeletedDomains = $state(false)
 
   async function loadDomains() {
     try {
-      domains = await projectsApi.listDomains(projectId)
+      domains = await projectsApi.listDomains(projectId,
+        { include_deleted: (isSuper && showDeletedDomains) || undefined })
       domainAnalytics = await projectsApi.domainAnalytics(projectId)
     } catch { /* нет доступа/проекта — молча */ }
   }
@@ -55,6 +59,20 @@
   async function removeDomain(id: number) {
     try {
       await projectsApi.removeDomain(projectId, id)
+      await loadDomains()
+    } catch (e) { showToast('error', e instanceof ApiError ? e.message : String(e)) }
+  }
+  // Two-level delete (super_admin): вернуть soft-deleted / удалить полностью
+  async function restoreDomain(id: number) {
+    try {
+      await projectsApi.restoreDomain(projectId, id)
+      await loadDomains()
+    } catch (e) { showToast('error', e instanceof ApiError ? e.message : String(e)) }
+  }
+  async function purgeDomain(d: { id: number; domain: string }) {
+    if (!confirm(`ПОЛНОСТЬЮ удалить домен «${d.domain}» из БД? Необратимо.`)) return
+    try {
+      await projectsApi.purgeDomain(projectId, d.id)
       await loadDomains()
     } catch (e) { showToast('error', e instanceof ApiError ? e.message : String(e)) }
   }
@@ -288,6 +306,14 @@
           <span class="text-[11px] text-slate-400">
             (money-домены, на которые ведут ссылки в текстах; по ним разбираем бэклинки и считаем аналитику)
           </span>
+          {#if isSuper}
+            <label class="ml-auto flex items-center gap-1.5 text-[11px] text-slate-500"
+                   title="Показать удалённые домены (только super_admin)">
+              <input type="checkbox" bind:checked={showDeletedDomains} onchange={loadDomains}
+                     class="rounded border-slate-300" />
+              удалённые
+            </label>
+          {/if}
         </div>
         {#if canManage(project)}
           <div class="mt-2 flex items-start gap-2">
@@ -308,19 +334,33 @@
           <div class="mt-2 flex flex-wrap gap-1.5">
             {#each domains as d (d.id)}
               {@const stat = domainAnalytics.find((a) => a.target_domain === d.domain)}
-              <span class="group inline-flex items-center gap-1.5 rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs text-indigo-700 transition hover:border-indigo-400 hover:bg-indigo-100">
-                <a href={`/projects/${projectId}/domains/${encodeURIComponent(d.domain)}`}
-                   class="inline-flex items-center gap-1.5 font-medium hover:underline"
-                   title="Открыть страницу домена: задачи и аналитика">
-                  {d.domain}
-                  {#if stat}<span class="text-[10px] text-indigo-400">✓{stat.posted}/{stat.total}</span>{/if}
-                  <span class="text-[10px] text-indigo-400">→</span>
-                </a>
-                {#if canManage(project)}
-                  <button type="button" onclick={() => removeDomain(d.id)}
-                          title="Удалить домен" class="text-indigo-300 hover:text-red-600">×</button>
-                {/if}
-              </span>
+              {#if d.deleted_at}
+                <span class="inline-flex items-center gap-1.5 rounded-full border border-red-200 bg-red-50 px-2.5 py-1 text-xs text-red-600"
+                      title={`Удалено ${new Date(d.deleted_at).toLocaleString()}`}>
+                  <span class="line-through">{d.domain}</span>
+                  {#if d.deleted_by_user}<span class="text-[10px] text-slate-400">@{d.deleted_by_user.username}</span>{/if}
+                  {#if isSuper}
+                    <button type="button" onclick={() => restoreDomain(d.id)}
+                            title="Восстановить домен" class="font-medium text-slate-500 hover:text-emerald-600">↺</button>
+                    <button type="button" onclick={() => purgeDomain(d)}
+                            title="Удалить полностью (необратимо)" class="font-medium text-red-400 hover:text-red-700">⌫</button>
+                  {/if}
+                </span>
+              {:else}
+                <span class="group inline-flex items-center gap-1.5 rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs text-indigo-700 transition hover:border-indigo-400 hover:bg-indigo-100">
+                  <a href={`/projects/${projectId}/domains/${encodeURIComponent(d.domain)}`}
+                     class="inline-flex items-center gap-1.5 font-medium hover:underline"
+                     title="Открыть страницу домена: задачи и аналитика">
+                    {d.domain}
+                    {#if stat}<span class="text-[10px] text-indigo-400">✓{stat.posted}/{stat.total}</span>{/if}
+                    <span class="text-[10px] text-indigo-400">→</span>
+                  </a>
+                  {#if canManage(project)}
+                    <button type="button" onclick={() => removeDomain(d.id)}
+                            title="Удалить домен" class="text-indigo-300 hover:text-red-600">×</button>
+                  {/if}
+                </span>
+              {/if}
             {/each}
           </div>
         {/if}

@@ -18,7 +18,8 @@ from datetime import UTC, datetime
 
 from datetime import timedelta
 
-from sqlalchemy import case, exists, func, or_, select
+from sqlalchemy import case, exists, func, or_, select, update
+from sqlalchemy import delete as sa_delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -27,6 +28,7 @@ from infrastructure.db.models import (
     PostingRun,
     PostingRunStatus,
     Project,
+    ProjectDomain,
     ProjectWpUsed,
     TextItem,
     TextItemStatus,
@@ -127,6 +129,7 @@ def _project_load_opts():
         selectinload(Project.owner_group),
         selectinload(Project.shared_with_users),
         selectinload(Project.shared_with_groups),
+        selectinload(Project.deleted_by_user),
     )
 
 
@@ -138,14 +141,17 @@ async def list_projects(
     limit: int = 50,
     search: str | None = None,
     owner_id: int | None = None,
+    include_deleted: bool = False,
 ) -> list[Project]:
     stmt = (
         select(Project)
-        .where(Project.deleted_at.is_(None))
         .options(*_project_load_opts())
         .order_by(Project.id.asc())
         .limit(limit + 1)
     )
+    # soft-deleted видит только super_admin и только если явно попросил
+    if not (include_deleted and viewer.is_super_admin):
+        stmt = stmt.where(Project.deleted_at.is_(None))
 
     scope_filter = _visible_projects_filter(viewer)
     if scope_filter is not None:
@@ -178,12 +184,12 @@ async def reassign_project_owner(
     return refreshed
 
 
-async def get_project(session: AsyncSession, project_id: int) -> Project | None:
-    stmt = (
-        select(Project)
-        .where(Project.id == project_id, Project.deleted_at.is_(None))
-        .options(*_project_load_opts())
-    )
+async def get_project(
+    session: AsyncSession, project_id: int, *, include_deleted: bool = False,
+) -> Project | None:
+    stmt = select(Project).where(Project.id == project_id).options(*_project_load_opts())
+    if not include_deleted:
+        stmt = stmt.where(Project.deleted_at.is_(None))
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
@@ -231,9 +237,51 @@ async def update_project(
     return refreshed
 
 
-async def soft_delete_project(session: AsyncSession, project: Project) -> None:
-    project.deleted_at = datetime.now(UTC)
+async def soft_delete_project(
+    session: AsyncSession, project: Project, *, actor_id: int | None = None,
+) -> None:
+    """Soft-delete проекта + soft-каскад на его прогоны и money-домены (БД-каскад
+    на soft НЕ срабатывает). Одна метка `now` на весь каскад — чтобы restore мог
+    вернуть ровно эту партию. Полное удаление — purge_project (super only)."""
+    now = datetime.now(UTC)
+    project.deleted_at = now
+    project.deleted_by = actor_id
     project.is_active = False
+    await session.execute(
+        update(PostingRun).where(
+            PostingRun.project_id == project.id, PostingRun.deleted_at.is_(None)
+        ).values(deleted_at=now, deleted_by=actor_id))
+    await session.execute(
+        update(ProjectDomain).where(
+            ProjectDomain.project_id == project.id, ProjectDomain.deleted_at.is_(None)
+        ).values(deleted_at=now, deleted_by=actor_id))
+    await session.commit()
+
+
+async def restore_project(session: AsyncSession, project: Project) -> None:
+    """super_admin: вернуть soft-deleted проект + ровно те runs/domains, что
+    скрылись этим же каскадом (совпадающая метка deleted_at). Раны/домены,
+    удалённые отдельно в другое время, остаются скрытыми."""
+    cascade_ts = project.deleted_at
+    project.deleted_at = None
+    project.deleted_by = None
+    project.is_active = True
+    if cascade_ts is not None:
+        await session.execute(
+            update(PostingRun).where(
+                PostingRun.project_id == project.id, PostingRun.deleted_at == cascade_ts
+            ).values(deleted_at=None, deleted_by=None))
+        await session.execute(
+            update(ProjectDomain).where(
+                ProjectDomain.project_id == project.id, ProjectDomain.deleted_at == cascade_ts
+            ).values(deleted_at=None, deleted_by=None))
+    await session.commit()
+
+
+async def purge_project(session: AsyncSession, project_id: int) -> None:
+    """super_admin: полное (hard) удаление проекта из БД. БД-каскад сносит
+    runs → text_items / project_wp_used, а также money-домены."""
+    await session.execute(sa_delete(Project).where(Project.id == project_id))
     await session.commit()
 
 

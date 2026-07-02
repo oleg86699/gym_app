@@ -24,6 +24,9 @@ class ProjectResponse(BaseModel):
     description: str | None
     is_active: bool
     created_at: datetime
+    deleted_at: datetime | None = None   # two-level delete: soft-deleted
+    deleted_by: int | None = None        # admin_user.id, кто скрыл (super-аудит)
+    deleted_by_user: UserBrief | None = None  # кто скрыл (для показа @username)
 
     owner: UserBrief
     owner_group: GroupBrief | None

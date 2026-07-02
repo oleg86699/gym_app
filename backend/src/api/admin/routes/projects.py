@@ -43,7 +43,9 @@ from domain.projects.service import (
     create_project,
     get_project,
     list_projects,
+    purge_project,
     reassign_project_owner,
+    restore_project,
     share_with_groups,
     share_with_users,
     soft_delete_project,
@@ -75,12 +77,13 @@ async def list_projects_endpoint(
     limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
     search: str | None = Query(default=None, max_length=200),
     owner_id: int | None = Query(default=None, description="Только проекты этого владельца"),
+    include_deleted: bool = Query(default=False, description="super_admin: показать soft-deleted"),
     viewer: AdminUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_read),
 ) -> PaginatedResponse[ProjectListItem]:
     after = _decode_cursor(cursor)
     rows = await list_projects(session, viewer=viewer, after_id=after, limit=limit,
-                               search=search, owner_id=owner_id)
+                               search=search, owner_id=owner_id, include_deleted=include_deleted)
     has_more = len(rows) > limit
     if has_more:
         rows = rows[:limit]
@@ -168,8 +171,38 @@ async def delete_project_endpoint(
         raise HTTPException(status_code=404, detail="Project not found")
     if not can_manage_project(viewer, project):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot delete this project")
-    await soft_delete_project(session, project)
+    await soft_delete_project(session, project, actor_id=viewer.id)
     log.info("projects.deleted", actor_id=viewer.id, project_id=project_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/{project_id}/restore", status_code=status.HTTP_204_NO_CONTENT)
+async def restore_project_endpoint(
+    project_id: int,
+    actor: AdminUser = Depends(require_super_admin),
+    session: AsyncSession = Depends(get_db_write),
+) -> Response:
+    """super_admin: вернуть soft-deleted проект (+ каскадно скрытые runs/domains)."""
+    project = await get_project(session, project_id, include_deleted=True)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    await restore_project(session, project)
+    log.info("projects.restored", actor_id=actor.id, project_id=project_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete("/{project_id}/purge", status_code=status.HTTP_204_NO_CONTENT)
+async def purge_project_endpoint(
+    project_id: int,
+    actor: AdminUser = Depends(require_super_admin),
+    session: AsyncSession = Depends(get_db_write),
+) -> Response:
+    """super_admin: полное удаление проекта из БД (каскад: runs → items/used, domains)."""
+    project = await get_project(session, project_id, include_deleted=True)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    await purge_project(session, project_id)
+    log.warning("projects.purged", actor_id=actor.id, project_id=project_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -295,16 +328,18 @@ async def reassign_project_owner_endpoint(
 @router.get("/{project_id}/domains", response_model=list[ProjectDomainResponse])
 async def list_project_domains(
     project_id: int,
+    include_deleted: bool = Query(default=False, description="super_admin: показать soft-deleted"),
     viewer: AdminUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_read),
 ) -> list[ProjectDomainResponse]:
-    project = await get_project(session, project_id)
+    inc = include_deleted and viewer.is_super_admin
+    project = await get_project(session, project_id, include_deleted=inc)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
     if not can_view_project(viewer, project):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot view this project")
     from domain.project_domains import list_domains
-    rows = await list_domains(session, project_id)
+    rows = await list_domains(session, project_id, include_deleted=inc)
     return [ProjectDomainResponse.model_validate(r) for r in rows]
 
 
@@ -363,9 +398,41 @@ async def remove_project_domain(
     if not can_manage_project(viewer, project):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot manage this project")
     from domain.project_domains import remove_domain
-    ok = await remove_domain(session, project_id, domain_id)
+    ok = await remove_domain(session, project_id, domain_id, actor_id=viewer.id)
     if not ok:
         raise HTTPException(status_code=404, detail="Domain not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/{project_id}/domains/{domain_id}/restore", status_code=status.HTTP_204_NO_CONTENT)
+async def restore_project_domain(
+    project_id: int,
+    domain_id: int,
+    actor: AdminUser = Depends(require_super_admin),
+    session: AsyncSession = Depends(get_db_write),
+) -> Response:
+    """super_admin: вернуть soft-deleted money-домен."""
+    from domain.project_domains import restore_domain
+    ok = await restore_domain(session, project_id, domain_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Domain not found")
+    log.info("projects.domain_restored", actor_id=actor.id, project_id=project_id, domain_id=domain_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete("/{project_id}/domains/{domain_id}/purge", status_code=status.HTTP_204_NO_CONTENT)
+async def purge_project_domain(
+    project_id: int,
+    domain_id: int,
+    actor: AdminUser = Depends(require_super_admin),
+    session: AsyncSession = Depends(get_db_write),
+) -> Response:
+    """super_admin: полное (hard) удаление money-домена из БД."""
+    from domain.project_domains import purge_domain
+    ok = await purge_domain(session, project_id, domain_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Domain not found")
+    log.warning("projects.domain_purged", actor_id=actor.id, project_id=project_id, domain_id=domain_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

@@ -32,6 +32,9 @@
   let projectsForFilter = $state<Project[]>([])
   let usersForFilter = $state<User[]>([])
   let initialLoading = $state(true)
+  // Two-level delete: только super_admin может смотреть удалённые + restore/purge
+  let isSuper = $derived($currentUser?.is_super_admin ?? false)
+  let showDeleted = $state(false)
 
   // ─── Global queue — общая видимая очередь по всем юзерам ─────────
   let queue = $state<QueueItem[]>([])
@@ -99,6 +102,7 @@
         project_id: filterProjectId ?? undefined,
         created_by: filterCreatorId ?? undefined,
         search: search || undefined,
+        include_deleted: (isSuper && showDeleted) || undefined,
       })
       items = res.items
     } catch (e) {
@@ -147,6 +151,31 @@
     try {
       const res = await postingsApi.restart(r.id)
       showToast('success', `Restarted: ${res.items_reset} items reset`)
+      await refresh(false)
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    }
+  }
+
+  // Two-level delete (super_admin): вернуть soft-deleted / удалить полностью
+  async function restoreRun(r: PostingRun) {
+    try {
+      await postingsApi.restore(r.id)
+      showToast('success', `Run «${r.name}» восстановлен`)
+      await refresh(false)
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    }
+  }
+  async function purgeRun(r: PostingRun) {
+    if (!confirm(
+      `ПОЛНОСТЬЮ удалить run «${r.name}» из БД?\n\n` +
+      `Это необратимо — сотрёт все text_items и результаты постинга. ` +
+      `Отмены не будет.`,
+    )) return
+    try {
+      await postingsApi.purge(r.id)
+      showToast('success', `Run «${r.name}» удалён полностью`)
       await refresh(false)
     } catch (e) {
       showToast('error', e instanceof ApiError ? e.message : String(e))
@@ -616,6 +645,14 @@
         <X size={14} class="inline-block align-text-bottom" /> Clear filters
       </button>
     {/if}
+    {#if isSuper}
+      <label class="ml-3 flex items-center gap-1.5 text-xs text-slate-600"
+             title="Показать soft-deleted раны (только super_admin)">
+        <input type="checkbox" bind:checked={showDeleted} onchange={() => refresh(false)}
+               class="rounded border-slate-300" />
+        Показать удалённые
+      </label>
+    {/if}
   </div>
 
   <p class="text-xs text-slate-400">
@@ -809,6 +846,17 @@
                   <span class="rounded-full px-2 py-0.5 text-[11px] font-medium uppercase {statusBadgeClass(r.status)}">
                     {r.status.replace('_', ' ')}
                   </span>
+                  {#if r.deleted_at}
+                    <span class="rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-medium uppercase text-red-700"
+                          title={`Удалено ${new Date(r.deleted_at).toLocaleString()}`}>удалено</span>
+                    {#if r.deleted_by_user}<span class="text-[11px] text-slate-400">@{r.deleted_by_user.username}</span>{/if}
+                    {#if isSuper}
+                      <button onclick={() => restoreRun(r)}
+                              class="rounded border border-slate-300 px-2 py-0.5 text-[11px] text-slate-600 hover:bg-slate-50">Restore</button>
+                      <button onclick={() => purgeRun(r)}
+                              class="rounded border border-red-300 px-2 py-0.5 text-[11px] text-red-600 hover:bg-red-50">Purge</button>
+                    {/if}
+                  {/if}
                   {#if r.status === 'ready' || r.status === 'scheduled'}
                     <button onclick={() => startRun(r)}
                             title={r.status === 'scheduled'
