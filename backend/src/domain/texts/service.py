@@ -123,7 +123,8 @@ def _read_minio(storage_key: str | None) -> str:
     except StorageError as e:
         log.warning("texts.minio_read_failed", storage_key=storage_key, error=str(e))
         return ""
-    return raw.decode("utf-8", errors="replace")
+    from core.text_decode import decode_text
+    return decode_text(raw)
 
 
 async def read_item_body(
