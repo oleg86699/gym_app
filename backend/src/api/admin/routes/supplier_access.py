@@ -58,6 +58,7 @@ async def create_endpoint(
             ttl_hours=payload.ttl_hours,
             note=payload.note,
             handover=payload.handover,
+            batch_ids=payload.batch_ids,
         )
     except SupplierAccessError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -66,7 +67,8 @@ async def create_endpoint(
     magic_url = (f"{base}/portal-login?token={created.login_token}"
                  if created.login_token else None)
     log.info("supplier_access.created", actor_id=actor.id,
-             user_id=created.user.id, handover=payload.handover)
+             user_id=created.user.id, handover=payload.handover,
+             granted_batches=created.granted_batches)
     return SupplierAccessCreatedResponse(
         user_id=created.user.id,
         username=created.user.username,
@@ -76,6 +78,7 @@ async def create_endpoint(
         password=created.password,
         magic_url=magic_url,
         login_url=f"{base}/login",
+        granted_batches=created.granted_batches,
     )
 
 

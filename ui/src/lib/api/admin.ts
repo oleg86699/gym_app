@@ -270,6 +270,7 @@ export interface SupplierAccessCreated {
   password: string | null
   magic_url: string | null
   login_url: string
+  granted_batches: number
 }
 
 export interface SupplierAccessItem {
@@ -287,8 +288,12 @@ export interface SupplierAccessItem {
 
 export const supplierAccess = {
   list: () => api.get<{ items: SupplierAccessItem[] }>('/admin/api/supplier-access'),
-  create: (payload: { note?: string; ttl_hours?: number; handover?: 'password' | 'link' }) =>
-    api.post<SupplierAccessCreated>('/admin/api/supplier-access', payload),
+  create: (payload: {
+    note?: string
+    ttl_hours?: number
+    handover?: 'password' | 'link'
+    batch_ids?: number[]
+  }) => api.post<SupplierAccessCreated>('/admin/api/supplier-access', payload),
   revoke: (userId: number) => api.post(`/admin/api/supplier-access/${userId}/revoke`),
 }
 
@@ -404,7 +409,8 @@ export const wpCredentials = {
 // ─── WP Import Batches ───────────────────────────────────────────────
 
 export const wpBatches = {
-  list: () => api.get<{ items: WpBatch[] }>('/admin/api/batches'),
+  list: (query?: { limit?: number }) =>
+    api.get<{ items: WpBatch[] }>('/admin/api/batches', query as Record<string, string | number | undefined>),
   get: (id: number) => api.get<WpBatch>(`/admin/api/batches/${id}`),
   create: (
     file: File,

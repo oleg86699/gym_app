@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { Check, Copy, Eye, EyeOff } from 'lucide-svelte'
-  import { supplierAccess, type SupplierAccessCreated, type SupplierAccessItem } from '$lib/api/admin'
+  import { supplierAccess, wpBatches, type SupplierAccessCreated, type SupplierAccessItem } from '$lib/api/admin'
+  import type { WpBatch } from '$lib/api/types'
   import { ApiError } from '$lib/api/client'
   import { copyText } from '$lib/clipboard'
   import { showToast } from '$lib/stores/toast'
@@ -22,6 +23,16 @@
   let ttlHours = $state(24 * 7)
   let handover = $state<'password' | 'link'>('password')
 
+  // Батчи, к которым сразу открыть доступ поставщику (15 последних, chip-toggle).
+  let availableBatches = $state<WpBatch[]>([])
+  let selectedBatchIds = $state<number[]>([])
+  let batchesLoading = $state(false)
+  function toggleBatch(id: number) {
+    selectedBatchIds = selectedBatchIds.includes(id)
+      ? selectedBatchIds.filter((b) => b !== id)
+      : [...selectedBatchIds, id]
+  }
+
   let created = $state<SupplierAccessCreated | null>(null)
   let copied = $state<string | null>(null)
 
@@ -37,16 +48,30 @@
   }
   onMount(refresh)
 
-  function openCreate() {
+  async function openCreate() {
     note = ''; ttlHours = 24 * 7; handover = 'password'
+    selectedBatchIds = []
     createOpen = true
+    batchesLoading = true
+    try {
+      availableBatches = (await wpBatches.list({ limit: 15 })).items
+    } catch {
+      availableBatches = []
+    } finally {
+      batchesLoading = false
+    }
   }
 
   async function create(e: SubmitEvent) {
     e.preventDefault()
     busy = true
     try {
-      created = await supplierAccess.create({ note: note || undefined, ttl_hours: ttlHours, handover })
+      created = await supplierAccess.create({
+        note: note || undefined,
+        ttl_hours: ttlHours,
+        handover,
+        batch_ids: selectedBatchIds.length ? selectedBatchIds : undefined,
+      })
       createOpen = false
       await refresh()
     } catch (e) {
@@ -185,6 +210,40 @@
           </label>
         </div>
       </div>
+
+      <!-- Батчи, к которым сразу открыть доступ поставщику -->
+      <div>
+        <span class="block text-sm font-medium text-slate-700">Открыть доступ к батчам</span>
+        <p class="mt-0.5 text-xs text-slate-400">
+          Необязательно. Поставщик сразу увидит результаты выбранных файлов при входе. Показаны 15 последних.
+        </p>
+        {#if batchesLoading}
+          <div class="mt-2 text-xs text-slate-400">Загрузка…</div>
+        {:else if availableBatches.length === 0}
+          <div class="mt-2 text-xs text-slate-400">Батчей пока нет.</div>
+        {:else}
+          <div class="mt-2 max-h-44 space-y-1 overflow-auto rounded-md border border-slate-200 p-1.5">
+            {#each availableBatches as b}
+              {@const sel = selectedBatchIds.includes(b.id)}
+              <button type="button" onclick={() => toggleBatch(b.id)}
+                      class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left {sel ? 'bg-brand-50 ring-1 ring-brand-300' : 'hover:bg-slate-50'}">
+                <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded border {sel ? 'border-brand-500 bg-brand-500 text-white' : 'border-slate-300'}">
+                  {#if sel}<Check size={11} />{/if}
+                </span>
+                <span class="min-w-0 flex-1 truncate text-sm">
+                  <span class="font-medium text-slate-800">{b.name}</span>
+                  {#if b.tag}<span class="ml-1 text-[11px] text-slate-400">#{b.tag}</span>{/if}
+                </span>
+                <span class="shrink-0 text-[11px] text-slate-400">{b.valid_count}/{b.total_credentials}</span>
+              </button>
+            {/each}
+          </div>
+          {#if selectedBatchIds.length}
+            <p class="mt-1 text-xs text-brand-600">Выбрано: <b>{selectedBatchIds.length}</b> — откроются поставщику сразу.</p>
+          {/if}
+        {/if}
+      </div>
+
       <div class="flex justify-end gap-2 pt-2">
         <button type="button" onclick={() => (createOpen = false)} class="rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50">Отмена</button>
         <button type="submit" disabled={busy} class="rounded-md bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700 disabled:bg-slate-300">
@@ -230,6 +289,12 @@
             <code class="flex-1 break-all rounded bg-slate-100 px-2 py-1 text-sm">{created.magic_url}</code>
             <button onclick={() => copy(created!.magic_url ?? '', 'm')} class="shrink-0 text-xs text-brand-600 hover:underline">{copied === 'm' ? 'ок' : 'копировать'}</button>
           </div>
+        </div>
+      {/if}
+
+      {#if created.granted_batches > 0}
+        <div class="rounded-md bg-brand-50 px-3 py-2 text-sm text-brand-700">
+          Открыт доступ к <b>{created.granted_batches}</b> батч(ам) — поставщик увидит их сразу после входа.
         </div>
       {/if}
 

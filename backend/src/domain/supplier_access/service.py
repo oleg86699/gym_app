@@ -13,13 +13,13 @@ import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from core.crypto import encrypt_password
 from core.security import hash_password
-from infrastructure.db.models import AdminRole, AdminUser
+from infrastructure.db.models import AdminRole, AdminUser, WpImportBatch
 
 DEFAULT_TTL_HOURS = 24 * 7          # 7 дней
 MAX_TTL_HOURS = 24 * 90            # 90 дней
@@ -40,6 +40,7 @@ class CreatedSupplierAccess:
     # plaintext, показываются ОДИН раз:
     password: str | None        # режим "password"
     login_token: str | None     # режим "link" (caller строит URL)
+    granted_batches: int = 0    # сколько батчей открыли поставщику сразу
 
 
 async def _supplier_role(session: AsyncSession) -> AdminRole:
@@ -70,8 +71,14 @@ async def create_supplier_access(
     ttl_hours: int = DEFAULT_TTL_HOURS,
     note: str | None = None,
     handover: str = "password",
+    batch_ids: list[int] | None = None,
 ) -> CreatedSupplierAccess:
-    """Создать временного поставщика. handover ∈ {"password","link"}."""
+    """Создать временного поставщика. handover ∈ {"password","link"}.
+
+    batch_ids — батчи, которые сразу открыть поставщику: переназначаем их
+    created_by_user_id на нового поставщика (портал скоупит батчи по владельцу).
+    super_admin, создающий доступ, всё равно видит все батчи — ничего не теряет.
+    """
     if handover not in ("password", "link"):
         raise SupplierAccessError("handover должен быть 'password' или 'link'")
     ttl_hours = max(1, min(int(ttl_hours), MAX_TTL_HOURS))
@@ -108,8 +115,21 @@ async def create_supplier_access(
     session.add(user)
     await session.commit()
     await session.refresh(user, attribute_names=["id", "username", "expires_at"])
+
+    # Открыть доступ к выбранным батчам: переназначить владельца на поставщика.
+    granted = 0
+    if batch_ids:
+        res = await session.execute(
+            update(WpImportBatch)
+            .where(WpImportBatch.id.in_(batch_ids), WpImportBatch.deleted_at.is_(None))
+            .values(created_by_user_id=user.id)
+        )
+        granted = int(res.rowcount or 0)
+        await session.commit()
+
     return CreatedSupplierAccess(
-        user=user, password=password_plain, login_token=login_token_plain)
+        user=user, password=password_plain, login_token=login_token_plain,
+        granted_batches=granted)
 
 
 async def list_supplier_accesses(session: AsyncSession) -> list[AdminUser]:

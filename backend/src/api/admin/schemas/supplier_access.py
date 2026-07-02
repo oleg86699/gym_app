@@ -12,6 +12,9 @@ class CreateSupplierAccessRequest(BaseModel):
     ttl_hours: int = Field(default=24 * 7, ge=1, le=24 * 90)
     # Способ передачи доступа поставщику.
     handover: str = Field(default="password", pattern="^(password|link)$")
+    # Батчи, к которым сразу открыть доступ поставщику (переназначаем владельца).
+    # null/[] → без предоткрытых батчей (поставщик грузит свои).
+    batch_ids: list[int] | None = None
 
 
 class SupplierAccessCreatedResponse(BaseModel):
@@ -25,6 +28,7 @@ class SupplierAccessCreatedResponse(BaseModel):
     password: str | None = None     # handover="password"
     magic_url: str | None = None    # handover="link"
     login_url: str                  # куда заходить (страница логина)
+    granted_batches: int = 0        # сколько батчей открыто поставщику сразу
 
 
 class SupplierAccessItem(BaseModel):
