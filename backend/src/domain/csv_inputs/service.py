@@ -22,7 +22,8 @@ def _norm_header(h: str | None) -> str:
 
 
 def _rows_from_csv(content: bytes) -> list[dict]:
-    text = content.decode("utf-8-sig", errors="replace")
+    from core.text_decode import decode_text
+    text = decode_text(content)
     reader = csv.reader(io.StringIO(text))
     rows = list(reader)
     if not rows:
@@ -69,7 +70,8 @@ def _rows_generic(content: bytes, filename: str) -> list[list[str]]:
     """Сырые строки (включая заголовок) из csv/xlsx как list[list[str]]."""
     fn = (filename or "").lower()
     if fn.endswith(".csv"):
-        text = content.decode("utf-8-sig", errors="replace")
+        from core.text_decode import decode_text
+        text = decode_text(content)
         return [[(c or "") for c in row] for row in csv.reader(io.StringIO(text))]
     if fn.endswith((".xlsx", ".xlsm")):
         from openpyxl import load_workbook

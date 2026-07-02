@@ -52,7 +52,8 @@ def _parse_text_file(raw: bytes) -> tuple[str, str]:
     - title: содержимое первого <title>...</title> (без тегов)
     - body: всё после </title> (или весь контент, если title нет)
     """
-    text_content = raw.decode("utf-8", errors="replace").strip()
+    from core.text_decode import decode_text
+    text_content = decode_text(raw).strip()
     m = _TITLE_RE.search(text_content)
     if not m:
         return ("", text_content)
