@@ -207,6 +207,7 @@ _EDIT_POST_TEMPLATE = """<?xml version="1.0"?>
     <param><value><struct>
       <member><name>post_title</name><value><string>{title}</string></value></member>
       <member><name>post_content</name><value><string>{content}</string></value></member>
+      {extra_members}
     </struct></value></param>
   </params>
 </methodCall>"""
@@ -223,10 +224,14 @@ _DELETE_POST_TEMPLATE = """<?xml version="1.0"?>
 </methodCall>"""
 
 
-def _build_edit_post_xml(login, password, post_id, title, content) -> bytes:
+def _build_edit_post_xml(login, password, post_id, title, content, slug=None) -> bytes:
+    # slug → post_name (меняет permalink). Пустой slug — не трогаем URL поста.
+    extra = (f"<member><name>post_name</name><value><string>{escape(slug)}</string>"
+             f"</value></member>") if slug else ""
     return _EDIT_POST_TEMPLATE.format(
         login=escape(login), password=escape(password), post_id=int(post_id),
-        title=escape(title or ""), content=escape(content)).encode("utf-8")
+        title=escape(title or ""), content=escape(content),
+        extra_members=extra).encode("utf-8")
 
 
 def _build_delete_post_xml(login, password, post_id) -> bytes:
@@ -901,11 +906,12 @@ class XmlRpcPoster:
         kind, msg = _parse_simple_response(resp.text)
         return PostOutcome(error=kind, error_message=msg, working_xmlrpc_url=url)
 
-    async def edit_post(self, site, login, password, post_id, title, content) -> PostOutcome:
-        """Перезалить контент в существующий пост (wp.editPost)."""
+    async def edit_post(self, site, login, password, post_id, title, content,
+                        slug=None) -> PostOutcome:
+        """Перезалить контент в существующий пост (wp.editPost). slug → post_name."""
         return await self._edit_or_delete(
             site, login, password,
-            _build_edit_post_xml(login, password, post_id, title, content))
+            _build_edit_post_xml(login, password, post_id, title, content, slug=slug))
 
     async def delete_post(self, site, login, password, post_id) -> PostOutcome:
         """Удалить пост (wp.deletePost)."""

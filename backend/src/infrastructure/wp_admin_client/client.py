@@ -1567,17 +1567,22 @@ class WpAdminClient:
 
     async def update_post_via_rest(
         self, site: "WpSite", post_id: int, title: str, content: str,
+        slug: str | None = None,
     ) -> PostViaAdminOutcome:
-        """Перезалить контент в пост через REST (нужна admin-сессия + nonce)."""
+        """Перезалить контент в пост через REST (нужна admin-сессия + nonce).
+        slug (post_name) — если задан, меняет permalink; ответ .link уже новый."""
         base = self._site_base_url(site)
         nonce = await self._get_rest_nonce(base)
         if not nonce:
             return PostViaAdminOutcome(error=AdminPostKind.NOT_LOGGED_IN,
                                        error_message="no REST nonce")
+        payload: dict = {"title": title or "", "content": content}
+        if slug:
+            payload["slug"] = slug
         try:
             resp = await self._client.post(
                 f"{base}/wp-json/wp/v2/posts/{post_id}",
-                json={"title": title or "", "content": content},
+                json=payload,
                 headers={"X-WP-Nonce": nonce, "Content-Type": "application/json"},
                 timeout=self._timeout, follow_redirects=False)
         except Exception as e:
