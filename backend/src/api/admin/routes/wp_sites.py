@@ -151,6 +151,7 @@ def _site_list_item(site) -> WpSiteListItem:
         credentials_transient=sum(1 for c in cats if c == "transient"),
         credentials_provisioned=sum(1 for c in live_creds if c.provisioned),
         site_can_xmlrpc=_agg_channel(live_creds, "can_xmlrpc"),
+        site_can_post_via_xmlrpc=_agg_channel(live_creds, "can_post_via_xmlrpc"),
         site_can_admin=_agg_channel(live_creds, "can_admin_login"),
         last_credential_check_at=last_check,
         total_uses=total_uses,

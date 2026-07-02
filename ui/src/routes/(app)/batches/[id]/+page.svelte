@@ -742,13 +742,21 @@
                         class="rounded-full px-2 py-0.5 text-[11px] font-medium uppercase {s.cls}">{s.label}</span>
                 </td>
                 <td class="px-3 py-2 text-center">
-                  <!-- XML-RPC + admin channel indicators. ✓=works, ✕=doesn't, —=not checked -->
+                  <!-- XML-RPC + admin channel indicators. ✓=логин работает, ⚠=эндпоинт жив но логин не прошёл, ✕=отключён, —=не проверяли -->
                   <div class="flex items-center justify-center gap-1.5 text-[11px]">
                     <span class="inline-flex items-center gap-0.5"
-                          title="XML-RPC channel: {c.can_xmlrpc === true ? 'works' : c.can_xmlrpc === false ? 'disabled / not working' : 'not checked yet'}">
+                          title={c.can_post_via_xmlrpc === true
+                            ? 'XML-RPC: логин работает — можно постить'
+                            : c.can_xmlrpc === true
+                              ? 'XML-RPC: эндпоинт жив, но логин не прошёл (неверные креды)'
+                              : c.can_xmlrpc === false
+                                ? 'XML-RPC: отключён / недоступен'
+                                : 'XML-RPC: ещё не проверяли'}>
                       <span class="text-slate-400">RPC</span>
-                      {#if c.can_xmlrpc === true}
+                      {#if c.can_post_via_xmlrpc === true}
                         <span class="text-emerald-600">✓</span>
+                      {:else if c.can_xmlrpc === true}
+                        <span class="text-amber-500">⚠</span>
                       {:else if c.can_xmlrpc === false}
                         <span class="text-red-500">✕</span>
                       {:else}

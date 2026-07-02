@@ -960,9 +960,16 @@
                 <!-- Channel matrix агрегат по cred сайта: RPC · Admin -->
                 <div class="flex items-center justify-center gap-1.5 text-[11px]">
                   <span class="inline-flex items-center gap-0.5"
-                        title="XML-RPC: {site.site_can_xmlrpc === true ? 'работает' : site.site_can_xmlrpc === false ? 'не работает' : 'не проверяли'}">
+                        title={site.site_can_post_via_xmlrpc === true
+                          ? 'XML-RPC: логин работает — можно постить'
+                          : site.site_can_xmlrpc === true
+                            ? 'XML-RPC: эндпоинт жив, но логин не прошёл'
+                            : site.site_can_xmlrpc === false
+                              ? 'XML-RPC: отключён / недоступен'
+                              : 'XML-RPC: ещё не проверяли'}>
                     <span class="text-slate-400">RPC</span>
-                    {#if site.site_can_xmlrpc === true}<span class="text-emerald-600">✓</span>
+                    {#if site.site_can_post_via_xmlrpc === true}<span class="text-emerald-600">✓</span>
+                    {:else if site.site_can_xmlrpc === true}<span class="text-amber-500">⚠</span>
                     {:else if site.site_can_xmlrpc === false}<span class="text-red-500">✕</span>
                     {:else}<span class="text-slate-300">—</span>{/if}
                   </span>
@@ -1152,9 +1159,16 @@
                               <!-- Channel matrix: XML-RPC + admin form-login -->
                               <div class="flex items-center justify-center gap-1.5 text-[11px]">
                                 <span class="inline-flex items-center gap-0.5"
-                                      title="XML-RPC: {c.can_xmlrpc === true ? 'работает' : c.can_xmlrpc === false ? 'отключён / не работает' : 'не проверяли'}">
+                                      title={c.can_post_via_xmlrpc === true
+                                        ? 'XML-RPC: логин работает — можно постить'
+                                        : c.can_xmlrpc === true
+                                          ? 'XML-RPC: эндпоинт жив, но логин не прошёл (неверные креды)'
+                                          : c.can_xmlrpc === false
+                                            ? 'XML-RPC: отключён / недоступен'
+                                            : 'XML-RPC: ещё не проверяли'}>
                                   <span class="text-slate-400">RPC</span>
-                                  {#if c.can_xmlrpc === true}<span class="text-emerald-600">✓</span>
+                                  {#if c.can_post_via_xmlrpc === true}<span class="text-emerald-600">✓</span>
+                                  {:else if c.can_xmlrpc === true}<span class="text-amber-500">⚠</span>
                                   {:else if c.can_xmlrpc === false}<span class="text-red-500">✕</span>
                                   {:else}<span class="text-slate-300">—</span>{/if}
                                 </span>

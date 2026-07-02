@@ -22,7 +22,8 @@ class WpCredentialResponse(BaseModel):
     is_valid: bool
     last_validation_kind: str | None = None
     last_error_message: str | None = None
-    can_xmlrpc: bool | None = None
+    can_xmlrpc: bool | None = None          # xmlrpc-эндпоинт жив
+    can_post_via_xmlrpc: bool | None = None  # xmlrpc-ЛОГИН работает (можно постить)
     can_admin_login: bool | None = None
     can_create_users: bool | None = None
     admin_role: str | None = None
@@ -105,7 +106,8 @@ class WpSiteListItem(WpSiteResponse):
     # Channel-флаги (агрегат по cred сайта): работает ли XML-RPC / admin login.
     # True если хотя бы один cred подтвердил канал; False если хотя бы один
     # явно опроверг и никто не подтвердил; None — не проверяли.
-    site_can_xmlrpc: bool | None = None
+    site_can_xmlrpc: bool | None = None          # xmlrpc-эндпоинт жив (не = логин работает)
+    site_can_post_via_xmlrpc: bool | None = None  # xmlrpc-ЛОГИН работает (можно постить)
     site_can_admin: bool | None = None
     # max(credentials.last_validated_at) — когда сайт последний раз «трогали»
     last_credential_check_at: datetime | None = None

@@ -108,6 +108,7 @@ export interface WpCredential {
   last_validation_kind?: string | null
   last_error_message?: string | null
   can_xmlrpc?: boolean | null
+  can_post_via_xmlrpc?: boolean | null
   can_admin_login?: boolean | null
   can_create_users?: boolean | null
   admin_role?: string | null
@@ -151,6 +152,7 @@ export interface WpSiteListItem extends WpSite {
   credentials_transient: number
   credentials_provisioned?: number
   site_can_xmlrpc?: boolean | null
+  site_can_post_via_xmlrpc?: boolean | null
   site_can_admin?: boolean | null
   last_credential_check_at?: string | null
   total_uses: number
