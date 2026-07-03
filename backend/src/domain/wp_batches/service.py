@@ -816,6 +816,7 @@ async def run_batch_validation(
     level: str = "full",  # игнорируется — форсится в full внутри (см. ниже)
     provision_after: bool = False,
     provision_role: str = "author",
+    skip_queue_gate: bool = False,  # True → минуя лимит очереди (поднят диспетчером)
 ) -> dict:
     """
     Главный entry-point для TaskIQ task.
@@ -841,8 +842,40 @@ async def run_batch_validation(
         batch = await get_batch(s, batch_id)
         if batch is None:
             return {"ok": False, "error": "batch not found"}
-        if batch.status == WpBatchStatus.VALIDATING.value:
+        # skip_queue_gate → диспетчер уже заклеймил слот (выставил validating),
+        # этот таск и есть запуск; иначе validating = чужой активный прогон.
+        if batch.status == WpBatchStatus.VALIDATING.value and not skip_queue_gate:
             return {"ok": False, "error": "already running"}
+
+        # Лимит одновременных валидаций: если все слоты заняты — в очередь
+        # (status='queued' + сохраняем параметры). Диспетчер dispatch_queued_batches
+        # (cron) поднимет по мере освобождения. Так загрузка кучи файлов разом не
+        # плодит сотни потоков/браузеров. skip_queue_gate — батч уже поднят
+        # диспетчером, повторно не гейтим.
+        if not skip_queue_gate:
+            from domain.app_settings.service import get_app_settings
+            _cfg = await get_app_settings(s)
+            _limit = int(getattr(_cfg, "max_concurrent_batch_validations", 3) or 3)
+            _active = int(await s.scalar(
+                select(func.count()).select_from(WpImportBatch).where(
+                    WpImportBatch.status == WpBatchStatus.VALIDATING.value,
+                    WpImportBatch.id != batch_id,
+                    WpImportBatch.deleted_at.is_(None),
+                )) or 0)
+            if _active >= _limit:
+                await s.execute(
+                    update(WpImportBatch).where(WpImportBatch.id == batch_id).values(
+                        status=WpBatchStatus.QUEUED.value,
+                        pause_requested=False,
+                        queued_validation_params={
+                            "scope": scope, "provision_after": bool(provision_after),
+                            "provision_role": provision_role, "actor_id": actor_id,
+                            "concurrency": concurrency, "detect_lang": detect_lang,
+                        },
+                    ))
+                await s.commit()
+                log.info("validate.queued", batch_id=batch_id, active=_active, limit=_limit)
+                return {"ok": True, "queued": True, "active": _active, "limit": _limit}
 
         # Прокси-стратегия: явный proxy_id → sticky (все креды через него,
         # back-compat). Иначе → ПУЛ active+unlocked, ротация по кредам + ретрай
@@ -870,6 +903,7 @@ async def run_batch_validation(
                 validation_started_at=datetime.now(UTC),
                 validation_finished_at=None,
                 pause_requested=False,
+                queued_validation_params=None,  # слот занят — очередь больше не нужна
                 valid_count=0,
                 invalid_count=0,
                 transient_count=0,

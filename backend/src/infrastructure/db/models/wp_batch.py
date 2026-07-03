@@ -35,6 +35,7 @@ from infrastructure.db.base import Base, SoftDeletableMixin
 
 class WpBatchStatus(StrEnum):
     UPLOADED = "uploaded"      # только что загружен, ещё не валидировали
+    QUEUED = "queued"          # ждёт слота валидации (лимит одновременных достигнут)
     VALIDATING = "validating"  # сейчас идёт проверка
     PAUSED = "paused"          # пользователь поставил на паузу
     DONE = "done"              # проверка завершена (или была остановлена)
@@ -59,6 +60,10 @@ class WpImportBatch(Base, SoftDeletableMixin):
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default=WpBatchStatus.UPLOADED.value
     )
+    # Параметры отложенной валидации (для status='queued'): {scope, provision_after,
+    # provision_role, actor_id, concurrency, detect_lang}. Диспетчер поднимает
+    # батч ровно с ними. NULL — не в очереди.
+    queued_validation_params: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     # Денормализованные счётчики (обновляются на import + validate)
     total_credentials: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

@@ -282,7 +282,7 @@ export interface DashboardData {
 
 // ─── WP Import Batches ───────────────────────────────────────────────
 
-export type WpBatchStatus = 'uploaded' | 'validating' | 'paused' | 'done'
+export type WpBatchStatus = 'uploaded' | 'queued' | 'validating' | 'paused' | 'done'
 
 export interface WpBatch {
   id: number
@@ -802,6 +802,7 @@ export interface AppSettings {
   posting_concurrency_floor: number
   site_disable_threshold: number
   site_disable_threshold_cf: number
+  max_concurrent_batch_validations: number
   default_publish_from: string | null  // ISO date "YYYY-MM-DD"
   default_publish_to: string | null
   limits: {
@@ -819,6 +820,8 @@ export interface AppSettings {
     max_site_disable_threshold: number
     min_site_disable_threshold_cf: number
     max_site_disable_threshold_cf: number
+    min_max_concurrent_batch_validations: number
+    max_max_concurrent_batch_validations: number
   }
 }
 

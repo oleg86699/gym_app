@@ -11,6 +11,7 @@ from domain.app_settings.service import (
     MAX_CONCURRENCY,
     MAX_CONCURRENCY_FLOOR,
     MAX_GLOBAL_POSTING_CONCURRENCY,
+    MAX_MAX_CONCURRENT_BATCH_VALIDATIONS,
     MAX_SITE_DISABLE_THRESHOLD,
     MAX_SITE_DISABLE_THRESHOLD_CF,
     MAX_TIMEOUT_SECONDS,
@@ -18,6 +19,7 @@ from domain.app_settings.service import (
     MIN_CONCURRENCY,
     MIN_CONCURRENCY_FLOOR,
     MIN_GLOBAL_POSTING_CONCURRENCY,
+    MIN_MAX_CONCURRENT_BATCH_VALIDATIONS,
     MIN_SITE_DISABLE_THRESHOLD,
     MIN_SITE_DISABLE_THRESHOLD_CF,
     MIN_TIMEOUT_SECONDS,
@@ -34,6 +36,7 @@ class AppSettingsResponse(BaseModel):
     posting_concurrency_floor: int
     site_disable_threshold: int
     site_disable_threshold_cf: int
+    max_concurrent_batch_validations: int
     default_publish_from: date | None
     default_publish_to: date | None
     # Удобно для UI чтобы рендерить ограничения без хардкода
@@ -53,6 +56,8 @@ class AppSettingsResponse(BaseModel):
             "max_site_disable_threshold": MAX_SITE_DISABLE_THRESHOLD,
             "min_site_disable_threshold_cf": MIN_SITE_DISABLE_THRESHOLD_CF,
             "max_site_disable_threshold_cf": MAX_SITE_DISABLE_THRESHOLD_CF,
+            "min_max_concurrent_batch_validations": MIN_MAX_CONCURRENT_BATCH_VALIDATIONS,
+            "max_max_concurrent_batch_validations": MAX_MAX_CONCURRENT_BATCH_VALIDATIONS,
         }
     )
 
@@ -85,6 +90,10 @@ class UpdateAppSettingsRequest(BaseModel):
     )
     site_disable_threshold_cf: int | None = Field(
         default=None, ge=MIN_SITE_DISABLE_THRESHOLD_CF, le=MAX_SITE_DISABLE_THRESHOLD_CF
+    )
+    max_concurrent_batch_validations: int | None = Field(
+        default=None, ge=MIN_MAX_CONCURRENT_BATCH_VALIDATIONS,
+        le=MAX_MAX_CONCURRENT_BATCH_VALIDATIONS
     )
     # Внимание: чтобы отличить "не передали поле" от "передали null", используем
     # model_fields_set в роуте.

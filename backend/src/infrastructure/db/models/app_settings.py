@@ -65,6 +65,12 @@ class AppSettings(Base, TimestampedMixin):
     site_disable_threshold_cf: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="8"
     )
+    # Сколько батчей валидируется ОДНОВРЕМЕННО. Остальные ждут в статусе
+    # 'queued', диспетчер поднимает их по мере освобождения слотов — чтобы
+    # загрузка кучи файлов разом не плодила сотни потоков/браузеров.
+    max_concurrent_batch_validations: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="3"
+    )
 
     # Окно публикации: каждому посту воркер ставит случайную дату в диапазоне
     # [publish_from, publish_to]. Если оба NULL — все посты публикуются текущим

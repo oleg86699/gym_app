@@ -19,6 +19,7 @@
   let formFloor = $state(5)
   let formSiteDisable = $state(25)
   let formSiteDisableCf = $state(8)
+  let formMaxConcurrentBatches = $state(3)
   let formPublishFrom = $state('')   // "" = окно не задано
   let formPublishTo = $state('')
 
@@ -37,6 +38,7 @@
         formFloor !== cfg.posting_concurrency_floor ||
         formSiteDisable !== cfg.site_disable_threshold ||
         formSiteDisableCf !== cfg.site_disable_threshold_cf ||
+        formMaxConcurrentBatches !== cfg.max_concurrent_batch_validations ||
         formPublishFrom !== (cfg.default_publish_from ?? '') ||
         formPublishTo !== (cfg.default_publish_to ?? '')),
   )
@@ -66,6 +68,7 @@
       formFloor = cfg.posting_concurrency_floor
       formSiteDisable = cfg.site_disable_threshold
       formSiteDisableCf = cfg.site_disable_threshold_cf
+      formMaxConcurrentBatches = cfg.max_concurrent_batch_validations
       formPublishFrom = cfg.default_publish_from ?? ''
       formPublishTo = cfg.default_publish_to ?? ''
     } catch (e) {
@@ -90,6 +93,7 @@
         posting_concurrency_floor: formFloor,
         site_disable_threshold: formSiteDisable,
         site_disable_threshold_cf: formSiteDisableCf,
+        max_concurrent_batch_validations: formMaxConcurrentBatches,
         default_publish_from: formPublishFrom || null,
         default_publish_to: formPublishTo || null,
       })
@@ -253,6 +257,24 @@
           <p class="mt-2 text-[11px] text-slate-400">
             CF отдельно агрессивнее: сайт под Cloudflare почти не «оживает» сам, а каждый
             headful-фейл ~30 сек. Рекоменд.: общий <b>25</b>, CF <b>8</b>.
+          </p>
+        </div>
+
+        <div class="rounded-md border border-slate-200 p-4">
+          <h3 class="text-sm font-semibold text-slate-800">Валидация батчей</h3>
+          <div class="mt-3 max-w-xs">
+            <label for="cfg_mcbv" class="block text-xs font-medium uppercase tracking-wider text-slate-500">
+              Одновременных батчей <span class="text-slate-400 normal-case">({cfg.limits.min_max_concurrent_batch_validations}–{cfg.limits.max_max_concurrent_batch_validations})</span>
+            </label>
+            <input id="cfg_mcbv" type="number" bind:value={formMaxConcurrentBatches}
+                   min={cfg.limits.min_max_concurrent_batch_validations} max={cfg.limits.max_max_concurrent_batch_validations}
+                   disabled={!canEdit}
+                   class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm disabled:bg-slate-100" />
+          </div>
+          <p class="mt-2 text-[11px] text-slate-400">
+            Сколько батчей валидируется <b>одновременно</b>. Остальные ждут в статусе
+            <b>«в очереди»</b> и поднимаются по мере освобождения слотов — чтобы загрузка
+            кучи файлов разом не плодила сотни потоков/браузеров. Рекоменд.: <b>3</b>.
           </p>
         </div>
 

@@ -19,7 +19,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import structlog
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 
 from core.config import settings
 from core.db import WriteSession
@@ -287,6 +287,62 @@ async def recover_stalled_batches() -> dict:
     return {"ok": True, "recovered": len(stale_ids)}
 
 
+@broker.task(
+    task_name="batches.dispatch_queued_batches",
+    schedule=[{"cron": "* * * * *"}],
+)
+async def dispatch_queued_batches() -> dict:
+    """Поднять батчи из очереди (status='queued') по мере освобождения слотов.
+    Лимит одновременных валидаций = app_settings.max_concurrent_batch_validations.
+    Claim'им слот (сразу validating), чтобы следующий тик не поднял повторно;
+    таск идёт со skip_queue_gate и восстанавливает сохранённые параметры."""
+    from datetime import datetime, UTC
+
+    from domain.app_settings.service import get_app_settings
+    from infrastructure.db.models import WpBatchStatus, WpImportBatch
+
+    async with WriteSession() as s:
+        cfg = await get_app_settings(s)
+        limit = int(getattr(cfg, "max_concurrent_batch_validations", 3) or 3)
+        active = int(await s.scalar(
+            select(func.count()).select_from(WpImportBatch).where(
+                WpImportBatch.status == WpBatchStatus.VALIDATING.value,
+                WpImportBatch.deleted_at.is_(None))) or 0)
+        slots = limit - active
+        if slots <= 0:
+            return {"ok": True, "promoted": 0, "active": active}
+        rows = (await s.execute(
+            select(WpImportBatch).where(
+                WpImportBatch.status == WpBatchStatus.QUEUED.value,
+                WpImportBatch.queued_validation_params.isnot(None),
+                WpImportBatch.deleted_at.is_(None),
+            ).order_by(WpImportBatch.id).limit(slots))).scalars().all()
+        promoted: list[tuple[int, dict]] = []
+        now = datetime.now(UTC)
+        for b in rows:
+            params = dict(b.queued_validation_params or {})
+            b.status = WpBatchStatus.VALIDATING.value   # claim слот
+            b.validation_started_at = now               # чтобы recover не тронул
+            promoted.append((b.id, params))
+        await s.commit()
+
+    for bid, params in promoted:
+        await validate_batch_task.kiq(
+            batch_id=bid,
+            scope=params.get("scope", "all"),
+            concurrency=params.get("concurrency") or settings.DEFAULT_VALIDATION_CONCURRENCY,
+            detect_lang=params.get("detect_lang", True),
+            actor_id=params.get("actor_id"),
+            level="full",
+            provision_after=bool(params.get("provision_after", False)),
+            provision_role=params.get("provision_role", "author"),
+            skip_queue_gate=True,
+        )
+    if promoted:
+        log.info("batches.queue_dispatched", ids=[p[0] for p in promoted], count=len(promoted))
+    return {"ok": True, "promoted": len(promoted), "active": active}
+
+
 @broker.task(task_name="content.generate_campaign")
 async def generate_campaign_task(run_id: int) -> dict:
     """Генерация csv_campaign-рана (отдельная полоса, не блокирует постинг)."""
@@ -335,6 +391,7 @@ async def validate_batch_task(
     level: str = "full",
     provision_after: bool = False,
     provision_role: str = "author",
+    skip_queue_gate: bool = False,
 ) -> dict:
     """On-demand триггер валидации одного батча из UI."""
     from domain.wp_batches.service import run_batch_validation
@@ -349,6 +406,7 @@ async def validate_batch_task(
         level=level,
         provision_after=provision_after,
         provision_role=provision_role,
+        skip_queue_gate=skip_queue_gate,
     )
 
 

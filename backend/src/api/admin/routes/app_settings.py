@@ -52,6 +52,7 @@ async def update_settings(
             posting_concurrency_floor=payload.posting_concurrency_floor,
             site_disable_threshold=payload.site_disable_threshold,
             site_disable_threshold_cf=payload.site_disable_threshold_cf,
+            max_concurrent_batch_validations=payload.max_concurrent_batch_validations,
             default_publish_from=pub_from,
             default_publish_to=pub_to,
         )
@@ -89,6 +90,7 @@ async def update_settings(
             "posting_concurrency_floor": row.posting_concurrency_floor,
             "site_disable_threshold": row.site_disable_threshold,
             "site_disable_threshold_cf": row.site_disable_threshold_cf,
+            "max_concurrent_batch_validations": row.max_concurrent_batch_validations,
             "default_publish_from": str(row.default_publish_from) if row.default_publish_from else None,
             "default_publish_to": str(row.default_publish_to) if row.default_publish_to else None,
         },

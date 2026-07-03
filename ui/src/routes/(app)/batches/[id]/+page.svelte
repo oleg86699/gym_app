@@ -210,6 +210,7 @@
   function statusBadge(s: WpBatchStatus): string {
     switch (s) {
       case 'uploaded': return 'bg-slate-100 text-slate-600'
+      case 'queued': return 'bg-indigo-100 text-indigo-700'
       case 'validating': return 'bg-brand-100 text-brand-700'
       case 'paused': return 'bg-amber-100 text-amber-700'
       case 'done': return 'bg-emerald-100 text-emerald-700'

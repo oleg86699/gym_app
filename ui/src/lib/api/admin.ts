@@ -568,6 +568,7 @@ export const appSettings = {
     posting_concurrency_floor?: number
     site_disable_threshold?: number
     site_disable_threshold_cf?: number
+    max_concurrent_batch_validations?: number
     default_publish_from?: string | null
     default_publish_to?: string | null
   }) => api.put<AppSettings>('/admin/api/app-settings', payload),
