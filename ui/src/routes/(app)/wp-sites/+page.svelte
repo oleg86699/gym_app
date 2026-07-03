@@ -119,12 +119,18 @@
   function startValidationPolling() {
     if (validationPollTimer) return
     validationPollTimer = setInterval(async () => {
-      await refreshValidationStatus()
-      if (validation && !validation.running) {
-        // финал — обновим саммари и список сайтов, остановим polling
-        await loadSummary()
-        await refreshSites()
-        stopValidationPolling()
+      // try/catch: необработанная ошибка в таймере во время Svelte-flush ломает
+      // реактивность всей страницы (фильтры/таблица «замерзают»).
+      try {
+        await refreshValidationStatus()
+        if (validation && !validation.running) {
+          // финал — обновим саммари и список сайтов, остановим polling
+          await loadSummary()
+          await refresh()
+          stopValidationPolling()
+        }
+      } catch (e) {
+        console.warn('validation poll error', e)
       }
     }, 2000)
   }
