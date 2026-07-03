@@ -18,6 +18,7 @@ from infrastructure.db.models import (
     TextItem,
     TextItemStatus,
     WpCredential,
+    WpImportBatch,
     WpSite,
 )
 
@@ -373,8 +374,15 @@ async def domain_analytics(session: AsyncSession, project_id: int) -> list[dict]
     return [{"target_domain": r[0], "total": int(r[1]), "posted": int(r[2])} for r in rows]
 
 
-async def domain_summary(session: AsyncSession, project_id: int, domain: str) -> dict:
-    """Сводка по одному целевому домену проекта (для страницы домена)."""
+async def domain_summary(
+    session: AsyncSession, project_id: int, domain: str,
+    allowed_tags: list[str] | None = None,
+) -> dict:
+    """Сводка по одному целевому домену проекта (для страницы домена).
+
+    allowed_tags — tag-access RBAC: None = весь пул; иначе пул сужается до сайтов
+    из батчей с этими тегами (столько постов реально сделает ЭТОТ пользователь).
+    Пустой список = нет доступа ни к одному тегу → пул 0."""
     nd = normalize_domain(domain) or domain
     where = (TextItem.project_id == project_id, TextItem.target_domain == nd)
     r = (await session.execute(select(
@@ -394,7 +402,7 @@ async def domain_summary(session: AsyncSession, project_id: int, domain: str) ->
     # уже стоит пост со ссылкой на этот домен (text_items.target_domain + posted).
     # Показывает, на сколько ещё постов хватит уникальных сайтов при max_per_site=1.
     # Тот же предикат «постабельного сайта», что у воркера и project-метрики.
-    postable_cred_exists = exists().where(
+    _cred_conds = [
         WpCredential.site_id == WpSite.id,
         WpCredential.deleted_at.is_(None),
         WpCredential.cred_status == "valid",
@@ -402,7 +410,12 @@ async def domain_summary(session: AsyncSession, project_id: int, domain: str) ->
             WpCredential.can_post_via_xmlrpc.is_(True),
             WpCredential.can_post_via_admin.is_(True),
         ),
-    )
+    ]
+    # tag-access RBAC: сузить пул до батчей с разрешёнными смотрящему тегами.
+    if allowed_tags is not None:
+        _cred_conds.append(WpCredential.import_batch_id.in_(
+            select(WpImportBatch.id).where(WpImportBatch.tag.in_(allowed_tags))))
+    postable_cred_exists = exists().where(*_cred_conds)
     pool_total = int((await session.execute(
         select(func.count(WpSite.id)).where(
             WpSite.deleted_at.is_(None), WpSite.is_active.is_(True), postable_cred_exists)

@@ -465,7 +465,11 @@ async def project_domain_summary(
     if not can_view_project(viewer, project):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot view this project")
     from domain.project_domains import domain_summary
-    return DomainSummaryResponse(**await domain_summary(session, project_id, domain))
+    from domain.wp_sites.service import effective_allowed_tags
+    # Пул под домен считаем в рамках тегов, разрешённых смотрящему (tag-access RBAC).
+    allowed = await effective_allowed_tags(session, viewer)
+    return DomainSummaryResponse(**await domain_summary(
+        session, project_id, domain, allowed_tags=allowed))
 
 
 @router.get("/{project_id}/domains/{domain}/runs", response_model=list[DomainRunRow])
