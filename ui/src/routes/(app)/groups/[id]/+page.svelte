@@ -1,7 +1,9 @@
 <script lang="ts">
-  import { ArrowLeft, X } from 'lucide-svelte'
+  import { ArrowLeft } from 'lucide-svelte'
   import { page } from '$app/state'
   import { onMount } from 'svelte'
+
+  import TagAccessPicker from '$lib/components/TagAccessPicker.svelte'
 
   import {
     groups as groupsApi,
@@ -27,23 +29,9 @@
   // ⊆ этого набора.
   let isSuper = $derived($currentUser?.is_super_admin ?? false)
   let availableTags = $state<string[]>([])
-  let f_tags_restricted = $state(false)
+  let f_tags_restricted = $state(false)   // bind → TagAccessPicker
   let f_allowed_tags = $state<string[]>([])
-  let tagSearch = $state('')
   let savingTags = $state(false)
-  const TAG_RESULTS_CAP = 24
-  let filteredTags = $derived.by(() => {
-    const q = tagSearch.trim().toLowerCase()
-    return q ? availableTags.filter((t) => t.toLowerCase().includes(q)) : availableTags
-  })
-  let tagResultsAll = $derived(filteredTags.filter((t) => !f_allowed_tags.includes(t)))
-  let tagResults = $derived(tagResultsAll.slice(0, TAG_RESULTS_CAP))
-  let tagResultsMore = $derived(Math.max(0, tagResultsAll.length - TAG_RESULTS_CAP))
-  function toggleAllowedTag(tag: string) {
-    f_allowed_tags = f_allowed_tags.includes(tag)
-      ? f_allowed_tags.filter((t) => t !== tag)
-      : [...f_allowed_tags, tag]
-  }
   function allowedTagsEqual(a: string[] | null, b: string[] | null): boolean {
     if (a === null || b === null) return a === b
     if (a.length !== b.length) return false
@@ -320,56 +308,9 @@
             group_admin внутри команды может раздавать своим юзерам только теги из этого набора.
           </p>
 
-          <div class="mt-3 flex items-center gap-2">
-            <button type="button" onclick={() => (f_tags_restricted = false)}
-                    class="rounded-full border px-3 py-1 text-xs font-medium {!f_tags_restricted ? 'border-brand-400 bg-brand-50 text-brand-700' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}">
-              Все теги
-            </button>
-            <button type="button" onclick={() => (f_tags_restricted = true)}
-                    class="rounded-full border px-3 py-1 text-xs font-medium {f_tags_restricted ? 'border-brand-400 bg-brand-50 text-brand-700' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}">
-              Только выбранные
-            </button>
-            {#if !f_tags_restricted}<span class="text-[11px] text-slate-400">сейчас: все теги</span>{/if}
-          </div>
-
-          {#if f_tags_restricted}
-            {#if availableTags.length === 0}
-              <p class="mt-3 text-[11px] text-slate-400">Тегов пока нет — добавь теги батчам.</p>
-            {:else}
-              {#if f_allowed_tags.length}
-                <div class="mt-3 flex flex-wrap items-center gap-1.5">
-                  {#each f_allowed_tags as tag}
-                    <button type="button" onclick={() => toggleAllowedTag(tag)}
-                            class="flex items-center gap-1 rounded-full border border-brand-400 bg-brand-50 px-2.5 py-1 text-[12px] text-brand-700">
-                      {tag} <X size={11} class="inline-block" />
-                    </button>
-                  {/each}
-                  <button type="button" onclick={() => (f_allowed_tags = [])} class="px-1 text-[11px] text-slate-400 hover:text-slate-600">сбросить</button>
-                </div>
-              {/if}
-              <input bind:value={tagSearch} placeholder={`поиск среди ${availableTags.length} тегов…`}
-                     class="mt-2 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
-              <div class="mt-2 flex max-h-32 flex-wrap gap-1.5 overflow-auto">
-                {#each tagResults as tag}
-                  <button type="button" onclick={() => toggleAllowedTag(tag)}
-                          class="rounded-full border border-slate-300 bg-white px-2.5 py-1 text-[12px] text-slate-600 hover:bg-slate-50">
-                    + {tag}
-                  </button>
-                {/each}
-                {#if tagResults.length === 0}
-                  <p class="text-[11px] text-slate-400">{tagSearch.trim() ? 'Ничего не найдено.' : 'Все теги выбраны.'}</p>
-                {/if}
-              </div>
-              {#if tagResultsMore > 0}
-                <p class="mt-1 text-[11px] text-slate-400">…ещё {tagResultsMore} — уточни поиск.</p>
-              {/if}
-              {#if f_allowed_tags.length === 0}
-                <p class="mt-2 text-[11px] text-amber-600">⚠ Пустой список = команда не сможет постить ни по одному тегу.</p>
-              {:else}
-                <p class="mt-1 text-[11px] text-slate-400">Выбрано: <b>{f_allowed_tags.length}</b> тег(ов).</p>
-              {/if}
-            {/if}
-          {/if}
+          <TagAccessPicker availableTags={availableTags}
+                           bind:restricted={f_tags_restricted}
+                           bind:selected={f_allowed_tags} />
         </div>
       </section>
     {/if}

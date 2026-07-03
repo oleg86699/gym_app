@@ -10,6 +10,7 @@
   import { ApiError } from '$lib/api/client'
   import type { GroupListItem, Project } from '$lib/api/types'
   import { showToast } from '$lib/stores/toast'
+  import TagAccessPicker from '$lib/components/TagAccessPicker.svelte'
 
   let items = $state<GroupListItem[]>([])
   let allProjects = $state<Project[]>([])
@@ -30,22 +31,9 @@
   let editBusy = $state(false)
 
   // ─── tag-access RBAC (потолок команды; /groups — super_admin only) ──
-  let editTagsRestricted = $state(false)   // включён ли allowlist
-  let editAllowedTags = $state<string[]>([]) // выбранные теги (когда restricted)
-  let tagSearch = $state('')
-  const TAG_RESULTS_CAP = 24
-  let filteredTags = $derived.by(() => {
-    const q = tagSearch.trim().toLowerCase()
-    return q ? allTags.filter((t) => t.toLowerCase().includes(q)) : allTags
-  })
-  let tagResultsAll = $derived(filteredTags.filter((t) => !editAllowedTags.includes(t)))
-  let tagResults = $derived(tagResultsAll.slice(0, TAG_RESULTS_CAP))
-  let tagResultsMore = $derived(Math.max(0, tagResultsAll.length - TAG_RESULTS_CAP))
-  function toggleAllowedTag(tag: string) {
-    editAllowedTags = editAllowedTags.includes(tag)
-      ? editAllowedTags.filter((t) => t !== tag)
-      : [...editAllowedTags, tag]
-  }
+  // bind → TagAccessPicker
+  let editTagsRestricted = $state(false)
+  let editAllowedTags = $state<string[]>([])
 
   async function refresh() {
     loading = true
@@ -93,7 +81,6 @@
     // tag-access: null → все теги; массив → allowlist включён
     editTagsRestricted = g.allowed_tags !== null
     editAllowedTags = g.allowed_tags ?? []
-    tagSearch = ''
   }
 
   async function saveEdit() {
@@ -346,56 +333,9 @@
         Потолок разрешённых команде тегов (батчей сайтов). По умолчанию — все теги.
         group_admin внутри команды раздаёт своим юзерам только теги из этого набора.
       </p>
-      <div class="mt-2 flex items-center gap-2">
-        <button type="button" onclick={() => (editTagsRestricted = false)}
-                class="rounded-full border px-3 py-1 text-xs font-medium {!editTagsRestricted ? 'border-brand-400 bg-brand-50 text-brand-700' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}">
-          Все теги
-        </button>
-        <button type="button" onclick={() => (editTagsRestricted = true)}
-                class="rounded-full border px-3 py-1 text-xs font-medium {editTagsRestricted ? 'border-brand-400 bg-brand-50 text-brand-700' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}">
-          Только выбранные
-        </button>
-        {#if !editTagsRestricted}<span class="text-[11px] text-slate-400">сейчас: все теги</span>{/if}
-      </div>
-
-      {#if editTagsRestricted}
-        {#if allTags.length === 0}
-          <p class="mt-2 text-[11px] text-slate-400">Тегов пока нет — добавь теги батчам.</p>
-        {:else}
-          {#if editAllowedTags.length}
-            <div class="mt-2 flex flex-wrap items-center gap-1.5">
-              {#each editAllowedTags as tag}
-                <button type="button" onclick={() => toggleAllowedTag(tag)}
-                        class="flex items-center gap-1 rounded-full border border-brand-400 bg-brand-50 px-2.5 py-1 text-[12px] text-brand-700">
-                  {tag} <X size={11} class="inline-block" />
-                </button>
-              {/each}
-              <button type="button" onclick={() => (editAllowedTags = [])} class="px-1 text-[11px] text-slate-400 hover:text-slate-600">сбросить</button>
-            </div>
-          {/if}
-          <input bind:value={tagSearch} placeholder={`поиск среди ${allTags.length} тегов…`}
-                 class="mt-2 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
-          <div class="mt-2 flex max-h-32 flex-wrap gap-1.5 overflow-auto">
-            {#each tagResults as tag}
-              <button type="button" onclick={() => toggleAllowedTag(tag)}
-                      class="rounded-full border border-slate-300 bg-white px-2.5 py-1 text-[12px] text-slate-600 hover:bg-slate-50">
-                + {tag}
-              </button>
-            {/each}
-            {#if tagResults.length === 0}
-              <p class="text-[11px] text-slate-400">{tagSearch.trim() ? 'Ничего не найдено.' : 'Все теги выбраны.'}</p>
-            {/if}
-          </div>
-          {#if tagResultsMore > 0}
-            <p class="mt-1 text-[11px] text-slate-400">…ещё {tagResultsMore} — уточни поиск.</p>
-          {/if}
-          {#if editAllowedTags.length === 0}
-            <p class="mt-2 text-[11px] text-amber-600">⚠ Пустой список = команда не сможет постить ни по одному тегу.</p>
-          {:else}
-            <p class="mt-1 text-[11px] text-slate-400">Выбрано: <b>{editAllowedTags.length}</b> тег(ов).</p>
-          {/if}
-        {/if}
-      {/if}
+      <TagAccessPicker availableTags={allTags}
+                       bind:restricted={editTagsRestricted}
+                       bind:selected={editAllowedTags} />
 
       <div class="mt-6 flex justify-end gap-2">
         <button type="button" onclick={() => (editing = null)}
