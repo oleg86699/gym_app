@@ -322,6 +322,8 @@ export const wpSites = {
   summary: (opts?: { live?: boolean }) =>
     api.get<WpPoolSummary>('/admin/api/wp-sites/summary', opts?.live ? { live: true } : undefined),
   credentialTags: () => api.get<string[]>('/admin/api/wp-sites/credential-tags'),
+  credentialTagsStats: () =>
+    api.get<{ tag: string; sites: number }[]>('/admin/api/wp-sites/credential-tags-stats'),
   get: (id: number, opts?: { include_password?: boolean }) =>
     api.get<WpSiteDetail>(`/admin/api/wp-sites/${id}`, opts as Record<string, boolean | undefined>),
   analytics: (id: number) => api.get<SiteAnalytics>(`/admin/api/wp-sites/${id}/analytics`),

@@ -5,10 +5,12 @@
   // Формат — чекбокс-список (как выбор батчей в модалке поставщика), тег в строке.
   let {
     availableTags = [],
+    tagInfo = {},
     restricted = $bindable(false),
     selected = $bindable([]),
   }: {
     availableTags: string[]
+    tagInfo?: Record<string, string>  // тег → доп.инфа справа (напр. «123 сайтов»)
     restricted: boolean
     selected: string[]
   } = $props()
@@ -54,6 +56,9 @@
             {#if sel}<Check size={11} />{/if}
           </span>
           <span class="min-w-0 flex-1 truncate text-sm font-medium text-slate-800">{tag}</span>
+          {#if tagInfo[tag]}
+            <span class="shrink-0 text-[11px] text-slate-400">{tagInfo[tag]}</span>
+          {/if}
         </button>
       {/each}
       {#if filtered.length === 0}

@@ -807,6 +807,32 @@ async def list_credential_tags(
     return tags
 
 
+async def list_credential_tags_with_stats(
+    session: AsyncSession, *, allowed: list[str] | None = None,
+) -> list[dict]:
+    """Батч-теги + число ПОСТАБЕЛЬНЫХ сайтов под каждым (для пикера доступа —
+    доп.инфа «сколько сайтов даёт тег»). Сайт постабелен = valid cred с
+    can_post_via_xmlrpc|admin. Порядок и allowed-скоуп — как в list_credential_tags."""
+    order = await list_credential_tags(session, allowed=allowed)
+    stat_rows = (await session.execute(
+        select(WpImportBatch.tag, func.count(func.distinct(WpCredential.site_id)))
+        .select_from(WpCredential)
+        .join(WpImportBatch, WpImportBatch.id == WpCredential.import_batch_id)
+        .join(WpSite, WpSite.id == WpCredential.site_id)
+        .where(
+            WpCredential.deleted_at.is_(None),
+            WpCredential.cred_status == "valid",
+            or_(WpCredential.can_post_via_xmlrpc.is_(True),
+                WpCredential.can_post_via_admin.is_(True)),
+            WpSite.deleted_at.is_(None), WpSite.is_active.is_(True),
+            WpImportBatch.tag.isnot(None), WpImportBatch.deleted_at.is_(None),
+        )
+        .group_by(WpImportBatch.tag)
+    )).all()
+    sites_by_tag = {r[0]: int(r[1]) for r in stat_rows}
+    return [{"tag": t, "sites": sites_by_tag.get(t, 0)} for t in order]
+
+
 # ─── Site analytics ───────────────────────────────────────────────────
 
 

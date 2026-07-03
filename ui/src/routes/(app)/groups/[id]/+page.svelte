@@ -29,6 +29,7 @@
   // ⊆ этого набора.
   let isSuper = $derived($currentUser?.is_super_admin ?? false)
   let availableTags = $state<string[]>([])
+  let tagInfo = $state<Record<string, string>>({})  // тег → «N сайт.»
   let f_tags_restricted = $state(false)   // bind → TagAccessPicker
   let f_allowed_tags = $state<string[]>([])
   let savingTags = $state(false)
@@ -91,9 +92,12 @@
     // Теги грузим только super_admin (единственный, кто видит эту секцию).
     if ($currentUser?.is_super_admin) {
       try {
-        availableTags = await wpSitesApi.credentialTags()
+        const stats = await wpSitesApi.credentialTagsStats()
+        availableTags = stats.map((s) => s.tag)
+        tagInfo = Object.fromEntries(stats.map((s) => [s.tag, `${s.sites} сайт.`]))
       } catch {
         availableTags = []
+        tagInfo = {}
       }
     }
   })
@@ -308,7 +312,7 @@
             group_admin внутри команды может раздавать своим юзерам только теги из этого набора.
           </p>
 
-          <TagAccessPicker availableTags={availableTags}
+          <TagAccessPicker availableTags={availableTags} tagInfo={tagInfo}
                            bind:restricted={f_tags_restricted}
                            bind:selected={f_allowed_tags} />
         </div>

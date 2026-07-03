@@ -43,6 +43,7 @@
   // credential-tags, уже сужен бэкендом до потолка текущего юзера-редактора —
   // group_admin физически не увидит теги вне своей группы.
   let availableTags = $state<string[]>([])
+  let tagInfo = $state<Record<string, string>>({})  // тег → «N сайт.»
   let f_tags_restricted = $state(false)   // включён ли allowlist (bind → TagAccessPicker)
   let f_allowed_tags = $state<string[]>([]) // выбранные теги (когда restricted)
 
@@ -132,9 +133,12 @@
     // Доступные теги — уже сужены бэкендом до потолка редактора (group_admin
     // видит только теги своей группы). Отдельный try, чтобы 403 не ронял остальное.
     try {
-      availableTags = await wpSitesApi.credentialTags()
+      const stats = await wpSitesApi.credentialTagsStats()
+      availableTags = stats.map((s) => s.tag)
+      tagInfo = Object.fromEntries(stats.map((s) => [s.tag, `${s.sites} сайт.`]))
     } catch {
       availableTags = []
+      tagInfo = {}
     }
   }
 
@@ -375,7 +379,7 @@
             {/if}
           </p>
 
-          <TagAccessPicker availableTags={availableTags}
+          <TagAccessPicker availableTags={availableTags} tagInfo={tagInfo}
                            bind:restricted={f_tags_restricted}
                            bind:selected={f_allowed_tags} />
         </section>

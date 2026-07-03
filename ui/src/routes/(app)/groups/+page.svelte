@@ -15,6 +15,7 @@
   let items = $state<GroupListItem[]>([])
   let allProjects = $state<Project[]>([])
   let allTags = $state<string[]>([])
+  let tagInfo = $state<Record<string, string>>({})  // тег → «N сайт.»
   let loading = $state(true)
 
   // Create
@@ -51,9 +52,12 @@
     }
     // Теги — отдельным запросом, чтобы ошибка не роняла список групп.
     try {
-      allTags = await wpSitesApi.credentialTags()
+      const stats = await wpSitesApi.credentialTagsStats()
+      allTags = stats.map((s) => s.tag)
+      tagInfo = Object.fromEntries(stats.map((s) => [s.tag, `${s.sites} сайт.`]))
     } catch {
       allTags = []
+      tagInfo = {}
     }
   }
   onMount(refresh)
@@ -333,7 +337,7 @@
         Потолок разрешённых команде тегов (батчей сайтов). По умолчанию — все теги.
         group_admin внутри команды раздаёт своим юзерам только теги из этого набора.
       </p>
-      <TagAccessPicker availableTags={allTags}
+      <TagAccessPicker availableTags={allTags} tagInfo={tagInfo}
                        bind:restricted={editTagsRestricted}
                        bind:selected={editAllowedTags} />
 

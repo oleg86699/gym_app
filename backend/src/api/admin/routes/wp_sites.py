@@ -190,6 +190,21 @@ async def credential_tags_endpoint(
     return await list_credential_tags(session, allowed=allowed)
 
 
+@router.get("/credential-tags-stats")
+async def credential_tags_stats_endpoint(
+    viewer: AdminUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_read),
+) -> list[dict]:
+    """Теги + число постабельных сайтов под каждым (доп.инфа в пикере доступа)."""
+    _check_can_view(viewer)
+    from domain.wp_sites.service import (
+        effective_allowed_tags,
+        list_credential_tags_with_stats,
+    )
+    allowed = await effective_allowed_tags(session, viewer)
+    return await list_credential_tags_with_stats(session, allowed=allowed)
+
+
 # ─── Sites: CRUD ─────────────────────────────────────────────────────
 
 
