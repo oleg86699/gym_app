@@ -856,6 +856,7 @@
     <div>
       <label for="wp_status" class="block text-xs font-medium uppercase tracking-wider text-slate-500">Status</label>
       <select id="wp_status" bind:value={filterStatus}
+              onchange={(e) => { filterStatus = e.currentTarget.value as SiteFilter; refresh() }}
               class="mt-1 rounded-md border border-slate-300 px-3 py-1.5 text-sm">
         <option value="all">all</option>
         <optgroup label="operational">
@@ -882,6 +883,7 @@
     <div>
       <label for="wp_sort" class="block text-xs font-medium uppercase tracking-wider text-slate-500">Sort</label>
       <select id="wp_sort" bind:value={sortBy}
+              onchange={(e) => { sortBy = e.currentTarget.value as typeof sortBy; refresh() }}
               class="mt-1 rounded-md border border-slate-300 px-3 py-1.5 text-sm">
         <option value="recent">recent check</option>
         <option value="alpha">alphabetical</option>
