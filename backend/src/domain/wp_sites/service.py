@@ -95,6 +95,15 @@ async def list_sites(
             WpCredential.cred_status == cred_status,
         )
 
+    def _has_cred_flag(col):
+        # Сайт, у которого есть ≥1 cred с включённым булевым каналом (реальные
+        # флаги из full-валидации, не эвристика). rpc-постинг / admin-логин.
+        return exists().where(
+            WpCredential.site_id == WpSite.id,
+            WpCredential.deleted_at.is_(None),
+            col.is_(True),
+        )
+
     if status == "active":
         base = base.where(WpSite.is_active.is_(True))
     elif status == "auto-disabled":
@@ -113,6 +122,17 @@ async def list_sites(
         base = base.where(_has_cred("invalid"))
     elif status == "cred_transient":
         base = base.where(_has_cred("transient"))
+    # Каналы (реальные булевы флаги) — согласованы с карточкой CHANNELS и с тем,
+    # что воркер реально берёт в пул.
+    elif status == "rpc_postable":
+        # пул постинга — cred постит через XML-RPC
+        base = base.where(_has_cred_flag(WpCredential.can_post_via_xmlrpc))
+    elif status == "admin_capable":
+        # пул ССЫЛОК — cred логинится в wp-admin (candidate_link_sites)
+        base = base.where(_has_cred_flag(WpCredential.can_admin_login))
+    elif status == "admin_postable":
+        # cred умеет постить через admin (Tier 3 / CF-сайты)
+        base = base.where(_has_cred_flag(WpCredential.can_post_via_admin))
     # else "all" — no filter
 
     total = (
@@ -627,19 +647,12 @@ async def pool_summary(session: AsyncSession) -> dict[str, int]:
         )
     ).scalar_one()
 
-    # Cred-разбивка прямо из cred_status — никакого пере-вычисления предикатов.
-    # valid через какой канал: rpc (Tier 1 ok/manual) vs admin (Tier 2 / legacy)
-    valid_rpc_pred = and_(
-        WpCredential.cred_status == "valid",
-        WpCredential.last_validation_kind.in_(("ok", "manual_valid")),
-    )
-    valid_admin_pred = and_(
-        WpCredential.cred_status == "valid",
-        or_(
-            WpCredential.last_validation_kind.is_(None),
-            ~WpCredential.last_validation_kind.in_(("ok", "manual_valid")),
-        ),
-    )
+    # Каналы по РЕАЛЬНЫМ булевым флагам (их надёжно проставляет full-валидация),
+    # а не по эвристике last_validation_kind. admin здесь = настоящий пул ссылок
+    # (can_admin_login) — тот же флаг, что берёт воркер. Раньше эвристика вдвое
+    # занижала admin (показывала «valid, но не через xmlrpc-ok»).
+    valid_rpc_pred = WpCredential.can_post_via_xmlrpc.is_(True)
+    valid_admin_pred = WpCredential.can_admin_login.is_(True)
     creds = (
         await session.execute(
             select(

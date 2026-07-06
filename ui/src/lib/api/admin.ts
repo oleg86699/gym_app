@@ -313,6 +313,7 @@ export const wpSites = {
     status?:
       | 'all' | 'active' | 'auto-disabled' | 'off'
       | 'usable' | 'unusable' | 'cred_valid' | 'cred_invalid' | 'cred_transient'
+      | 'rpc_postable' | 'admin_capable' | 'admin_postable'
     sort?: 'alpha' | 'recent' | 'valid_desc' | 'transient_desc' | 'most_used'
   }) =>
     api.get<WpSiteList>(

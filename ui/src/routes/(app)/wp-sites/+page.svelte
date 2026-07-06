@@ -41,6 +41,7 @@
   type SiteFilter =
     | 'all' | 'active' | 'auto-disabled' | 'off'
     | 'usable' | 'unusable' | 'cred_valid' | 'cred_invalid' | 'cred_transient'
+    | 'rpc_postable' | 'admin_capable' | 'admin_postable'
   let filterStatus = $state<SiteFilter>('all')
   // Применить фильтр из клика по карточке + сразу перезагрузить.
   async function pickFilter(s: SiteFilter) {
@@ -784,13 +785,21 @@
       </div>
     </button>
 
-    <div class="rounded-lg border border-slate-200 bg-white p-4"
-         title="Через какой канал работают валидные cred. RPC = XML-RPC (Tier 1), Admin = wp-admin login (Tier 2)">
-      <div class="text-xs uppercase tracking-wider text-slate-500">Channels (valid)</div>
-      <div class="mt-1 flex items-baseline gap-3">
-        <span class="text-2xl font-semibold text-slate-900">{summary.credentials_valid_rpc ?? 0}<span class="ml-1 text-xs font-normal text-slate-400">rpc</span></span>
+    <div class="rounded-lg border border-slate-200 bg-white p-4">
+      <div class="text-xs uppercase tracking-wider text-slate-500">Channels (pool)</div>
+      <div class="mt-1 flex items-baseline gap-2">
+        <!-- Клик по каналу = фильтр по реальному пулу. rpc → постинг, admin → ссылки. -->
+        <button type="button" onclick={() => pickFilter('rpc_postable')}
+                title="Сайты с cred, постящим через XML-RPC (пул постинга). Клик — отфильтровать."
+                class="rounded px-1.5 py-0.5 text-2xl font-semibold text-slate-900 transition hover:bg-slate-100 {filterStatus === 'rpc_postable' ? 'ring-2 ring-slate-400' : ''}">
+          {summary.credentials_valid_rpc ?? 0}<span class="ml-1 text-xs font-normal text-slate-400">rpc</span>
+        </button>
         <span class="text-slate-300">·</span>
-        <span class="text-2xl font-semibold text-slate-900">{summary.credentials_valid_admin ?? 0}<span class="ml-1 text-xs font-normal text-slate-400">admin</span></span>
+        <button type="button" onclick={() => pickFilter('admin_capable')}
+                title="Сайты с cred, логинящимся в wp-admin — ПУЛ ССЫЛОК (can_admin_login). Клик — отфильтровать."
+                class="rounded px-1.5 py-0.5 text-2xl font-semibold text-slate-900 transition hover:bg-slate-100 {filterStatus === 'admin_capable' ? 'ring-2 ring-purple-400' : ''}">
+          {summary.credentials_valid_admin ?? 0}<span class="ml-1 text-xs font-normal text-slate-400">admin</span>
+        </button>
       </div>
     </div>
 
@@ -852,6 +861,11 @@
         <optgroup label="operational">
           <option value="usable">usable (готовы к постингу)</option>
           <option value="unusable">unusable</option>
+        </optgroup>
+        <optgroup label="channels (реальный пул)">
+          <option value="rpc_postable">RPC-postable (пул постинга)</option>
+          <option value="admin_capable">Admin-capable (пул ссылок)</option>
+          <option value="admin_postable">Admin-postable (постинг через admin)</option>
         </optgroup>
         <optgroup label="by cred status">
           <option value="cred_valid">has valid cred</option>

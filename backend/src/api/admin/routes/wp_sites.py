@@ -215,7 +215,7 @@ async def list_sites_endpoint(
     search: str | None = Query(default=None, max_length=200),
     status: str = Query(
         default="all",
-        pattern="^(all|active|auto-disabled|off|usable|unusable|cred_valid|cred_invalid|cred_transient)$",
+        pattern="^(all|active|auto-disabled|off|usable|unusable|cred_valid|cred_invalid|cred_transient|rpc_postable|admin_capable|admin_postable)$",
     ),
     sort: str = Query(default="alpha", pattern="^(alpha|recent|valid_desc|transient_desc|most_used)$"),
     viewer: AdminUser = Depends(get_current_user),
