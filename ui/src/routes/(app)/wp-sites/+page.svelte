@@ -662,21 +662,21 @@
         <DropdownMenu
           label={validation?.running ? '⟳ Validating…' : '✓ Validate'}
           disabled={validation?.running ?? false}
-          title="Проверить credentials через XML-RPC (wp.getUsersBlogs)"
+          title="Full-валидация: XML-RPC (Tier 1) + admin-login (Tier 2). Растит admin-канал. Медленнее, чем раньше."
           items={[
             {
               label: 'All valid',
-              description: 'Перепроверить все is_valid=true',
+              description: 'Full-перепроверка всех is_valid=true (RPC + admin). Долго!',
               onClick: () => triggerValidate('all'),
             },
             {
               label: 'Only invalid',
-              description: 'Вдруг ожили — вернуть в строй',
+              description: 'Вдруг ожили — вернуть в строй (full: RPC + admin)',
               onClick: () => triggerValidate('invalid'),
             },
             {
               label: 'Only transient',
-              description: 'Inconclusive — перепроверить после cooldown',
+              description: 'Inconclusive — full-перепроверка (RPC + admin)',
               onClick: () => triggerValidate('transient'),
             },
             // 'Stale (>4h)' временно убран из UI (не пользоваться) — бэкенд scope

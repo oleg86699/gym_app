@@ -1,24 +1,33 @@
 """
-Валидатор WP-credentials.
+Валидатор WP-credentials (пул).
 
-Использует XmlRpcPoster.validate (wp.getUsersBlogs) — лёгкий auth-check без
-побочек. Состояние массовой валидации хранится в Redis (DB 9), чтобы UI
-видел прогресс без БД-нагрузки.
+FULL-валидация в ДВА tier-а (parity с батч-валидатором — единая семантика
+«только full», см. domain/wp_batches/service.run_batch_validation):
+
+- Tier 1 — XML-RPC (`XmlRpcPoster.validate` / wp.getUsersBlogs): ставит
+  can_xmlrpc / can_post_via_xmlrpc + is_valid по auth-ответу.
+- Tier 2 — admin form-login (`WpAdminClient.login`, + Patchright-браузер для
+  CF): подтверждает can_admin_login + роль. Именно он растит admin-канал и
+  чинит пул под ссылки. Без него кнопка Validate щупала только XML-RPC.
+
+Оба tier-а идут через ПУЛ прокси (ротация по кредам) — admin-login с серверного
+IP легко ловит баны. Состояние прогресса — в Redis (DB 9), UI видит его в
+global queue без БД-нагрузки.
 
 Применяется в:
 - TaskIQ scheduled cron: stale-only (раз в 4 часа).
-- On-demand TaskIQ task: scope='all' | 'invalid' | 'stale' — из UI кнопки.
+- On-demand TaskIQ task: scope='all' | 'invalid' | 'transient' | 'stale' — из UI.
 
-После каждой credential:
-- ok → is_valid=True, error_counter=0, last_validated_at=now
-- AUTH_INVALID/PERMISSION_DENIED → error_counter+=1; при >=INVALIDATE_THRESHOLD → is_valid=False
-- NETWORK/SERVER/UNKNOWN → не меняем флаги (сайт временно недоступен); last_validated_at обновляем
+Отличие от батч-валидатора: без тяжёлых capability-probe (theme-editor/widgets/
+wp_version), lang-detect и inline-provision — здесь нужен только вердикт двух
+каналов. Всё это остаётся эксклюзивом батча.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import random
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -26,14 +35,14 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import redis.asyncio as aioredis
 import structlog
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from core.config import settings
 from core.crypto import decrypt_password
 from core.db import WriteSession
-from infrastructure.db.models import WpCredential, WpSite
+from infrastructure.db.models import Proxy, WpCredential, WpSite
 from infrastructure.wp_client import ErrorKind, ValidateOutcome, XmlRpcPoster
 
 log = structlog.get_logger(__name__)
@@ -48,6 +57,13 @@ STALE_HOURS = 4
 # сайты. Тайм-аут на запрос отдельный.
 VALIDATE_CONCURRENCY = 20
 VALIDATE_TIMEOUT_S = 20
+
+# Жёсткий per-cred таймаут на весь full-цикл (Tier1 + Tier2 + возможный браузер).
+# Один зависший cred иначе держал бы слот семафора навсегда.
+VALIDATE_PER_CRED_TIMEOUT_S = 150
+
+# Кап прокси-пула на прогон (как в батч-валидаторе).
+_MAX_PROXY_POOL = 64
 
 
 # ─── Redis state (singleton key) ─────────────────────────────────────
@@ -129,6 +145,27 @@ async def _apply_validation_result(
         outcome.error_message[:500] if outcome.error_message else None
     )
 
+    # Capability matrix (XML-RPC channel) — parity с batch-валидатором
+    # (см. wp_batches/service._apply_validation_result). Раньше pool-валидатор
+    # НЕ трогал can_* → admin/rpc каналы застывали. Теперь Tier 1 честно пишет rpc.
+    if outcome.error == ErrorKind.OK and outcome.valid_via == "admin_browser":
+        # CF-сайт: прошли Patchright-логином, XML-RPC не проверяли → rpc не трогаем.
+        values["can_admin_login"] = True
+        values["can_post_via_admin"] = True
+        values["last_admin_check_at"] = now
+    elif outcome.error == ErrorKind.OK:
+        values["can_xmlrpc"] = True
+        values["can_post_via_xmlrpc"] = True
+        if outcome.role:
+            values["admin_role"] = outcome.role
+            values["can_create_users"] = outcome.role == "administrator"
+    elif outcome.error in (ErrorKind.AUTH_INVALID, ErrorKind.PERMISSION_DENIED):
+        values["can_xmlrpc"] = True
+        values["can_post_via_xmlrpc"] = False
+    elif outcome.error == ErrorKind.XMLRPC_DISABLED:
+        values["can_xmlrpc"] = False
+        values["can_post_via_xmlrpc"] = False
+
     if outcome.success:
         values["is_valid"] = True
         values["error_counter"] = 0
@@ -159,6 +196,163 @@ async def _apply_validation_result(
 
     await session.commit()
     return was_valid != new_valid, new_valid, is_transient
+
+
+# ─── Tier 2: admin form-login (растит admin-канал) ───────────────────
+
+
+async def _cf_browser_login(
+    cred: WpCredential, pw: str, proxy_url: str | None, cf_conc: int
+) -> bool:
+    """Tier 3: один раз проходим CF + логинимся браузером (Patchright) на том же
+    прокси/IP. Успех = cred валиден через admin-канал (сессия кешируется в Redis,
+    постинг переиспользует curl_cffi-реплеем). True если зашли. Зеркало
+    wp_batches/service._cf_browser_login."""
+    from infrastructure.cf_browser import browser_login_session, is_browser_available
+
+    if not is_browser_available() or not cred.site:
+        return False
+    from urllib.parse import urlparse as _urlparse
+
+    base = cred.site.last_working_url or f"https://{cred.site.domain}"
+    _p = _urlparse(base)
+    base = f"{_p.scheme}://{_p.netloc}" if _p.netloc else f"https://{cred.site.domain}"
+    try:
+        sess = await browser_login_session(
+            base, cred.login, pw, proxy_url=proxy_url, concurrency=cf_conc,
+        )
+        return sess is not None
+    except Exception as e:  # noqa: BLE001
+        log.warning("pool_validate.cf_browser.error", cred_id=cred.id, error=str(e)[:200])
+        return False
+
+
+async def _tier2_admin_login(
+    cred: WpCredential,
+    tier1_outcome: ValidateOutcome,
+    http: httpx.AsyncClient,
+    proxy_url: str | None,
+    rate_limiter,
+    cf_conc: int,
+) -> str | None:
+    """
+    Tier 2 — wp-admin form-login через тот же прокси/клиент, что и Tier 1
+    (+ Patchright-браузер для CF). Ставит can_admin_login / роль и разрешает
+    is_valid когда Tier 1 был inconclusive. Возвращает влияние на ИТОГОВЫЙ вердикт
+    для счётчиков state: 'valid' | 'invalid' | None (None = вердикт не изменил,
+    считаем по Tier 1).
+
+    Упрощённая версия batch-Tier2: без capability-probe / provision / lang —
+    здесь нужен только admin-канал + вердикт. Логика инвалидации/сохранения
+    prior-trust — зеркало wp_batches/service._maybe_run_tier2.
+    """
+    from infrastructure.wp_admin_client import (
+        AdminLoginKind,
+        LoginOutcome,
+        WpAdminClient,
+    )
+
+    if cred.site is None:
+        return None
+
+    client = WpAdminClient(http, timeout_seconds=VALIDATE_TIMEOUT_S, proxy_url=proxy_url)
+    via_browser = False
+    pw = decrypt_password(cred.password)
+    try:
+        await rate_limiter.acquire(cred.site.domain)
+        login_res = await client.login(site=cred.site, login=cred.login, password=pw)
+        # Tier 3 (браузер): CF/generic-WAF (403/JS-interstitial/503) — лёгкого
+        # HTTP-обхода нет, проходим браузером один раз, он же логинится.
+        _BROWSER_TRIGGERS = {
+            AdminLoginKind.CF_CHALLENGE,
+            AdminLoginKind.UNKNOWN,
+            AdminLoginKind.SERVER_ERROR,
+        }
+        if login_res.error in _BROWSER_TRIGGERS:
+            if await _cf_browser_login(cred, pw, proxy_url, cf_conc):
+                via_browser = True
+                login_res = LoginOutcome(
+                    error=AdminLoginKind.OK, error_message="passed via browser (CF)",
+                )
+    except Exception as e:  # noqa: BLE001
+        log.warning("pool_validate.tier2.error", cred_id=cred.id, error=str(e)[:200])
+        return None
+
+    now = datetime.now(UTC)
+    cred_values: dict = {"last_admin_check_at": now}
+    site_values: dict = {}
+    tier1_decisive = tier1_outcome.error in (
+        ErrorKind.OK, ErrorKind.AUTH_INVALID, ErrorKind.PERMISSION_DENIED,
+    )
+    result: str | None = None
+
+    if login_res.error == AdminLoginKind.OK:
+        cred_values["can_admin_login"] = True
+        cred_values["is_valid"] = True
+        cred_values["error_counter"] = 0
+        cred_values["last_error_at"] = None
+        cred_values["error_cooldown_until"] = None
+        if tier1_outcome.error != ErrorKind.OK:
+            cred_values["last_error_message"] = None
+        result = "valid"
+        if via_browser:
+            # Прошли браузером (CF) — REST/probe опять упрутся в CF. Ставим
+            # admin-канал напрямую, постинг пойдёт Tier 3 replay-ом.
+            cred_values["can_post_via_admin"] = True
+            site_values["cf_protected"] = True
+        else:
+            # Роль + create_users через REST users/me — дёшево (1 запрос).
+            try:
+                role, caps_map = await client.fetch_role_and_caps(cred.site)
+                if role:
+                    cred_values["admin_role"] = role
+                if caps_map:
+                    cred_values["can_create_users"] = bool(caps_map.get("create_users"))
+            except Exception as e:  # noqa: BLE001
+                log.debug("pool_validate.role_probe.failed", cred_id=cred.id, error=str(e))
+    elif login_res.error in (AdminLoginKind.AUTH_INVALID, AdminLoginKind.PERMISSION_DENIED):
+        cred_values["can_admin_login"] = False
+        # Инвалидируем только если Tier 1 (XML-RPC) сам не подтвердил валидность:
+        # admin-login мог упасть из-за captcha/2FA/IP, а cred рабочая через XML-RPC.
+        if tier1_outcome.error != ErrorKind.OK:
+            cred_values["is_valid"] = False
+            result = "invalid"
+    elif login_res.error == AdminLoginKind.CF_CHALLENGE:
+        site_values["cf_protected"] = True
+        if not tier1_decisive and cred.can_admin_login is not True:
+            cred_values["is_valid"] = False
+            result = "invalid"
+    elif login_res.error == AdminLoginKind.PARKED:
+        cred_values["can_admin_login"] = False
+        cred_values["is_valid"] = False
+        result = "invalid"
+    else:
+        # NETWORK / LOGIN_DISABLED / UNKNOWN / SERVER_ERROR / SITE_NOT_FOUND —
+        # inconclusive. not_confirmed только если Tier 1 тоже не decisive И нет
+        # prior can_admin_login=True (сохраняем доверие к прошлому подтверждению).
+        if not tier1_decisive and cred.can_admin_login is not True:
+            cred_values["is_valid"] = False
+            result = "invalid"
+
+    # Сайт ОТВЕТИЛ через админку (ok / явный auth-fail) → он жив, сбрасываем
+    # site-счётчик провалов (мог накрутиться на Tier 1 xmlrpc_disabled/CF).
+    if login_res.error in (
+        AdminLoginKind.OK, AdminLoginKind.AUTH_INVALID, AdminLoginKind.PERMISSION_DENIED,
+    ):
+        site_values["consecutive_site_failures"] = 0
+        site_values["last_site_failure_at"] = None
+        site_values["last_site_failure_kind"] = None
+
+    async with WriteSession() as s_t2:
+        await s_t2.execute(
+            update(WpCredential).where(WpCredential.id == cred.id).values(**cred_values)
+        )
+        if site_values and cred.site:
+            await s_t2.execute(
+                update(WpSite).where(WpSite.id == cred.site.id).values(**site_values)
+            )
+        await s_t2.commit()
+    return result
 
 
 # ─── Bulk runner ─────────────────────────────────────────────────────
@@ -213,8 +407,6 @@ async def _iter_creds_to_validate(
 
 
 async def _count_creds_to_validate(session: AsyncSession, scope: str) -> int:
-    from sqlalchemy import func
-
     stmt = (
         select(func.count(WpCredential.id))
         .join(WpSite, WpSite.id == WpCredential.site_id)
@@ -246,9 +438,13 @@ async def run_validation(scope: str = "all", actor_id: int | None = None) -> dic
     """
     assert scope in ("all", "invalid", "transient", "stale")
 
-    # Проверяем lock
+    # Проверяем lock. TTL — только crash-backstop: при нормальном завершении
+    # lock снимается в finally. full-валидация (Tier1+Tier2+браузер) на большом
+    # scope идёт часами, поэтому TTL щедрый — иначе истёк бы на ходу и позволил
+    # второй параллельный прогон. (В UI повторный запуск и так блокирует
+    # state.running, но lock — вторая линия обороны.)
     rc = _get_state_client()
-    locked = await rc.set("wp_validation:lock", "1", nx=True, ex=30 * 60)
+    locked = await rc.set("wp_validation:lock", "1", nx=True, ex=8 * 3600)
     if not locked:
         log.info("wp_validation.already_running")
         return (await get_state()).__dict__
@@ -268,54 +464,128 @@ async def run_validation(scope: str = "all", actor_id: int | None = None) -> dic
             log.info("wp_validation.nothing_to_validate", scope=scope)
             return state.__dict__
 
+        # ── Прокси-пул + клиенты (как в батч-валидаторе) ─────────────────
+        # Tier 2 admin-login с серверного IP легко ловит баны, поэтому оба tier-а
+        # идут через пул residential-прокси с ротацией по кредам.
+        from domain.app_settings.service import get_app_settings
+        from domain.proxies.service import proxy_url as _proxy_url_of
+        from domain.wp_batches.service import (
+            _DomainRateLimiter,
+            _build_http_client_url,
+        )
+
+        async with WriteSession() as s_cfg:
+            _now0 = datetime.now(UTC)
+            proxy_pool = list((await s_cfg.execute(
+                select(Proxy).where(
+                    Proxy.is_active.is_(True),
+                    (Proxy.locked_until.is_(None)) | (Proxy.locked_until <= _now0),
+                ).order_by(func.random()).limit(_MAX_PROXY_POOL)
+            )).scalars().all())
+            cf_conc = (await get_app_settings(s_cfg)).cf_browser_concurrency
+        # Список proxy-URL для ротации; [None] → прямое соединение (пул пуст).
+        proxy_urls: list[str | None] = [_proxy_url_of(p) for p in proxy_pool] or [None]
+
+        rate_limiter = _DomainRateLimiter()
         sem = asyncio.Semaphore(VALIDATE_CONCURRENCY)
-        async with httpx.AsyncClient(
-            timeout=VALIDATE_TIMEOUT_S, follow_redirects=True
-        ) as http:
-            poster = XmlRpcPoster(http, timeout_seconds=VALIDATE_TIMEOUT_S)
+        # Кэш httpx-клиентов по proxy-URL (один клиент на прокси, переиспользуем).
+        _client_cache: dict[str | None, httpx.AsyncClient] = {}
 
-            async def _one(cred: WpCredential) -> None:
-                async with sem:
-                    try:
-                        outcome = await poster.validate(
-                            site=cred.site,
-                            login=cred.login,
-                            password=decrypt_password(cred.password),
+        async def _get_client(purl: str | None) -> httpx.AsyncClient:
+            if purl not in _client_cache:
+                _client_cache[purl] = await _build_http_client_url(purl)
+            return _client_cache[purl]
+
+        async def _validate_one(cred: WpCredential) -> None:
+            """Full-цикл одного cred: Tier1 (XML-RPC + CF-браузер) → apply →
+            Tier2 (admin-login). Пишет вердикт в state-счётчики."""
+            purl = random.choice(proxy_urls)
+            http = await _get_client(purl)
+            pw = decrypt_password(cred.password)
+            if cred.site is not None:
+                await rate_limiter.acquire(cred.site.domain)
+
+            # Tier 1 — XML-RPC (+ Patchright для настоящего CF-челленджа)
+            poster = XmlRpcPoster(http, timeout_seconds=VALIDATE_TIMEOUT_S, proxy_url=purl)
+            try:
+                outcome = await poster.validate(
+                    site=cred.site, login=cred.login, password=pw,
+                )
+                if outcome.error == ErrorKind.CF_CHALLENGE:
+                    if await _cf_browser_login(cred, pw, purl, cf_conc):
+                        outcome = ValidateOutcome(
+                            error=ErrorKind.OK, valid_via="admin_browser", role=outcome.role,
                         )
-                    except Exception as e:
-                        log.exception("wp_validation.one.unexpected", cred_id=cred.id, error=str(e))
-                        return
-                    async with WriteSession() as s2:
-                        # Перечитываем credential свежим (могла измениться error_counter)
-                        fresh = await s2.scalar(
-                            select(WpCredential)
-                            .where(WpCredential.id == cred.id)
-                            .options(selectinload(WpCredential.site))
-                        )
-                        if fresh is None:
-                            return
-                        _changed, new_valid, transient = await _apply_validation_result(
-                            s2, fresh, outcome
-                        )
-                    # Стейт-инкременты
+            except Exception as e:  # noqa: BLE001
+                log.exception("pool_validate.tier1.unexpected", cred_id=cred.id, error=str(e))
+                outcome = ValidateOutcome(error=ErrorKind.NETWORK, error_message=str(e)[:200])
+
+            # Применяем Tier 1 (пишет is_valid + rpc-канал)
+            async with WriteSession() as s2:
+                fresh = await s2.scalar(
+                    select(WpCredential)
+                    .where(WpCredential.id == cred.id)
+                    .options(selectinload(WpCredential.site))
+                )
+                if fresh is None:
+                    return
+                _changed, new_valid, transient = await _apply_validation_result(
+                    s2, fresh, outcome
+                )
+
+            # Tier 2 — admin form-login (растит admin-канал; может переопределить
+            # вердикт: transient→valid при рабочем админе, или →invalid).
+            t2 = await _tier2_admin_login(
+                fresh, outcome, http, purl, rate_limiter, cf_conc,
+            )
+            if t2 == "valid":
+                new_valid, transient = True, False
+            elif t2 == "invalid":
+                new_valid, transient = False, False
+
+            # Стейт-инкременты (итоговый вердикт после обоих tier-ов)
+            state.done += 1
+            if transient:
+                state.transient_errors += 1
+            elif new_valid:
+                state.valid += 1
+            else:
+                state.invalid += 1
+            if state.done % 10 == 0 or state.done == state.total:
+                await _save_state(state)
+
+        async def _one(cred: WpCredential) -> None:
+            async with sem:
+                # Жёсткий per-cred таймаут: один зависший cred не должен держать
+                # слот навсегда (Tier2/браузер могут залипнуть на дохлом прокси).
+                try:
+                    await asyncio.wait_for(
+                        _validate_one(cred), timeout=VALIDATE_PER_CRED_TIMEOUT_S,
+                    )
+                except asyncio.TimeoutError:
+                    log.warning("pool_validate.cred_timeout", cred_id=cred.id)
                     state.done += 1
-                    if transient:
-                        state.transient_errors += 1
-                    elif new_valid:
-                        state.valid += 1
-                    else:
-                        state.invalid += 1
-                    # Сохраняем каждые 10 итераций — чтобы UI видел прогресс
-                    if state.done % 10 == 0 or state.done == state.total:
-                        await _save_state(state)
+                    state.transient_errors += 1
+                except Exception as e:  # noqa: BLE001
+                    log.exception("pool_validate.one.failed", cred_id=cred.id, error=str(e))
+                    state.done += 1
+                    state.transient_errors += 1
 
-            # Загружаем все creds (id-only достаточно) и пускаем gather
+        try:
+            # Загружаем все creds и пускаем gather
             cred_list: list[WpCredential] = []
             async with WriteSession() as s_iter:
                 async for cred in _iter_creds_to_validate(s_iter, scope):
                     cred_list.append(cred)
 
             await asyncio.gather(*(_one(c) for c in cred_list), return_exceptions=False)
+        finally:
+            # Закрываем все httpx-клиенты из кэша (по одному на прокси).
+            for _http_c in _client_cache.values():
+                try:
+                    await _http_c.aclose()
+                except Exception:
+                    pass
 
         state.finished_at = datetime.now(UTC).isoformat()
         state.running = False
