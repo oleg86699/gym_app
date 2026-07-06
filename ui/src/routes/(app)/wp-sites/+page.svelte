@@ -679,11 +679,8 @@
               description: 'Inconclusive — перепроверить после cooldown',
               onClick: () => triggerValidate('transient'),
             },
-            {
-              label: 'Stale (>4h)',
-              description: 'Те что давно не проверялись',
-              onClick: () => triggerValidate('stale'),
-            },
+            // 'Stale (>4h)' временно убран из UI (не пользоваться) — бэкенд scope
+            // остаётся рабочим.
           ]}
         />
         {#if isSuper}
