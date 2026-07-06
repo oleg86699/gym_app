@@ -226,6 +226,8 @@ async def _count_creds_to_validate(session: AsyncSession, scope: str) -> int:
     )
     if scope == "invalid":
         stmt = stmt.where(WpCredential.is_valid.is_(False))
+    elif scope == "transient":
+        stmt = stmt.where(WpCredential.cred_status == "transient")
     elif scope == "stale":
         threshold = datetime.now(UTC) - timedelta(hours=STALE_HOURS)
         stmt = stmt.where(
@@ -242,7 +244,7 @@ async def run_validation(scope: str = "all", actor_id: int | None = None) -> dic
     Главная точка входа для TaskIQ task. Защищён от повторного запуска через
     Redis lock (SET NX). Если уже идёт — возвращает текущий state.
     """
-    assert scope in ("all", "invalid", "stale")
+    assert scope in ("all", "invalid", "transient", "stale")
 
     # Проверяем lock
     rc = _get_state_client()
