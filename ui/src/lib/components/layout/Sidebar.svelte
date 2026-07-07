@@ -48,14 +48,14 @@
   let currentPath = $derived(page.url.pathname)
 </script>
 
-<aside class="flex w-60 flex-col border-r border-slate-200 bg-white">
+<aside class="flex w-60 shrink-0 flex-col border-r border-slate-200 bg-white">
   <div class="flex h-14 items-center px-5">
     <a href="/dashboard" class="text-lg font-semibold tracking-tight text-slate-900">
       gym<span class="text-brand-600">_app</span>
     </a>
   </div>
 
-  <nav class="flex-1 space-y-6 px-3 py-4 text-sm">
+  <nav class="min-h-0 flex-1 space-y-6 overflow-y-auto px-3 py-4 text-sm">
     {#each grouped as group}
       <div>
         {#if group.section}

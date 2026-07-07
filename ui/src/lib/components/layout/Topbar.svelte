@@ -23,7 +23,7 @@
   let breadcrumb = $derived(page.url.pathname.replace(/^\//, '') || 'Dashboard')
 </script>
 
-<header class="flex h-14 items-center justify-between border-b border-slate-200 bg-white px-6">
+<header class="flex h-14 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-6">
   <div class="text-sm font-medium capitalize text-slate-700">{breadcrumb}</div>
 
   {#if user}
