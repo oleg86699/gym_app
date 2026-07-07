@@ -1756,12 +1756,36 @@ async def _run_posting_async(run_id: int) -> dict:
             selector=getattr(run, "proxy_selector", None),
             fallback_proxy_id=run.proxy_id,
         )
+    # Пре-флайт (защита от дурака): ран выбрал прокси, но пул в основном мёртв
+    # (напр. забыли оплатить) → уходим в direct СРАЗУ, не грайндим дохлыми прокси
+    # и не рикошетим по сайтам. Флаг на ран → UI покажет «постинг идёт напрямую».
+    # Горячий цикл постинга не трогаем — правка только на старте рана.
+    proxy_fallback_direct = False
+    if proxy_urls != [None]:
+        from domain.proxies.service import preflight_pool_alive
+        if not await preflight_pool_alive(proxy_urls):
+            proxy_urls = [None]
+            proxy_fallback_direct = True
+            log_ctx.warning(
+                "posting.proxy.preflight_dead_pool_direct",
+                selector=getattr(run, "proxy_selector", None),
+            )
+    # Пишем эффективный режим прокси на ран (для UI-статуса). Всегда — чтобы
+    # сбросить флаг при перезапуске с уже живыми прокси.
+    async with WriteSession() as s_pf:
+        await s_pf.execute(
+            update(PostingRun)
+            .where(PostingRun.id == run.id)
+            .values(proxy_fallback_direct=proxy_fallback_direct)
+        )
+        await s_pf.commit()
     log_ctx.info(
         "posting.proxy.pool_resolved",
         selector=getattr(run, "proxy_selector", None),
         proxy_id=run.proxy_id,
         pool_size=len(proxy_urls),
         direct=(proxy_urls == [None]),
+        preflight_fallback=proxy_fallback_direct,
     )
     client_pool = HttpxClientPool(proxy_urls, timeout_seconds=run.timeout_seconds)
 

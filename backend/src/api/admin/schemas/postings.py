@@ -46,6 +46,8 @@ class PostingRunResponse(BaseModel):
     run_mode: str = "auto"  # auto | manual
     priority: str  # low | normal | high
     posting_method: str = "auto"  # auto | xmlrpc_only | admin_only
+    # Пре-флайт прокси: пул оказался мёртв на старте → постинг ушёл в direct.
+    proxy_fallback_direct: bool = False
     post_verify: str = "mark"  # mark | auto — валидация ссылки на посте
     # drip-feed: на сколько дней размазан постинг (0 = сразу)
     spread_days: int = 0

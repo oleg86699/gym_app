@@ -481,6 +481,7 @@ export interface PostingRun {
   run_mode?: 'auto' | 'manual'
   priority: PostingRunPriority
   posting_method?: 'auto' | 'xmlrpc_only' | 'admin_only'
+  proxy_fallback_direct?: boolean
   post_verify?: 'mark' | 'auto'
   spread_days?: number
   content_params?: { language: string | null; model: string | null; prompt: string | null; error?: string | null } | null

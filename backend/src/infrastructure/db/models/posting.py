@@ -170,6 +170,11 @@ class PostingRun(Base, SoftDeletableMixin):
     # старые runs использовали proxy_id (single). Worker сначала смотрит на
     # selector, потом на proxy_id, потом direct.
     proxy_selector: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # Пре-флайт прокси (миграция 0054): True если на старте рана пул оказался в
+    # основном мёртв → воркер ушёл в direct. Для UI-статуса «постинг напрямую».
+    proxy_fallback_direct: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
 
     # Управление воркером
     pause_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

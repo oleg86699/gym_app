@@ -7,6 +7,8 @@ Health-check — httpx GET https://api.ipify.org через proxy + ip-api.com l
 
 from __future__ import annotations
 
+import asyncio
+import random
 import re
 from datetime import UTC, datetime
 
@@ -354,6 +356,51 @@ async def resolve_proxy_pool(
         log.warning("proxy.empty_pool", selector=sel)
         return [None]
     return urls
+
+
+async def _ping_proxy_url(url: str, timeout: float = 6.0) -> bool:
+    """Лёгкий пинг прокси через ipify (без БД). True — прокси ответил рабочим IP."""
+    try:
+        async with httpx.AsyncClient(proxy=url, timeout=timeout) as c:
+            r = await c.get("https://api.ipify.org?format=json")
+            return bool((r.json() or {}).get("ip"))
+    except Exception:
+        return False
+
+
+async def preflight_pool_alive(
+    proxy_urls: list[str | None],
+    *,
+    sample: int = 8,
+    timeout: float = 6.0,
+    dead_ratio: float = 0.7,
+) -> bool:
+    """
+    Грубая проверка «пул в основном жив?» ПЕРЕД стартом рана — защита от дурака
+    (например, прокси добавили, но забыли оплатить → все дохлые).
+
+    Пингует сэмпл прокси через ipify. Возвращает False, если ≥ dead_ratio сэмпла
+    мертвы → вызывающий уходит в direct, чтобы не грайндить дохлыми прокси и не
+    рикошетить по сайтам. Пустой / только-direct пул → True (проверять нечего).
+
+    Majority-vote (порог 70%): одиночный fail (ipify моргнул на одном exit) не
+    роняет живой пул. Любая ошибка самой проверки → True (fail-open, не ломаем
+    старт рана — за частичную смерть отвечает штатный per-item лок прокси).
+    """
+    reals = [u for u in proxy_urls if u]
+    if not reals:
+        return True
+    try:
+        pick = reals if len(reals) <= sample else random.sample(reals, sample)
+        results = await asyncio.gather(*(_ping_proxy_url(u, timeout) for u in pick))
+        dead = sum(1 for ok in results if not ok)
+        alive = (dead / len(pick)) < dead_ratio
+        if not alive:
+            log.warning("proxy.preflight.pool_dead", sampled=len(pick), dead=dead)
+        return alive
+    except Exception as e:  # noqa: BLE001
+        log.warning("proxy.preflight.error", error=str(e)[:200])
+        return True
 
 
 async def pick_active_proxy_url(session: AsyncSession) -> str | None:

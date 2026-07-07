@@ -775,7 +775,20 @@
         {#if run.pause_requested && run.status === 'running'}
           <span class="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium uppercase text-amber-700">pause requested</span>
         {/if}
+        {#if run.proxy_fallback_direct}
+          <span class="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium uppercase text-amber-700"
+                title="На старте прогона пул прокси оказался в основном недоступен (проверьте оплату/статус). Постинг идёт напрямую с IP сервера — CF-сайты и admin-размещение будут пропускаться.">
+            ⚠ прокси недоступны — direct
+          </span>
+        {/if}
       </div>
+      {#if run.proxy_fallback_direct}
+        <div class="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          ⚠ Прогон запущен <strong>без прокси</strong>: на старте пул оказался в основном недоступен (частая причина — прокси не оплачены).
+          Постинг идёт напрямую с IP сервера, поэтому CF-защищённые сайты и размещение через admin будут пропускаться.
+          Проверьте прокси в разделе <a href="/proxies" class="underline">Proxies</a> и перезапустите прогон.
+        </div>
+      {/if}
       <div class="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
         <span>Project: <a class="text-brand-600 hover:underline" href={`/projects/${run.project.id}`}>{run.project.name}</a></span>
         <span>Creator: <strong>@{run.creator?.username ?? '—'}</strong></span>
