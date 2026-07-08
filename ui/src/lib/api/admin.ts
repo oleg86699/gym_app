@@ -690,6 +690,7 @@ export const postings = {
       posting_method?: 'auto' | 'xmlrpc_only' | 'admin_only'
       post_verify?: 'mark' | 'auto'
       proxy_selector?: string | null
+      pool_fallback?: boolean
       publish_from?: string | null
       publish_to?: string | null
       site_langs?: string | null

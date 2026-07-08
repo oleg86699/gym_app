@@ -205,6 +205,7 @@ async def create_run(
     spread_days: int = 0,
     max_posts_per_site: int = 1,
     post_verify: str = "mark",
+    pool_fallback: bool = False,
 ) -> PostingRun:
     run = PostingRun(
         project_id=project.id,
@@ -224,6 +225,7 @@ async def create_run(
         posting_method=posting_method,
         max_posts_per_site=max_posts_per_site,
         post_verify=post_verify,
+        pool_fallback=pool_fallback,
     )
     session.add(run)
     await session.commit()

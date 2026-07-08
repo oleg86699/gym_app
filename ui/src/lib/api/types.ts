@@ -498,6 +498,7 @@ export interface PostingRun {
   timeout_seconds: number
   max_posts_per_site: number   // сколько раз один сайт можно использовать в задаче (1 = «1 сайт = 1 пост»)
   proxy_selector?: string | null
+  pool_fallback?: boolean
   pause_requested: boolean
   cancel_requested: boolean
   total_texts: number

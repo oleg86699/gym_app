@@ -91,6 +91,7 @@
   let eSiteTlds = $state('')
   let eSiteDomains = $state('')
   let eMaxPosts = $state(1)
+  let ePoolFallback = $state(false)  // добить по полному пулу при исчерпании фильтра
   let eAvailableTags = $state<string[]>([])
   let eTagSearch = $state('')
   const E_TAG_CAP = 40
@@ -182,6 +183,7 @@
           ? 'domains'
           : 'all'
     eProxySelector = run.proxy_selector ?? 'direct'
+    ePoolFallback = run.pool_fallback ?? false
     // Пул открыт по умолчанию (главное при need_more_admins), остальные свёрнуты.
     secPoolOpen = true
     secSchedOpen = false
@@ -213,6 +215,7 @@
         publish_to: ePubTo || null,
         max_posts_per_site: eMaxPosts || 1,
         proxy_selector: eProxySelector,
+        pool_fallback: ePoolFallback,
         site_langs: eSiteLangs.trim() || null,
         site_tlds: eSiteTlds.trim() || null,
         site_tags: ePoolMode === 'tags' ? eSiteTags.join(',') || null : null,
@@ -1512,6 +1515,14 @@
                        class="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-mono" />
               </div>
               <p class="mt-1 text-[11px] text-slate-400">Только сайты с этим <b>языком</b> и <b>TLD</b> (через запятую). Пусто = все.</p>
+              <label class="mt-2 flex cursor-pointer items-start gap-2 rounded-md border border-slate-200 bg-slate-50 px-2.5 py-2">
+                <input type="checkbox" bind:checked={ePoolFallback} class="mt-0.5" />
+                <span class="text-[11px] text-slate-600">
+                  <b>Авто-добор по всему пулу</b> — если доступы под фильтром (язык/TLD/теги) кончились,
+                  не вставать в <code>need_more_admins</code>, а продолжить по остальному разрешённому пулу.
+                  Сначала точно проставит по фильтру, потом доберёт остальным.
+                </span>
+              </label>
               <div class="mt-2 flex flex-wrap items-center gap-1.5">
                 <button type="button" onclick={() => (ePoolMode = ePoolMode === 'tags' ? 'all' : 'tags')}
                         class="rounded-full border px-3 py-1 text-xs font-medium {ePoolMode === 'tags' ? 'border-brand-400 bg-brand-50 text-brand-700' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}">По тегам</button>

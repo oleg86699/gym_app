@@ -73,6 +73,8 @@ class PostingRunResponse(BaseModel):
     # Селектор прокси-пула (direct / all / provider:<name> / single:<id>) — для
     # префилла в форме правки.
     proxy_selector: str | None = None
+    # pool_fallback: добить по полному разрешённому пулу при исчерпании фильтра.
+    pool_fallback: bool = False
 
     pause_requested: bool
     cancel_requested: bool
@@ -171,6 +173,7 @@ class UpdateRunParams(BaseModel):
     site_tags: str | None = Field(default=None, max_length=2000)
     site_domains: str | None = Field(default=None, max_length=200_000)
     site_domains_key: str | None = Field(default=None, max_length=300)
+    pool_fallback: bool | None = None
 
 
 class CreateRunParams(BaseModel):
@@ -231,6 +234,9 @@ class CreateRunParams(BaseModel):
     # Большой список доменов — загружен файлом в MinIO (см. /postings/domain-list);
     # тут лежит ключ объекта. Приоритет у inline site_domains, если задан.
     site_domains_key: str | None = Field(default=None, max_length=300)
+    # pool_fallback: при исчерпании фильтрованного пула — добить по всему
+    # остальному разрешённому пулу вместо need_more_admins.
+    pool_fallback: bool = False
     # CSV-direct: инжектить ли ссылку из колонки link в тело (колонку text).
     # False (default) — тело постится как есть (ссылка должна быть уже в тексте).
     # True → применяем inject_link(body, link, anchor), как в Reuse-пути.

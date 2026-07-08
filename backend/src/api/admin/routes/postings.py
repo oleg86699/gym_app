@@ -325,6 +325,7 @@ async def create_project_run(
         proxy_id=parsed.proxy_id,
         proxy_selector=parsed.proxy_selector,
         posting_method=parsed.posting_method,
+        pool_fallback=parsed.pool_fallback,
         max_posts_per_site=parsed.max_posts_per_site,
         post_verify=parsed.post_verify,
     )
@@ -420,6 +421,7 @@ async def create_csv_direct_run(
         spread_days=parsed.spread_days, source_archive_storage_key=upload_key,
         proxy_id=parsed.proxy_id, proxy_selector=parsed.proxy_selector,
         posting_method=parsed.posting_method,
+        pool_fallback=parsed.pool_fallback,
         max_posts_per_site=parsed.max_posts_per_site,
         post_verify=parsed.post_verify,
     )
@@ -505,6 +507,7 @@ async def create_campaign_run(
         spread_days=parsed.spread_days, source_archive_storage_key=upload_key,
         proxy_id=parsed.proxy_id, proxy_selector=parsed.proxy_selector,
         posting_method=parsed.posting_method,
+        pool_fallback=parsed.pool_fallback,
         max_posts_per_site=parsed.max_posts_per_site,
         post_verify=parsed.post_verify,
     )
@@ -1639,7 +1642,7 @@ async def update_run_endpoint(
 
     deep_fields = {
         "priority", "scheduled_for", "spread_days", "posting_method", "post_verify",
-        "proxy_selector", "publish_from", "publish_to",
+        "proxy_selector", "publish_from", "publish_to", "pool_fallback",
         "site_langs", "site_tlds", "site_tags", "site_domains", "site_domains_key",
     }
     deep_sent = deep_fields & sent
@@ -1663,7 +1666,7 @@ async def update_run_endpoint(
                        "(READY / SCHEDULED / NEED_MORE_ADMINS / INTERRUPTED / CANCELLED / FAILED)",
             )
         for f in ("priority", "spread_days", "posting_method", "post_verify",
-                  "proxy_selector", "publish_from", "publish_to"):
+                  "proxy_selector", "publish_from", "publish_to", "pool_fallback"):
             if f in sent:
                 vals[f] = getattr(payload, f)
         # scheduled_for + согласованный переход статуса

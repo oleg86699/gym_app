@@ -175,6 +175,12 @@ class PostingRun(Base, SoftDeletableMixin):
     proxy_fallback_direct: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="false", nullable=False
     )
+    # pool_fallback (миграция 0055): при исчерпании фильтрованного пула
+    # (lang/TLD/tags/domains) — добить по всему остальному разрешённому пулу
+    # вместо need_more_admins (в рамках RBAC-тегов создателя).
+    pool_fallback: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
 
     # Управление воркером
     pause_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

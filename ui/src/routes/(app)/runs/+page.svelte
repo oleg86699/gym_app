@@ -312,6 +312,7 @@
   let secPostOpen = $state(false)
   let newSiteLangs = $state('')     // фильтр пула: языки сайтов через запятую
   let newSiteTlds = $state('')      // фильтр пула: TLD через запятую
+  let newPoolFallback = $state(false)  // добить по всему пулу при исчерпании фильтра
   // Источник пула доступов: all = весь пул; tags = по тегам кредов; domains = свой список
   let poolMode = $state<'all' | 'tags' | 'domains'>('all')
   let newSiteTags = $state<string[]>([])   // выбранные теги (для poolMode='tags')
@@ -459,6 +460,7 @@
     secPostOpen = false
     newSiteLangs = ''
     newSiteTlds = ''
+    newPoolFallback = false
     poolMode = 'all'
     newSiteTags = []
     newSiteDomains = ''
@@ -518,6 +520,7 @@
         spread_days: newSpreadDays || 0,
         proxy_selector: newProxySelector, posting_method: newPostingMethod,
         post_verify: newPostVerify,
+        pool_fallback: newPoolFallback,
         site_langs: newSiteLangs.trim() || null, site_tlds: newSiteTlds.trim() || null,
         site_tags: poolMode === 'tags' ? (newSiteTags.join(',') || null) : null,
         site_domains: poolMode === 'domains' && !newSiteDomainsKey ? (newSiteDomains.trim() || null) : null,
@@ -552,7 +555,8 @@
           publish_from: newPublishFrom || null, publish_to: newPublishTo || null,
           spread_days: newSpreadDays || 0,
           proxy_selector: newProxySelector,
-          site_langs: newSiteLangs.trim() || null, site_tlds: newSiteTlds.trim() || null,
+          pool_fallback: newPoolFallback,
+        site_langs: newSiteLangs.trim() || null, site_tlds: newSiteTlds.trim() || null,
           site_tags: poolMode === 'tags' ? (newSiteTags.join(',') || null) : null,
           site_domains: poolMode === 'domains' && !newSiteDomainsKey ? (newSiteDomains.trim() || null) : null,
           site_domains_key: poolMode === 'domains' ? newSiteDomainsKey : null,
@@ -1109,6 +1113,14 @@
                          class="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-mono" />
                 </div>
                 <p class="mt-1 text-[11px] text-slate-400">Только сайты с этим <b>языком</b> и <b>TLD</b> (через запятую). Пусто = все.</p>
+                <label class="mt-2 flex cursor-pointer items-start gap-2 rounded-md border border-slate-200 bg-slate-50 px-2.5 py-2">
+                  <input type="checkbox" bind:checked={newPoolFallback} class="mt-0.5" />
+                  <span class="text-[11px] text-slate-600">
+                    <b>Авто-добор по всему пулу</b> — если доступы под фильтром (язык/TLD/теги) кончились,
+                    не вставать в <code>need_more_admins</code>, а продолжить по остальному разрешённому пулу.
+                    Сначала точно проставит по фильтру, потом доберёт остальным.
+                  </span>
+                </label>
               </div>
 
               <div>

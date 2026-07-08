@@ -256,6 +256,17 @@ def _run_site_filter(run):
     )
 
 
+def _clear_run_pool_filters(run) -> None:
+    """Fallback-режим (pool_fallback): убрать из run В ПАМЯТИ фильтры пула
+    (lang/TLD/tags/domains), оставив только RBAC-границу создателя. После этого
+    _run_site_filter(run) вернёт всё None → отбор идёт по всему разрешённому пулу.
+    В БД не пишем — это разовое расширение на текущий прогон."""
+    gp = dict(getattr(run, "gen_params", None) or {})
+    for k in ("site_langs", "site_tlds", "site_tags", "site_domains", "site_domains_key"):
+        gp.pop(k, None)
+    run.gen_params = gp
+
+
 async def _pick_candidate_sites(
     session: AsyncSession,
     *,
@@ -1837,8 +1848,29 @@ async def _run_posting_async(run_id: int) -> dict:
             target = conc_ceiling
             last_target_at = 0.0
             need_more_admins = False
+            pool_fallback_active = False  # pool_fallback: перешли ли на полный пул
             last_progress_at = time.monotonic()
             last_posted_seen = await _read_posted_count(run_id)
+
+            async def _maybe_activate_fallback() -> bool:
+                """pool_fallback: фильтрованный пул исчерпан — если флаг включён и в
+                ПОЛНОМ разрешённом пуле (без run-фильтров) есть сайты, обнуляем
+                фильтры и продолжаем вместо need_more_admins. True если активировали."""
+                nonlocal pool_fallback_active
+                if not getattr(run, "pool_fallback", False) or pool_fallback_active:
+                    return False
+                async with WriteSession() as s_fb:
+                    any_full = await _has_postable_pending(
+                        s_fb, run=run, exclude_site_ids=set(),
+                        site_langs=None, site_tlds=None, site_tags=None, site_domains=None,
+                        creator_allowed_tags=creator_tags,
+                    )
+                if not any_full:
+                    return False
+                pool_fallback_active = True
+                _clear_run_pool_filters(run)
+                log_ctx.info("posting.pool_fallback.activated", run_id=run.id)
+                return True
 
             while True:
                 # Control flags
@@ -1889,8 +1921,7 @@ async def _run_posting_async(run_id: int) -> dict:
                                 creator_allowed_tags=creator_tags,
                             )
                         if not any_site:
-                            # Вернуть забранные в pending; финализируем в
-                            # need_more_admins, когда сольётся in-flight.
+                            # Вернуть забранные в pending.
                             async with WriteSession() as s:
                                 await s.execute(
                                     update(TextItem)
@@ -1901,7 +1932,10 @@ async def _run_posting_async(run_id: int) -> dict:
                                     .values(status=TextItemStatus.PENDING.value)
                                 )
                                 await s.commit()
-                            need_more_admins = True
+                            # pool_fallback: сначала пробуем добить по полному
+                            # разрешённому пулу; если и там пусто — need_more_admins.
+                            if not await _maybe_activate_fallback():
+                                need_more_admins = True
                         else:
                             for item in batch:
                                 t = asyncio.create_task(_post_one_item(
@@ -2011,8 +2045,10 @@ async def _run_posting_async(run_id: int) -> dict:
                                     creator_allowed_tags=creator_tags,
                                 )
                             if not any_global:
-                                need_more_admins = True
-                                log_ctx.warning("posting.no_progress.no_more_sites")
+                                # pool_fallback: попробовать полный пул перед сдачей.
+                                if not await _maybe_activate_fallback():
+                                    need_more_admins = True
+                                    log_ctx.warning("posting.no_progress.no_more_sites")
                     last_progress_at = now_mono
 
     except Exception as e:
