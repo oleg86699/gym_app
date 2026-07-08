@@ -713,7 +713,9 @@ async def _bump_site_failure(
     # уходит из пула надолго, разовый блип — ненадолго). rate_limited — короткий
     # (сайт перегружен сейчас, быстро оживает). Залоченные исключаются из
     # _pick_candidate_sites → задача встаёт в need_more_admins, а не грайндит.
-    _cd_min = 20 if kind == "rate_limited" else min(20 * new_count, 360)
+    # Потолок 150 мин (20→40→…→150 на 8-м фейле): раньше был 360 (6ч) — слишком
+    # долго держал рабочие сайты вне пула.
+    _cd_min = 20 if kind == "rate_limited" else min(20 * new_count, 150)
     values: dict = {
         "consecutive_site_failures": new_count,
         "last_site_failure_at": now,
