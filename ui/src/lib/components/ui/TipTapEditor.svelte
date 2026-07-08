@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte'
-  import { Editor } from '@tiptap/core'
+  import { Editor, Node } from '@tiptap/core'
   import StarterKit from '@tiptap/starter-kit'
   import Link from '@tiptap/extension-link'
   import Image from '@tiptap/extension-image'
@@ -10,6 +10,51 @@
   import TableRow from '@tiptap/extension-table-row'
   import TableHeader from '@tiptap/extension-table-header'
   import TableCell from '@tiptap/extension-table-cell'
+
+  // Видео-эмбеды: <iframe> (StarterKit его выбрасывает). atom — неделимый блок.
+  const Iframe = Node.create({
+    name: 'iframe',
+    group: 'block',
+    atom: true,
+    selectable: true,
+    draggable: true,
+    addAttributes() {
+      return {
+        src: { default: null },
+        width: { default: null },
+        height: { default: null },
+        title: { default: null },
+        allow: { default: null },
+        allowfullscreen: { default: null },
+        frameborder: { default: null },
+        loading: { default: null },
+        referrerpolicy: { default: null },
+        style: { default: null },
+      }
+    },
+    parseHTML() {
+      return [{ tag: 'iframe' }]
+    },
+    renderHTML({ HTMLAttributes }) {
+      return ['iframe', HTMLAttributes]
+    },
+  })
+
+  // Подпись таблицы <caption> — TipTap Table её не включает, без узла она
+  // превращалась в ячейку. Разрешаем как первый дочерний элемент таблицы (ниже).
+  const TableCaption = Node.create({
+    name: 'tableCaption',
+    content: 'inline*',
+    parseHTML() {
+      return [{ tag: 'caption' }]
+    },
+    renderHTML() {
+      return ['caption', 0]
+    },
+  })
+
+  // Таблица с разрешённой подписью: caption? затем строки.
+  const TableWithCaption = Table.extend({ content: 'tableCaption? tableRow+' })
 
   interface Props {
     content: string
@@ -71,7 +116,8 @@
       element: editorEl,
       extensions: [
         StarterKit.configure({
-          heading: { levels: [1, 2, 3] },
+          // Все уровни заголовков (h4–h6 иначе схлопывались в текст при правке).
+          heading: { levels: [1, 2, 3, 4, 5, 6] },
         }),
         Underline,
         Link.configure({
@@ -82,11 +128,13 @@
           HTMLAttributes: { rel: null, target: null },
         }),
         Image.configure({ inline: false, allowBase64: false }),
+        // Видео-эмбеды <iframe> (без узла StarterKit их выбрасывал).
+        Iframe,
         // Таблицы: без них StarterKit схлопывал <table> в плоский <p> (терялась
         // разметка при правке/сохранении). resizable выключен — это постинг-тул,
         // а не WYSIWYG-конструктор; бордеры по умолчанию, чтобы таблица не была
-        // «невидимой» после ре-сериализации.
-        Table.configure({
+        // «невидимой» после ре-сериализации. TableWithCaption разрешает <caption>.
+        TableWithCaption.configure({
           resizable: false,
           HTMLAttributes: {
             border: '1',
@@ -98,6 +146,7 @@
         TableRow,
         TableHeader,
         TableCell,
+        TableCaption,
         Placeholder.configure({ placeholder }),
       ],
       content: content || '<p></p>',
