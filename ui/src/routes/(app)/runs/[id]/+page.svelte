@@ -4,7 +4,7 @@
   import { page } from '$app/state'
   import { onDestroy, onMount } from 'svelte'
 
-  import { postings as postingsApi, projects as projectsApi, wpSites as wpSitesApi } from '$lib/api/admin'
+  import { postings as postingsApi, projects as projectsApi, wpSites as wpSitesApi, proxies as proxiesApi } from '$lib/api/admin'
   import { ApiError } from '$lib/api/client'
   import DropdownMenu from '$lib/components/ui/DropdownMenu.svelte'
   import { runModeLabel } from '$lib/runLabels'
@@ -111,6 +111,49 @@
       eAvailableTags = []
     }
   }
+  // Прокси-пул для селектора (как в форме создания).
+  let eProxySelector = $state('direct')
+  let ePoolStats = $state<{ all_active: number; providers: Record<string, number> }>({
+    all_active: 0,
+    providers: {},
+  })
+  async function loadEditPoolStats() {
+    try {
+      ePoolStats = await proxiesApi.pools()
+    } catch {
+      ePoolStats = { all_active: 0, providers: {} }
+    }
+  }
+  // Раскрывающиеся секции модала + их сводки (как в форме создания).
+  let secPoolOpen = $state(true)
+  let secSchedOpen = $state(false)
+  let secPostOpen = $state(false)
+  let ePoolSummary = $derived(
+    ePoolMode === 'tags'
+      ? `по тегам: ${eSiteTags.length || '—'}`
+      : ePoolMode === 'domains'
+        ? 'свой список доменов'
+        : eSiteLangs.trim() || eSiteTlds.trim()
+          ? [eSiteLangs.trim() && `яз: ${eSiteLangs.trim()}`, eSiteTlds.trim() && `tld: ${eSiteTlds.trim()}`]
+              .filter(Boolean)
+              .join(' · ')
+          : 'весь пул',
+  )
+  let eSchedSummary = $derived(
+    [
+      eSchedFor ? 'по расписанию' : 'сразу',
+      ePubFrom && ePubTo ? 'своё окно' : 'станд. окно',
+      eSpread > 0 ? `drip ${eSpread}д` : 'без drip',
+    ].join(' · '),
+  )
+  let ePostSummary = $derived(
+    [
+      ePriority,
+      `${eMaxPosts || 1}/сайт`,
+      eProxySelector === 'direct' ? 'без прокси' : eProxySelector === 'all' ? 'все прокси' : eProxySelector,
+      eMethod,
+    ].join(' · '),
+  )
   function isoToLocalInput(iso: string): string {
     const d = new Date(iso)
     const p = (n: number) => String(n).padStart(2, '0')
@@ -138,7 +181,13 @@
         : run.site_domains_count || run.site_domains_file
           ? 'domains'
           : 'all'
+    eProxySelector = run.proxy_selector ?? 'direct'
+    // Пул открыт по умолчанию (главное при need_more_admins), остальные свёрнуты.
+    secPoolOpen = true
+    secSchedOpen = false
+    secPostOpen = false
     void loadEditTags()
+    void loadEditPoolStats()
     editOpen = true
   }
   async function saveEdit() {
@@ -163,6 +212,7 @@
         publish_from: ePubFrom || null,
         publish_to: ePubTo || null,
         max_posts_per_site: eMaxPosts || 1,
+        proxy_selector: eProxySelector,
         site_langs: eSiteLangs.trim() || null,
         site_tlds: eSiteTlds.trim() || null,
         site_tags: ePoolMode === 'tags' ? eSiteTags.join(',') || null : null,
@@ -1443,122 +1493,179 @@
         <div class="col-span-2 truncate"><span class="text-slate-400">Имя:</span> <span class="text-slate-700">{run.name}</span></div>
       </div>
 
-      <div class="mt-4 space-y-3">
-        <!-- Пул доступов (по аналогии с формой создания) -->
-        <div>
-          <span class="block text-sm font-medium text-slate-700">Пул доступов</span>
-          <div class="mt-1 grid grid-cols-2 gap-2">
-            <input bind:value={eSiteLangs} placeholder="язык: de,en" aria-label="Языки сайтов"
-                   class="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-mono" />
-            <input bind:value={eSiteTlds} placeholder="tld: de,at,ch" aria-label="TLD доменов"
-                   class="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-mono" />
-          </div>
-          <p class="mt-1 text-[11px] text-slate-400">Только сайты с этим <b>языком</b> и <b>TLD</b> (через запятую). Пусто = все.</p>
-          <div class="mt-2 flex flex-wrap items-center gap-1.5">
-            <button type="button" onclick={() => (ePoolMode = ePoolMode === 'tags' ? 'all' : 'tags')}
-                    class="rounded-full border px-3 py-1 text-xs font-medium {ePoolMode === 'tags' ? 'border-brand-400 bg-brand-50 text-brand-700' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}">По тегам</button>
-            <button type="button" onclick={() => (ePoolMode = ePoolMode === 'domains' ? 'all' : 'domains')}
-                    class="rounded-full border px-3 py-1 text-xs font-medium {ePoolMode === 'domains' ? 'border-brand-400 bg-brand-50 text-brand-700' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}">Свой список доменов</button>
-            {#if ePoolMode === 'all'}<span class="text-[11px] text-slate-400">сейчас: весь пул</span>{/if}
-          </div>
-          {#if ePoolMode === 'tags'}
-            {#if eAvailableTags.length === 0}
-              <p class="mt-2 text-[11px] text-slate-400">Тегов пока нет.</p>
-            {:else}
-              {#if eSiteTags.length}
-                <div class="mt-2 flex flex-wrap items-center gap-1.5">
-                  {#each eSiteTags as tag}
-                    <button type="button" onclick={() => eToggleTag(tag)}
-                            class="flex items-center gap-1 rounded-full border border-brand-400 bg-brand-50 px-2.5 py-1 text-[12px] text-brand-700">
-                      {tag} <X size={11} class="inline-block" />
-                    </button>
-                  {/each}
-                  <button type="button" onclick={() => (eSiteTags = [])} class="px-1 text-[11px] text-slate-400 hover:text-slate-600">сбросить</button>
-                </div>
+      <div class="mt-4 space-y-2.5">
+        <!-- 1. Пул сайтов и доступов -->
+        <div class="rounded-md border border-slate-200">
+          <button type="button" onclick={() => (secPoolOpen = !secPoolOpen)}
+                  class="flex w-full items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-slate-50">
+            <span class="flex items-center gap-1.5 text-sm font-medium text-slate-700">
+              <span class="text-[10px] text-slate-400">{secPoolOpen ? '▼' : '▶'}</span> Пул сайтов и доступов
+            </span>
+            <span class="text-[11px] text-slate-400">{ePoolSummary}</span>
+          </button>
+          {#if secPoolOpen}
+            <div class="border-t border-slate-100 px-3 py-3">
+              <div class="grid grid-cols-2 gap-2">
+                <input bind:value={eSiteLangs} placeholder="язык: de,en" aria-label="Языки сайтов"
+                       class="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-mono" />
+                <input bind:value={eSiteTlds} placeholder="tld: de,at,ch" aria-label="TLD доменов"
+                       class="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-mono" />
+              </div>
+              <p class="mt-1 text-[11px] text-slate-400">Только сайты с этим <b>языком</b> и <b>TLD</b> (через запятую). Пусто = все.</p>
+              <div class="mt-2 flex flex-wrap items-center gap-1.5">
+                <button type="button" onclick={() => (ePoolMode = ePoolMode === 'tags' ? 'all' : 'tags')}
+                        class="rounded-full border px-3 py-1 text-xs font-medium {ePoolMode === 'tags' ? 'border-brand-400 bg-brand-50 text-brand-700' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}">По тегам</button>
+                <button type="button" onclick={() => (ePoolMode = ePoolMode === 'domains' ? 'all' : 'domains')}
+                        class="rounded-full border px-3 py-1 text-xs font-medium {ePoolMode === 'domains' ? 'border-brand-400 bg-brand-50 text-brand-700' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}">Свой список доменов</button>
+                {#if ePoolMode === 'all'}<span class="text-[11px] text-slate-400">сейчас: весь пул</span>{/if}
+              </div>
+              {#if ePoolMode === 'tags'}
+                {#if eAvailableTags.length === 0}
+                  <p class="mt-2 text-[11px] text-slate-400">Тегов пока нет.</p>
+                {:else}
+                  {#if eSiteTags.length}
+                    <div class="mt-2 flex flex-wrap items-center gap-1.5">
+                      {#each eSiteTags as tag}
+                        <button type="button" onclick={() => eToggleTag(tag)}
+                                class="flex items-center gap-1 rounded-full border border-brand-400 bg-brand-50 px-2.5 py-1 text-[12px] text-brand-700">
+                          {tag} <X size={11} class="inline-block" />
+                        </button>
+                      {/each}
+                      <button type="button" onclick={() => (eSiteTags = [])} class="px-1 text-[11px] text-slate-400 hover:text-slate-600">сбросить</button>
+                    </div>
+                  {/if}
+                  <input bind:value={eTagSearch} placeholder={`поиск среди ${eAvailableTags.length} тегов…`}
+                         class="mt-2 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
+                  <div class="mt-2 flex max-h-32 flex-wrap gap-1.5 overflow-auto">
+                    {#each eTagResults as tag}
+                      <button type="button" onclick={() => eToggleTag(tag)}
+                              class="rounded-full border border-slate-300 bg-white px-2.5 py-1 text-[12px] text-slate-600 hover:bg-slate-50">+ {tag}</button>
+                    {/each}
+                    {#if eTagResults.length === 0}
+                      <p class="text-[11px] text-slate-400">{eTagSearch.trim() ? 'Ничего не найдено.' : 'Все теги выбраны.'}</p>
+                    {/if}
+                  </div>
+                  {#if eTagResultsMore > 0}<p class="mt-1 text-[11px] text-slate-400">…ещё {eTagResultsMore} — уточни поиск.</p>{/if}
+                  <p class="mt-1 text-[11px] text-slate-400">Выбрано: <b>{eSiteTags.length}</b> · берём сайты с доступом из батча с одним из выбранных тегов.</p>
+                {/if}
+              {:else if ePoolMode === 'domains'}
+                {#if (run.site_domains_count || run.site_domains_file) && !eSiteDomains.trim()}
+                  <p class="mt-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-[11px] text-slate-500">Текущий список: <b>{run.site_domains_count ?? '—'}</b> дом.{run.site_domains_file ? ' (файл)' : ''} — введи новый, чтобы заменить.</p>
+                {/if}
+                <textarea bind:value={eSiteDomains} rows="4"
+                          placeholder="по домену в строке (или через запятую)"
+                          class="mt-2 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm font-mono"></textarea>
+                <p class="mt-1 text-[11px] text-slate-400">Постим только на эти домены — креды к ним берём из базы.</p>
               {/if}
-              <input bind:value={eTagSearch} placeholder={`поиск среди ${eAvailableTags.length} тегов…`}
-                     class="mt-2 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
-              <div class="mt-2 flex max-h-32 flex-wrap gap-1.5 overflow-auto">
-                {#each eTagResults as tag}
-                  <button type="button" onclick={() => eToggleTag(tag)}
-                          class="rounded-full border border-slate-300 bg-white px-2.5 py-1 text-[12px] text-slate-600 hover:bg-slate-50">+ {tag}</button>
-                {/each}
-                {#if eTagResults.length === 0}
-                  <p class="text-[11px] text-slate-400">{eTagSearch.trim() ? 'Ничего не найдено.' : 'Все теги выбраны.'}</p>
+            </div>
+          {/if}
+        </div>
+
+        <!-- 2. Расписание и темп -->
+        <div class="rounded-md border border-slate-200">
+          <button type="button" onclick={() => (secSchedOpen = !secSchedOpen)}
+                  class="flex w-full items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-slate-50">
+            <span class="flex items-center gap-1.5 text-sm font-medium text-slate-700">
+              <span class="text-[10px] text-slate-400">{secSchedOpen ? '▼' : '▶'}</span> Расписание и темп
+            </span>
+            <span class="text-[11px] text-slate-400">{eSchedSummary}</span>
+          </button>
+          {#if secSchedOpen}
+            <div class="space-y-3 border-t border-slate-100 px-3 py-3">
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label for="ed_sched" class="block text-sm font-medium text-slate-700">Scheduled start <span class="text-slate-400">(пусто = сразу)</span></label>
+                  <input id="ed_sched" type="datetime-local" bind:value={eSchedFor}
+                         class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
+                </div>
+                <div>
+                  <label for="ed_spread" class="block text-sm font-medium text-slate-700">Разбить на дней</label>
+                  <input id="ed_spread" type="number" min="0" max="365" bind:value={eSpread}
+                         class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
+                </div>
+              </div>
+              <div>
+                <span class="block text-sm font-medium text-slate-700">Окно публикации <span class="text-slate-400">(пусто = стандартное)</span></span>
+                <div class="mt-1 grid grid-cols-2 gap-2">
+                  <input type="date" bind:value={ePubFrom} max={ePubTo || editToday} aria-label="Publish from"
+                         class="rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
+                  <input type="date" bind:value={ePubTo} min={ePubFrom || undefined} max={editToday} aria-label="Publish to"
+                         class="rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
+                </div>
+                {#if eWindowInvalid}
+                  <p class="mt-1 text-[11px] text-red-600">Заполни обе даты, From не позже To.</p>
+                {:else if eWindowFuture}
+                  <p class="mt-1 text-[11px] text-amber-600">Дата позже сегодня — посты уйдут в Scheduled. Выбери не позже сегодняшней.</p>
                 {/if}
               </div>
-              {#if eTagResultsMore > 0}<p class="mt-1 text-[11px] text-slate-400">…ещё {eTagResultsMore} — уточни поиск.</p>{/if}
-              <p class="mt-1 text-[11px] text-slate-400">Выбрано: <b>{eSiteTags.length}</b> · берём сайты с доступом из батча с одним из выбранных тегов.</p>
-            {/if}
-          {:else if ePoolMode === 'domains'}
-            {#if (run.site_domains_count || run.site_domains_file) && !eSiteDomains.trim()}
-              <p class="mt-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-[11px] text-slate-500">Текущий список: <b>{run.site_domains_count ?? '—'}</b> дом.{run.site_domains_file ? ' (файл)' : ''} — введи новый, чтобы заменить.</p>
-            {/if}
-            <textarea bind:value={eSiteDomains} rows="4"
-                      placeholder="по домену в строке (или через запятую)"
-                      class="mt-2 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm font-mono"></textarea>
-            <p class="mt-1 text-[11px] text-slate-400">Постим только на эти домены — креды к ним берём из базы.</p>
+            </div>
           {/if}
         </div>
 
-        <div>
-          <label for="ed_mpps" class="block text-sm font-medium text-slate-700">Max posts / site</label>
-          <input id="ed_mpps" type="number" min="1" max="100" bind:value={eMaxPosts}
-                 class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
-          <p class="mt-1 text-[11px] text-slate-400">Сколько раз один сайт можно использовать. 1 = «1 сайт = 1 пост». Подними, чтобы добрать сайты из уже использованных.</p>
-        </div>
-
-        <div>
-          <span class="block text-sm font-medium text-slate-700">Priority</span>
-          <div class="mt-1 flex gap-1">
-            {#each [['low', 'Low'], ['normal', 'Normal'], ['high', 'High']] as [val, label]}
-              {@const on = ePriority === val}
-              <button type="button" onclick={() => (ePriority = val as 'low' | 'normal' | 'high')}
-                      class="flex-1 rounded-md border px-2 py-1.5 text-xs font-medium {on ? 'border-brand-600 bg-brand-50 text-brand-700' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}">{label}</button>
-            {/each}
-          </div>
-        </div>
-        <div>
-          <label for="ed_method" class="block text-sm font-medium text-slate-700">Метод постинга</label>
-          <select id="ed_method" bind:value={eMethod} class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
-            <option value="auto">Auto — XML-RPC → wp-admin</option>
-            <option value="xmlrpc_only">XML-RPC only</option>
-            <option value="admin_only">wp-admin only</option>
-          </select>
-        </div>
-        <div>
-          <label for="ed_verify" class="block text-sm font-medium text-slate-700">Валидация ссылки</label>
-          <select id="ed_verify" bind:value={eVerify} class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
-            <option value="mark">Отметка ✓/✗</option>
-            <option value="auto">Автовалидация (перепост)</option>
-          </select>
-        </div>
-        <div class="grid grid-cols-2 gap-3">
-          <div>
-            <label for="ed_sched" class="block text-sm font-medium text-slate-700">Scheduled start <span class="text-slate-400">(пусто = сразу)</span></label>
-            <input id="ed_sched" type="datetime-local" bind:value={eSchedFor}
-                   class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
-          </div>
-          <div>
-            <label for="ed_spread" class="block text-sm font-medium text-slate-700">Разбить на дней</label>
-            <input id="ed_spread" type="number" min="0" max="365" bind:value={eSpread}
-                   class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
-          </div>
-        </div>
-        <div>
-          <span class="block text-sm font-medium text-slate-700">Окно публикации <span class="text-slate-400">(пусто = стандартное)</span></span>
-          <div class="mt-1 grid grid-cols-2 gap-2">
-            <input type="date" bind:value={ePubFrom} max={ePubTo || editToday} aria-label="Publish from"
-                   class="rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
-            <input type="date" bind:value={ePubTo} min={ePubFrom || undefined} max={editToday} aria-label="Publish to"
-                   class="rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
-          </div>
-          {#if eWindowInvalid}
-            <p class="mt-1 text-[11px] text-red-600">Заполни обе даты, From не позже To.</p>
-          {:else if eWindowFuture}
-            <p class="mt-1 text-[11px] text-amber-600">Дата позже сегодня — посты уйдут в Scheduled. Выбери не позже сегодняшней.</p>
+        <!-- 3. Параметры постинга -->
+        <div class="rounded-md border border-slate-200">
+          <button type="button" onclick={() => (secPostOpen = !secPostOpen)}
+                  class="flex w-full items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-slate-50">
+            <span class="flex items-center gap-1.5 text-sm font-medium text-slate-700">
+              <span class="text-[10px] text-slate-400">{secPostOpen ? '▼' : '▶'}</span> Параметры постинга
+            </span>
+            <span class="text-[11px] text-slate-400">{ePostSummary}</span>
+          </button>
+          {#if secPostOpen}
+            <div class="space-y-3 border-t border-slate-100 px-3 py-3">
+              <div>
+                <span class="block text-sm font-medium text-slate-700">Priority</span>
+                <div class="mt-1 flex gap-1">
+                  {#each [['low', 'Low'], ['normal', 'Normal'], ['high', 'High']] as [val, label]}
+                    {@const on = ePriority === val}
+                    <button type="button" onclick={() => (ePriority = val as 'low' | 'normal' | 'high')}
+                            class="flex-1 rounded-md border px-2 py-1.5 text-xs font-medium {on ? 'border-brand-600 bg-brand-50 text-brand-700' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}">{label}</button>
+                  {/each}
+                </div>
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label for="ed_mpps" class="block text-sm font-medium text-slate-700">Max posts / site</label>
+                  <input id="ed_mpps" type="number" min="1" max="1000" bind:value={eMaxPosts}
+                         class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
+                  <p class="mt-1 text-[11px] text-slate-400"><b>1</b> = «1 сайт = 1 пост». Подними, чтобы добрать из использованных.</p>
+                </div>
+                <div>
+                  <label for="ed_proxy" class="block text-sm font-medium text-slate-700">Proxy pool</label>
+                  <select id="ed_proxy" bind:value={eProxySelector}
+                          class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
+                    {#if ePoolStats.all_active > 0}
+                      <option value="all">All proxies ({ePoolStats.all_active})</option>
+                      {#each Object.entries(ePoolStats.providers) as [name, cnt]}
+                        {#if cnt > 0}<option value={`provider:${name}`}>Provider: {name} ({cnt})</option>{/if}
+                      {/each}
+                    {/if}
+                    {#if eProxySelector && eProxySelector !== 'direct' && eProxySelector !== 'all' && !eProxySelector.startsWith('provider:')}
+                      <option value={eProxySelector}>{eProxySelector}</option>
+                    {/if}
+                    <option value="direct">— без прокси (direct) —</option>
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label for="ed_method" class="block text-sm font-medium text-slate-700">Метод постинга</label>
+                <select id="ed_method" bind:value={eMethod} class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
+                  <option value="auto">Auto — XML-RPC → wp-admin</option>
+                  <option value="xmlrpc_only">XML-RPC only</option>
+                  <option value="admin_only">wp-admin only</option>
+                </select>
+              </div>
+              <div>
+                <label for="ed_verify" class="block text-sm font-medium text-slate-700">Валидация ссылки</label>
+                <select id="ed_verify" bind:value={eVerify} class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
+                  <option value="mark">Отметка ✓/✗</option>
+                  <option value="auto">Автовалидация (перепост)</option>
+                </select>
+              </div>
+            </div>
           {/if}
         </div>
+
         <div class="flex justify-end gap-2 pt-2">
           <button type="button" onclick={() => (editOpen = false)}
                   class="rounded-md border border-slate-300 px-3 py-1.5 text-sm">Cancel</button>

@@ -70,6 +70,9 @@ class PostingRunResponse(BaseModel):
     timeout_seconds: int
     # Лимит повторного использования сайта в этой задаче (1 = «1 сайт = 1 пост»)
     max_posts_per_site: int = 1
+    # Селектор прокси-пула (direct / all / provider:<name> / single:<id>) — для
+    # префилла в форме правки.
+    proxy_selector: str | None = None
 
     pause_requested: bool
     cancel_requested: bool
