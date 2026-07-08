@@ -6,6 +6,10 @@
   import Image from '@tiptap/extension-image'
   import Placeholder from '@tiptap/extension-placeholder'
   import Underline from '@tiptap/extension-underline'
+  import Table from '@tiptap/extension-table'
+  import TableRow from '@tiptap/extension-table-row'
+  import TableHeader from '@tiptap/extension-table-header'
+  import TableCell from '@tiptap/extension-table-cell'
 
   interface Props {
     content: string
@@ -78,6 +82,22 @@
           HTMLAttributes: { rel: null, target: null },
         }),
         Image.configure({ inline: false, allowBase64: false }),
+        // Таблицы: без них StarterKit схлопывал <table> в плоский <p> (терялась
+        // разметка при правке/сохранении). resizable выключен — это постинг-тул,
+        // а не WYSIWYG-конструктор; бордеры по умолчанию, чтобы таблица не была
+        // «невидимой» после ре-сериализации.
+        Table.configure({
+          resizable: false,
+          HTMLAttributes: {
+            border: '1',
+            cellpadding: '6',
+            cellspacing: '0',
+            style: 'border-collapse:collapse; width:100%;',
+          },
+        }),
+        TableRow,
+        TableHeader,
+        TableCell,
         Placeholder.configure({ placeholder }),
       ],
       content: content || '<p></p>',
@@ -220,6 +240,13 @@
   :global(.ProseMirror a) { color: #4f46e5; text-decoration: underline; }
   :global(.ProseMirror img) { max-width: 100%; height: auto; border-radius: 4px; }
   :global(.ProseMirror hr) { border: 0; border-top: 1px solid #cbd5e1; margin: 1em 0; }
+  :global(.ProseMirror table) {
+    border-collapse: collapse; width: 100%; margin: 0 0 0.75em; font-size: 0.95em;
+  }
+  :global(.ProseMirror th), :global(.ProseMirror td) {
+    border: 1px solid #cbd5e1; padding: 6px 8px; text-align: left; vertical-align: top;
+  }
+  :global(.ProseMirror th) { background: #f1f5f9; font-weight: 600; }
   /* placeholder */
   :global(.ProseMirror p.is-editor-empty:first-child::before) {
     color: #94a3b8;
