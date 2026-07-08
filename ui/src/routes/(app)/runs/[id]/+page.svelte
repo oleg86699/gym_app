@@ -4,7 +4,7 @@
   import { page } from '$app/state'
   import { onDestroy, onMount } from 'svelte'
 
-  import { postings as postingsApi } from '$lib/api/admin'
+  import { postings as postingsApi, projects as projectsApi } from '$lib/api/admin'
   import { ApiError } from '$lib/api/client'
   import DropdownMenu from '$lib/components/ui/DropdownMenu.svelte'
   import { runModeLabel } from '$lib/runLabels'
@@ -138,8 +138,25 @@
   async function loadRun() {
     try {
       run = await postingsApi.get(runId)
+      void loadProjectDomains()
     } catch (e) {
       showToast('error', e instanceof ApiError ? e.message : String(e))
+    }
+  }
+
+  // Домены, добавленные в проект рана — по ним делаем target_domain кликабельным
+  // (ссылка на страницу домена). Нормализуем в lowercase без www для матча.
+  let projectDomains = $state<Set<string>>(new Set())
+  function normDomain(d: string): string {
+    return d.trim().toLowerCase().replace(/^www\./, '')
+  }
+  async function loadProjectDomains() {
+    if (!run) return
+    try {
+      const doms = await projectsApi.listDomains(run.project.id)
+      projectDomains = new Set(doms.map((d) => normDomain(d.domain)))
+    } catch {
+      // не критично — просто домен останется некликабельным
     }
   }
 
@@ -1206,7 +1223,15 @@
                 <!-- Link → домен, к которому привязана задача -->
                 <td class="px-3 py-2">
                   <div class="break-all font-mono text-[12px] text-slate-800">{item.link_url || '—'}</div>
-                  {#if item.target_domain}<div class="mt-0.5 text-[11px] text-slate-400">{item.target_domain}</div>{/if}
+                  {#if item.target_domain}
+                    {#if run && projectDomains.has(normDomain(item.target_domain))}
+                      <a href={`/projects/${run.project.id}/domains/${encodeURIComponent(item.target_domain)}`}
+                         class="mt-0.5 block text-[11px] text-brand-600 hover:underline"
+                         title="Открыть страницу домена">{item.target_domain}</a>
+                    {:else}
+                      <div class="mt-0.5 text-[11px] text-slate-400" title="Домена нет в проекте — добавьте, чтобы открыть его страницу">{item.target_domain}</div>
+                    {/if}
+                  {/if}
                 </td>
                 <!-- Anchor -->
                 <td class="px-3 py-2 text-slate-700">{item.link_anchor || '—'}</td>
