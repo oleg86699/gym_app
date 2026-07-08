@@ -66,7 +66,7 @@
     }
   }
 
-  // ─── Edit run params (только до старта постинга: ready / scheduled) ──
+  // ─── Edit run params (до старта + остановленные: см. canEditParams) ──
   let editOpen = $state(false)
   let editBusy = $state(false)
   let ePriority = $state<'low' | 'normal' | 'high'>('normal')
@@ -698,6 +698,14 @@
     !!run && !['done', 'cancelled', 'failed'].includes(run.status),
   )
   let canRetry = $derived(!!progress && progress.failed > 0)
+  // Правка параметров: до старта + в остановленных перезапускаемых статусах
+  // (расширить пул/окно и нажать Restart). Согласовано с бэкендом.
+  let canEditParams = $derived(
+    !!run &&
+      ['ready', 'scheduled', 'need_more_admins', 'interrupted', 'cancelled', 'failed'].includes(
+        run.status,
+      ),
+  )
   let canDownload = $derived(!!run && run.total_texts > 0)
 
   // ─── ETA + скорость постинга (как в батчах) ────────────────────────
@@ -897,10 +905,10 @@
                 class="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40">
           {busyAction === 'retry' ? '…' : `Retry failed${progress?.failed ? ` (${progress.failed})` : ''}`}
         </button>
-        {#if run.status === 'ready' || run.status === 'scheduled'}
+        {#if canEditParams}
           <button onclick={openEdit} disabled={busyAction !== null}
                   class="rounded-md border border-brand-300 bg-brand-50 px-3 py-1.5 text-sm font-medium text-brand-700 hover:bg-brand-100 disabled:opacity-40"
-                  title="Изменить параметры задачи (до старта постинга)">
+                  title="Изменить параметры (пул/окно/метод). Для остановленных — поправь и нажми Restart.">
             Edit
           </button>
         {/if}

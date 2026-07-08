@@ -1644,10 +1644,23 @@ async def update_run_endpoint(
     }
     deep_sent = deep_fields & sent
     if deep_sent:
-        if run.status not in (PostingRunStatus.READY.value, PostingRunStatus.SCHEDULED.value):
+        # Правка параметров разрешена: до старта (READY/SCHEDULED) И в
+        # «остановленных, но перезапускаемых» статусах — чтобы можно было
+        # расширить пул (TLD/язык/теги) и т.п., затем Restart. Активный постинг
+        # (running/queued/unpacking/paused) и завершённые (done) не трогаем.
+        _EDITABLE_STATUSES = {
+            PostingRunStatus.READY.value,
+            PostingRunStatus.SCHEDULED.value,
+            PostingRunStatus.NEED_MORE_ADMINS.value,
+            PostingRunStatus.INTERRUPTED.value,
+            PostingRunStatus.CANCELLED.value,
+            PostingRunStatus.FAILED.value,
+        }
+        if run.status not in _EDITABLE_STATUSES:
             raise HTTPException(
                 status_code=409,
-                detail="Параметры можно менять только до старта постинга (READY / SCHEDULED)",
+                detail="Параметры можно менять до старта или в остановленной задаче "
+                       "(READY / SCHEDULED / NEED_MORE_ADMINS / INTERRUPTED / CANCELLED / FAILED)",
             )
         for f in ("priority", "spread_days", "posting_method", "post_verify",
                   "proxy_selector", "publish_from", "publish_to"):
