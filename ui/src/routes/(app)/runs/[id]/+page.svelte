@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { ArrowLeft, ArrowRight, CheckCheck, Copy, Play, RefreshCw, RotateCw, Send, Wand2 } from 'lucide-svelte'
+  import { ArrowLeft, ArrowRight, CheckCheck, Copy, Play, RefreshCw, RotateCw, Send, Wand2, X } from 'lucide-svelte'
   import { goto } from '$app/navigation'
   import { page } from '$app/state'
   import { onDestroy, onMount } from 'svelte'
 
-  import { postings as postingsApi, projects as projectsApi } from '$lib/api/admin'
+  import { postings as postingsApi, projects as projectsApi, wpSites as wpSitesApi } from '$lib/api/admin'
   import { ApiError } from '$lib/api/client'
   import DropdownMenu from '$lib/components/ui/DropdownMenu.svelte'
   import { runModeLabel } from '$lib/runLabels'
@@ -84,6 +84,33 @@
     return a > b
   })
   let eWindowFuture = $derived((!!ePubFrom && ePubFrom > editToday) || (!!ePubTo && ePubTo > editToday))
+  // Пул доступов + max posts/site — редактируемые (по аналогии с формой создания).
+  let ePoolMode = $state<'all' | 'tags' | 'domains'>('all')
+  let eSiteTags = $state<string[]>([])
+  let eSiteLangs = $state('')
+  let eSiteTlds = $state('')
+  let eSiteDomains = $state('')
+  let eMaxPosts = $state(1)
+  let eAvailableTags = $state<string[]>([])
+  let eTagSearch = $state('')
+  const E_TAG_CAP = 40
+  let eFilteredTags = $derived.by(() => {
+    const q = eTagSearch.trim().toLowerCase()
+    return q ? eAvailableTags.filter((t) => t.toLowerCase().includes(q)) : eAvailableTags
+  })
+  let eTagResultsAll = $derived(eFilteredTags.filter((t) => !eSiteTags.includes(t)))
+  let eTagResults = $derived(eTagResultsAll.slice(0, E_TAG_CAP))
+  let eTagResultsMore = $derived(Math.max(0, eTagResultsAll.length - E_TAG_CAP))
+  function eToggleTag(tag: string) {
+    eSiteTags = eSiteTags.includes(tag) ? eSiteTags.filter((t) => t !== tag) : [...eSiteTags, tag]
+  }
+  async function loadEditTags() {
+    try {
+      eAvailableTags = await wpSitesApi.credentialTags()
+    } catch {
+      eAvailableTags = []
+    }
+  }
   function isoToLocalInput(iso: string): string {
     const d = new Date(iso)
     const p = (n: number) => String(n).padStart(2, '0')
@@ -98,12 +125,35 @@
     eSpread = run.spread_days ?? 0
     ePubFrom = run.publish_from ?? ''
     ePubTo = run.publish_to ?? ''
+    // Пул + max — префилл из текущих значений рана.
+    eMaxPosts = run.max_posts_per_site ?? 1
+    eSiteLangs = (run.site_langs ?? []).join(',')
+    eSiteTlds = (run.site_tlds ?? []).join(',')
+    eSiteTags = [...(run.site_tags ?? [])]
+    eSiteDomains = ''
+    eTagSearch = ''
+    ePoolMode =
+      run.site_tags && run.site_tags.length
+        ? 'tags'
+        : run.site_domains_count || run.site_domains_file
+          ? 'domains'
+          : 'all'
+    void loadEditTags()
     editOpen = true
   }
   async function saveEdit() {
     if (!run || editBusy || eWindowInvalid || eWindowFuture) return
     editBusy = true
     try {
+      // domains: пустое поле не отправляем — иначе затрём существующий список
+      // (его текст в ответе рана не приходит, только count). Смена на all/tags
+      // очищает домены осознанно (site_domains: null).
+      const poolExtra =
+        ePoolMode === 'domains'
+          ? eSiteDomains.trim()
+            ? { site_domains: eSiteDomains.trim() }
+            : {}
+          : { site_domains: null }
       run = await postingsApi.update(runId, {
         priority: ePriority,
         spread_days: eSpread || 0,
@@ -112,6 +162,11 @@
         scheduled_for: eSchedFor ? new Date(eSchedFor).toISOString() : null,
         publish_from: ePubFrom || null,
         publish_to: ePubTo || null,
+        max_posts_per_site: eMaxPosts || 1,
+        site_langs: eSiteLangs.trim() || null,
+        site_tlds: eSiteTlds.trim() || null,
+        site_tags: ePoolMode === 'tags' ? eSiteTags.join(',') || null : null,
+        ...poolExtra,
       })
       editOpen = false
       showToast('success', 'Параметры обновлены')
@@ -1375,10 +1430,84 @@
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
   <div class="fixed inset-0 z-30 flex items-center justify-center bg-slate-900/40 p-4" onclick={() => (editOpen = false)}>
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div class="max-h-[90vh] w-full max-w-md overflow-auto rounded-lg bg-white p-6 shadow-xl" onclick={(e) => e.stopPropagation()}>
+    <div class="max-h-[90vh] w-full max-w-lg overflow-auto rounded-lg bg-white p-6 shadow-xl" onclick={(e) => e.stopPropagation()}>
       <h2 class="text-lg font-semibold text-slate-900">Изменить параметры · run #{run.id}</h2>
-      <p class="mt-1 text-xs text-slate-500">Доступно до старта постинга (статус: {run.status}).</p>
+      <p class="mt-1 text-xs text-slate-500">Статус: {run.status}. Меняются только параметры постинга — контент и тип задачи фиксированы.</p>
+
+      <!-- Read-only контекст: что нельзя менять -->
+      <div class="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+        <div><span class="text-slate-400">Проект:</span> <span class="text-slate-700">{run.project.name}</span></div>
+        <div><span class="text-slate-400">Тип:</span> <span class="text-slate-700">{run.task_type === 'post' ? 'Пост' : run.task_type === 'homepage_link' ? 'С главной' : 'Сквозная'}</span></div>
+        <div><span class="text-slate-400">Источник:</span> <span class="text-slate-700">{run.content_source}</span></div>
+        <div><span class="text-slate-400">Текстов:</span> <span class="text-slate-700">{run.total_texts}</span></div>
+        <div class="col-span-2 truncate"><span class="text-slate-400">Имя:</span> <span class="text-slate-700">{run.name}</span></div>
+      </div>
+
       <div class="mt-4 space-y-3">
+        <!-- Пул доступов (по аналогии с формой создания) -->
+        <div>
+          <span class="block text-sm font-medium text-slate-700">Пул доступов</span>
+          <div class="mt-1 grid grid-cols-2 gap-2">
+            <input bind:value={eSiteLangs} placeholder="язык: de,en" aria-label="Языки сайтов"
+                   class="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-mono" />
+            <input bind:value={eSiteTlds} placeholder="tld: de,at,ch" aria-label="TLD доменов"
+                   class="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-mono" />
+          </div>
+          <p class="mt-1 text-[11px] text-slate-400">Только сайты с этим <b>языком</b> и <b>TLD</b> (через запятую). Пусто = все.</p>
+          <div class="mt-2 flex flex-wrap items-center gap-1.5">
+            <button type="button" onclick={() => (ePoolMode = ePoolMode === 'tags' ? 'all' : 'tags')}
+                    class="rounded-full border px-3 py-1 text-xs font-medium {ePoolMode === 'tags' ? 'border-brand-400 bg-brand-50 text-brand-700' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}">По тегам</button>
+            <button type="button" onclick={() => (ePoolMode = ePoolMode === 'domains' ? 'all' : 'domains')}
+                    class="rounded-full border px-3 py-1 text-xs font-medium {ePoolMode === 'domains' ? 'border-brand-400 bg-brand-50 text-brand-700' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}">Свой список доменов</button>
+            {#if ePoolMode === 'all'}<span class="text-[11px] text-slate-400">сейчас: весь пул</span>{/if}
+          </div>
+          {#if ePoolMode === 'tags'}
+            {#if eAvailableTags.length === 0}
+              <p class="mt-2 text-[11px] text-slate-400">Тегов пока нет.</p>
+            {:else}
+              {#if eSiteTags.length}
+                <div class="mt-2 flex flex-wrap items-center gap-1.5">
+                  {#each eSiteTags as tag}
+                    <button type="button" onclick={() => eToggleTag(tag)}
+                            class="flex items-center gap-1 rounded-full border border-brand-400 bg-brand-50 px-2.5 py-1 text-[12px] text-brand-700">
+                      {tag} <X size={11} class="inline-block" />
+                    </button>
+                  {/each}
+                  <button type="button" onclick={() => (eSiteTags = [])} class="px-1 text-[11px] text-slate-400 hover:text-slate-600">сбросить</button>
+                </div>
+              {/if}
+              <input bind:value={eTagSearch} placeholder={`поиск среди ${eAvailableTags.length} тегов…`}
+                     class="mt-2 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
+              <div class="mt-2 flex max-h-32 flex-wrap gap-1.5 overflow-auto">
+                {#each eTagResults as tag}
+                  <button type="button" onclick={() => eToggleTag(tag)}
+                          class="rounded-full border border-slate-300 bg-white px-2.5 py-1 text-[12px] text-slate-600 hover:bg-slate-50">+ {tag}</button>
+                {/each}
+                {#if eTagResults.length === 0}
+                  <p class="text-[11px] text-slate-400">{eTagSearch.trim() ? 'Ничего не найдено.' : 'Все теги выбраны.'}</p>
+                {/if}
+              </div>
+              {#if eTagResultsMore > 0}<p class="mt-1 text-[11px] text-slate-400">…ещё {eTagResultsMore} — уточни поиск.</p>{/if}
+              <p class="mt-1 text-[11px] text-slate-400">Выбрано: <b>{eSiteTags.length}</b> · берём сайты с доступом из батча с одним из выбранных тегов.</p>
+            {/if}
+          {:else if ePoolMode === 'domains'}
+            {#if (run.site_domains_count || run.site_domains_file) && !eSiteDomains.trim()}
+              <p class="mt-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-[11px] text-slate-500">Текущий список: <b>{run.site_domains_count ?? '—'}</b> дом.{run.site_domains_file ? ' (файл)' : ''} — введи новый, чтобы заменить.</p>
+            {/if}
+            <textarea bind:value={eSiteDomains} rows="4"
+                      placeholder="по домену в строке (или через запятую)"
+                      class="mt-2 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm font-mono"></textarea>
+            <p class="mt-1 text-[11px] text-slate-400">Постим только на эти домены — креды к ним берём из базы.</p>
+          {/if}
+        </div>
+
+        <div>
+          <label for="ed_mpps" class="block text-sm font-medium text-slate-700">Max posts / site</label>
+          <input id="ed_mpps" type="number" min="1" max="100" bind:value={eMaxPosts}
+                 class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
+          <p class="mt-1 text-[11px] text-slate-400">Сколько раз один сайт можно использовать. 1 = «1 сайт = 1 пост». Подними, чтобы добрать сайты из уже использованных.</p>
+        </div>
+
         <div>
           <span class="block text-sm font-medium text-slate-700">Priority</span>
           <div class="mt-1 flex gap-1">
