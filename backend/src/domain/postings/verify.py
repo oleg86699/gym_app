@@ -38,12 +38,17 @@ def domain_in_hrefs(html: str, domain: str) -> bool:
     хост-токена) в исходник страницы. Так verify устойчив к битому HTML
     (`<a href=https://x/">` без кавычек и т.п.) и не плодит лишние посты при
     auto-валидации (не отбрасывает реально размещённую ссылку из-за кривой
-    разметки). Граница `(?<![\\w.-]) … (?![\\w-])` — чтобы не ловить домен как
-    часть другого домена/слова."""
+    разметки).
+
+    Границы: слева `(?<![\\w-])` — НЕ часть более длинного лейбла (nottrustpilot.com,
+    my-trustpilot.com), но точку ПЕРЕД доменом разрешаем — иначе `www.trustpilot.com`
+    (или любой поддомен money-домена) не матчился бы с нормализованным `trustpilot.com`
+    и auto-verify давал ложный verify_failed (грайндил ран в 0). Справа `(?![\\w-])`
+    — не ловить `trustpilot.company` и т.п."""
     d = _norm_domain(domain)
     if not html or not d:
         return False
-    return re.search(r"(?<![\w.-])" + re.escape(d) + r"(?![\w-])", html, re.IGNORECASE) is not None
+    return re.search(r"(?<![\w-])" + re.escape(d) + r"(?![\w-])", html, re.IGNORECASE) is not None
 
 
 async def verify_post_link(
