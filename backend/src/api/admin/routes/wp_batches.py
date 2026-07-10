@@ -668,7 +668,7 @@ async def force_cred_status_endpoint(
 
 
 _RESULT_HEADER = [
-    "domain", "login", "password",
+    "domain", "url", "login", "password",
     "is_valid", "channel", "language", "last_validated_at",
     "error_counter", "last_error",
 ]
@@ -690,8 +690,14 @@ def _cred_to_row(cred, *, include_password: bool) -> dict:
         channel = "admin"
     else:
         channel = cred.last_validation_kind or ""
+    # url: готовый (разрешённый) XML-RPC endpoint, если discovery/валидация его нашли;
+    # иначе фолбэк на базовый https://{domain} (у domain-only, ещё не валидированных).
+    site_url = ""
+    if site:
+        site_url = site.last_working_url or (f"https://{site.domain}" if site.domain else "")
     return {
         "domain": (site.domain if site else "") or "",
+        "url": site_url,
         "login": cred.login or "",
         "password": pw_out,
         "is_valid": bool(cred.is_valid),
@@ -718,7 +724,7 @@ async def _stream_csv(
     async for cred in iter_batch_result_rows(session, batch_id, status_filter=status_filter):
         row = _cred_to_row(cred, include_password=include_password)
         writer.writerow([
-            row["domain"], row["login"], row["password"],
+            row["domain"], row["url"], row["login"], row["password"],
             "true" if row["is_valid"] else "false",
             row["channel"], row["language"], row["last_validated_at"],
             str(row["error_counter"]), row["last_error"],
@@ -734,10 +740,12 @@ async def _stream_csv(
 async def _stream_txt(
     session, batch_id, *, status_filter, include_password
 ) -> AsyncIterator[bytes]:
-    """TXT в формате Zebroid: domain<TAB>login<TAB>password (по строке на cred)."""
+    """TXT в формате Zebroid: domain<TAB>url<TAB>login<TAB>password (по строке на cred).
+    url — готовый endpoint (пусто у ещё не валидированных); симметрично import-формату,
+    где url-колонка при обратном импорте игнорируется."""
     async for cred in iter_batch_result_rows(session, batch_id, status_filter=status_filter):
         row = _cred_to_row(cred, include_password=include_password)
-        yield f"{row['domain']}\t{row['login']}\t{row['password']}\n".encode("utf-8")
+        yield f"{row['domain']}\t{row['url']}\t{row['login']}\t{row['password']}\n".encode("utf-8")
 
 
 async def _stream_json(
@@ -765,7 +773,7 @@ async def _build_xlsx_bytes(
     async for cred in iter_batch_result_rows(session, batch_id, status_filter=status_filter):
         row = _cred_to_row(cred, include_password=include_password)
         ws.append([
-            row["domain"], row["login"], row["password"],
+            row["domain"], row["url"], row["login"], row["password"],
             row["is_valid"], row["channel"], row["language"],
             row["last_validated_at"], row["error_counter"], row["last_error"],
         ])

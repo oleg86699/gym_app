@@ -46,7 +46,7 @@
   const EXPORT_FORMATS = [
     { ext: 'csv', label: 'CSV' },
     { ext: 'xlsx', label: 'Excel (XLSX)' },
-    { ext: 'txt', label: 'TXT (domain⇥login⇥pw)' },
+    { ext: 'txt', label: 'TXT (domain⇥url⇥login⇥pw)' },
     { ext: 'json', label: 'JSON' },
   ] as const
 
