@@ -123,6 +123,13 @@ def _link_count(link: dict) -> int:
         return 1
 
 
+def _first_href(html: str) -> str:
+    """Первый href из HTML-сниппета — целевой URL для verify/идемпотентности/домена."""
+    import re
+    m = re.search(r"""href\s*=\s*["']([^"']+)["']""", html or "", re.I)
+    return m.group(1).strip() if m else ""
+
+
 async def create_link_run(
     session: AsyncSession, *, project, creator, name: str, task_type: str,
     links: list[dict], concurrency: int, timeout_seconds: int,
@@ -133,6 +140,7 @@ async def create_link_run(
     max_posts_per_site: int = 1, proxy_selector: str | None = None,
     spread_days: int = 0, scheduled_for: datetime | None = None,
     publish_from: date | None = None, publish_to: date | None = None,
+    hide_methods: list[str] | None = None,
 ) -> PostingRun:
     """Создать link-run + TextItems.
 
@@ -145,10 +153,17 @@ async def create_link_run(
     простановку по N дней (not_before на айтемах). scheduled_for — отложенный старт
     (SCHEDULED → cron поднимет), иначе READY (ручной Start).
     """
-    norm = [{"url": (lk.get("url") or lk.get("link") or "").strip(),
-             "anchor": (lk.get("anchor") or "").strip(),
-             "count": _link_count(lk)} for lk in links]
-    norm = [lk for lk in norm if lk["url"]]
+    # html — готовый сниппет (ставим как есть). url нужен для verify/идемпотентности:
+    # берём явный link, иначе первый href из html.
+    norm = []
+    for lk in links:
+        html = (lk.get("html") or "").strip()
+        url = (lk.get("url") or lk.get("link") or "").strip()
+        if html and not url:
+            url = _first_href(html)
+        norm.append({"url": url, "anchor": (lk.get("anchor") or "").strip(),
+                     "count": _link_count(lk), "html": html})
+    norm = [lk for lk in norm if lk["url"] or lk["html"]]
 
     # фильтр пула сохраняем в gen_params — воркер применит при подборе сайтов
     gp: dict = {}
@@ -162,6 +177,12 @@ async def create_link_run(
         gp["site_domains"] = site_domains
     elif site_domains_key:
         gp["site_domains_key"] = site_domains_key
+    # Методы скрытия: валидные ключи; если после фильтра остаётся что-то кроме "none" —
+    # воркер на каждый сайт берёт случайный из списка (разнообразит footprint).
+    from infrastructure.wp_admin_client import WpAdminClient
+    hm = [m for m in (hide_methods or []) if m in WpAdminClient.HIDE_METHODS]
+    if any(m != "none" for m in hm):
+        gp["hide_methods"] = hm
 
     status = (PostingRunStatus.SCHEDULED if scheduled_for
               else PostingRunStatus.READY)
@@ -180,19 +201,24 @@ async def create_link_run(
     items: list[TextItem] = []
     seq = 0
     for link in norm:
-        url, anchor = link["url"], (link["anchor"] or link["url"])
+        html = link["html"]
+        url = link["url"]
+        anchor = (link["anchor"] or url or "link")
+        title = (anchor or url or "link")[:1000]
         # ограничиваем общее число размещений потолком max_sites (если задан)
         for _ in range(link["count"]):
             if max_sites is not None and seq >= max_sites:
                 break
-            h = hashlib.sha256(f"{url}|{anchor}|{run.id}|{seq}".encode()).hexdigest()
+            h = hashlib.sha256(
+                f"{url}|{anchor}|{html[:64]}|{run.id}|{seq}".encode()).hexdigest()
             seq += 1
             items.append(TextItem(
                 posting_run_id=run.id, project_id=project.id,
-                original_filename="link", title=anchor[:1000],
-                content_hash=h, byte_size=len(url.encode()),
+                original_filename="link", title=title,
+                content_hash=h, byte_size=len((html or url).encode()),
                 status=TextItemStatus.PENDING.value,
-                link_url=url, link_anchor=anchor[:500],  # site_id — на Start
+                link_url=url or None, link_anchor=(anchor[:500] if anchor else None),
+                link_html=(html or None),  # site_id — на Start
             ))
     session.add_all(items)
     run.total_texts = len(items)
@@ -213,7 +239,7 @@ async def create_link_run(
     await session.refresh(run)
     # Авто-привязка доменов целевых ссылок к проекту («забыл добавить» safety-net).
     from domain.project_domains import autobind_link_domains
-    await autobind_link_domains(session, project.id, [lk["url"] for lk in norm])
+    await autobind_link_domains(session, project.id, [lk["url"] for lk in norm if lk["url"]])
     return run
 
 
@@ -233,7 +259,9 @@ async def site_has_verified_link(session: AsyncSession, site_id: int) -> bool:
 
 async def _place_on_site(item_id: int, site_id: int, task_type: str | None,
                          url: str, anchor: str,
-                         proxy_urls: list[str | None] | None = None) -> dict:
+                         proxy_urls: list[str | None] | None = None,
+                         html: str | None = None,
+                         hide_methods: list[str] | None = None) -> dict:
     """ОДНА попытка размещения ссылки на конкретном сайте. НЕ помечает айтем
     FAILED при неудаче (это решает перебор в process_link_item) — просто
     возвращает статус. На успех — пишет POSTED + site_id + результат.
@@ -273,10 +301,12 @@ async def _place_on_site(item_id: int, site_id: int, task_type: str | None,
             lo = await client.login(site=site, login=admin_login, password=admin_pw)
             if lo.error != AdminLoginKind.OK:
                 return {"ok": False, "status": f"login_{lo.error.value}", "domain": domain}
+            # метод скрытия — случайный из выбранных (на каждый сайт свой → footprint)
+            hide = random.choice(hide_methods) if hide_methods else None
             if task_type == RunTaskType.HOMEPAGE_LINK.value:
-                outcome = await client.place_homepage_link(site, url, anchor)
+                outcome = await client.place_homepage_link(site, url, anchor, html=html, hide=hide)
             else:
-                outcome = await client.place_sitewide_link(site, url, anchor)
+                outcome = await client.place_sitewide_link(site, url, anchor, html=html, hide=hide)
     except Exception as e:
         log.warning("link.place.exception", item_id=item_id, error=str(e))
         return {"ok": False, "status": "error", "domain": domain, "error": str(e)[:200]}
@@ -323,9 +353,10 @@ async def process_link_item(
             select(PostingRun).where(PostingRun.id == item.posting_run_id))
         task_type = run.task_type if run else None
         url = item.link_url
-        anchor = item.link_anchor or url
+        html = item.link_html
+        anchor = item.link_anchor or url or "link"
         gp = (run.gen_params if run else None) or {}
-    if not url:
+    if not url and not html:
         async with WriteSession() as s:
             await _mark_item(s, item_id, TextItemStatus.FAILED, last_error="no url")
         return {"ok": False, "status": "error", "item_id": item_id}
@@ -335,6 +366,7 @@ async def process_link_item(
     site_tlds = gp.get("site_tlds")
     site_tags = gp.get("site_tags")
     site_domains = resolve_site_domains(gp)
+    hide_methods = gp.get("hide_methods")
     last_status, last_domain = "no_sites", None
     while True:
         async with WriteSession() as s:
@@ -351,7 +383,8 @@ async def process_link_item(
             return {"ok": False, "status": last_status, "item_id": item_id,
                     "domain": last_domain}
         used_sites.add(site_id)  # claim
-        res = await _place_on_site(item_id, site_id, task_type, url, anchor, proxy_urls)
+        res = await _place_on_site(item_id, site_id, task_type, url, anchor, proxy_urls,
+                                   html=html, hide_methods=hide_methods)
         last_status, last_domain = res.get("status", "error"), res.get("domain")
         if res.get("status") in ("placed", "skip_exists"):
             return res

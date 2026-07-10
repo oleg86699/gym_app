@@ -33,6 +33,7 @@ _HEADER_ALIASES = {
     "anchors": "anchor", "anchor_text": "anchor",
     "keywords": "keyword", "kw": "keyword",
     "lang": "language", "languages": "language",
+    "html": "text", "snippet": "text", "body": "text",
 }
 
 
@@ -140,5 +141,47 @@ def parse_content_csv(data: bytes) -> ParsedCsv:
                     "content_parametrs": cp,
                 })
         return ParsedCsv(fmt=fmt, rows=rows, skipped=skipped)
+    except Exception as e:
+        return ParsedCsv(fmt="", error=f"Ошибка парсинга файла: {e}")
+
+
+def parse_link_csv(data: bytes) -> ParsedCsv:
+    """Парсер входа для link-ранов (сквозная/homepage).
+
+    Столбцы: `anchor, link, count[, text]`.
+      • text (он же html/snippet) — готовый HTML-сниппет со встроенной ссылкой:
+        ставим КАК ЕСТЬ. Иначе строим <a href=link>anchor</a>.
+      • строка валидна если есть `link` ИЛИ `text` (в text ссылка уже внутри).
+      • count опц., дефолт 1 (= на сколько разных сайтов поставить).
+
+    Возвращает rows: [{link, anchor, count, html}].
+    """
+    try:
+        fieldnames, records = _read_records(data)
+        hmap = _norm_headers(fieldnames)
+
+        def g(row, key):
+            col = hmap.get(key)
+            return (row.get(col) or "").strip() if col else ""
+
+        rows: list[dict] = []
+        skipped = 0
+        for raw in records:
+            link = g(raw, "link")
+            html = g(raw, "text")
+            anchor = g(raw, "anchor")
+            if not link and not html:
+                skipped += 1
+                continue
+            try:
+                count = max(1, int(float(g(raw, "count") or "1")))
+            except ValueError:
+                count = 1
+            rows.append({"link": link, "anchor": anchor, "count": count, "html": html})
+        if not rows:
+            return ParsedCsv(fmt="link", skipped=skipped, error=(
+                "Нет валидных строк. Нужен столбец link (или text — готовый HTML "
+                "со встроенной ссылкой); count опционален."))
+        return ParsedCsv(fmt="link", rows=rows, skipped=skipped)
     except Exception as e:
         return ParsedCsv(fmt="", error=f"Ошибка парсинга файла: {e}")

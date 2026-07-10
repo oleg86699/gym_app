@@ -285,6 +285,20 @@
   let createOpen = $state(false)
   let createBusy = $state(false)
   let newTaskType = $state<'post' | 'sitewide_link' | 'homepage_link'>('post')
+  // Методы скрытия ссылки/текста (link-режимы): контент оборачивается в скрывающий
+  // <div>, ссылка остаётся в исходнике (verify проходит). Несколько → случайный на сайт.
+  const HIDE_METHODS: { key: string; label: string; hint: string }[] = [
+    { key: 'clip', label: '1px (sr-only)', hint: 'position:absolute + clip 1px' },
+    { key: 'display_none', label: 'display:none', hint: 'убран из разметки' },
+    { key: 'visibility', label: 'visibility:hidden', hint: 'невидим, место держит' },
+    { key: 'opacity', label: 'opacity:0', hint: 'прозрачен, кликабелен' },
+    { key: 'hidden_attr', label: 'hidden (атрибут)', hint: '<div hidden>' },
+    { key: 'offscreen', label: 'за экран', hint: 'left:-99999px' },
+  ]
+  let hideMethods = $state<string[]>([])  // пусто = без скрытия
+  function toggleHide(k: string) {
+    hideMethods = hideMethods.includes(k) ? hideMethods.filter((x) => x !== k) : [...hideMethods, k]
+  }
   // «Пост»: источник текстов — архив .txt / готовые тексты CSV / генерация-reuse
   let postSource = $state<'zip' | 'csv_direct' | 'gen'>('zip')
   // csv_direct: инжектить ли ссылку из строки в тело (по умолчанию НЕТ)
@@ -560,6 +574,7 @@
           site_tags: poolMode === 'tags' ? (newSiteTags.join(',') || null) : null,
           site_domains: poolMode === 'domains' && !newSiteDomainsKey ? (newSiteDomains.trim() || null) : null,
           site_domains_key: poolMode === 'domains' ? newSiteDomainsKey : null,
+          hide_methods: hideMethods,
         })
         showToast('success', `Link-run "${run.name}" создан (${run.total_texts} целей). Запусти кнопкой Start.`)
       }
@@ -1079,14 +1094,32 @@
             {#if linkCandidates !== null}<span class="font-medium text-blue-700"> Доступно admin-сайтов: {linkCandidates}.</span>{/if}
           </p>
           <div>
-            <label for="nrr_lfile" class="block text-sm font-medium text-slate-700">Файл (.csv / .xlsx): anchor, link, count *</label>
+            <label for="nrr_lfile" class="block text-sm font-medium text-slate-700">Файл (.csv / .xlsx): anchor, link, count[, text] *</label>
             <input id="nrr_lfile" type="file" required
                    accept=".csv,.xlsx,.xlsm,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                    onchange={(e) => applyFile((e.currentTarget as HTMLInputElement).files?.[0] ?? null)}
                    class="mt-1 w-full text-sm" />
             {#if newFile}<p class="mt-1 text-xs text-slate-500">{newFile.name} · {(newFile.size / 1024).toFixed(1)} KB</p>{/if}
+            <div class="mt-3">
+              <span class="block text-sm font-medium text-slate-700">Скрытие ссылки/текста (опц.)</span>
+              <p class="text-[11px] text-slate-400">Оборачиваем контент в скрывающий <code>&lt;div&gt;</code> — ссылка остаётся в исходнике страницы (проверка проходит), но не видна посетителю. Выбрано несколько — на каждый сайт берём случайный метод.</p>
+              <div class="mt-1.5 flex flex-wrap gap-1.5">
+                {#each HIDE_METHODS as m}
+                  {@const on = hideMethods.includes(m.key)}
+                  <button type="button" onclick={() => toggleHide(m.key)} title={m.hint}
+                          class="rounded-md border px-2 py-1 text-[11px] transition"
+                          class:border-brand-500={on} class:bg-brand-50={on} class:text-brand-700={on}
+                          class:border-slate-300={!on} class:text-slate-600={!on}>
+                    {on ? '✓ ' : ''}{m.label}
+                  </button>
+                {/each}
+              </div>
+              {#if hideMethods.length === 0}
+                <p class="mt-1 text-[11px] text-slate-400">Ничего не выбрано → <b>без скрытия</b>.</p>
+              {/if}
+            </div>
             <p class="mt-2 rounded-md bg-amber-50 px-2 py-1.5 text-[11px] text-amber-700">
-              <b>count</b> = на сколько сайтов поставить ссылку из строки. Площадки берутся из пула admin-сайтов без пересечений. После создания запусти прогон кнопкой <b>Start</b>.
+              <b>count</b> = на сколько сайтов поставить (опц., по умолчанию 1). Опц. <b>text</b> — готовый HTML-сниппет со встроенной ссылкой (ставим как есть). Площадки — из пула admin-сайтов без пересечений. После создания — <b>Start</b>.
             </p>
           </div>
         {/if}
@@ -1445,17 +1478,46 @@ Nawal,https://nawal.mx/,5,casino,English</pre>
           <div class="mt-3 space-y-2">
             <ul class="list-disc space-y-1 pl-5 text-slate-600">
               <li>Площадки берём из пула <b>admin</b>-сайтов проекта без пересечений (нужен доступ в wp-admin, не просто XML-RPC).</li>
-              <li>Размещение через wp-admin (виджет/меню/шаблон), затем <b>проверяем</b>, что ссылка реально видна на странице.</li>
+              <li>Размещение через wp-admin (виджет/меню/шаблон), затем <b>проверяем</b>, что ссылка есть в исходнике страницы.</li>
+              <li>Опц. <b>скрытие</b> — прячем ссылку/текст от посетителя, но не из исходника (см. блок ниже).</li>
               <li>После создания — кнопка <b>Start</b>. Можно снять размещённую ссылку позже (в деталях прогона).</li>
             </ul>
             <div class="rounded-md border border-slate-200 p-3">
               <p class="text-[12px] font-medium text-slate-500">Формат · CSV / XLSX</p>
               <p class="mt-0.5 text-slate-600">
-                Столбцы <code class="rounded bg-slate-100 px-1">anchor, link, count</code>, где <code>count</code> =
-                <b>на сколько сайтов</b> поставить эту ссылку.
+                Столбцы <code class="rounded bg-slate-100 px-1">anchor, link, count</code> + опц.
+                <code class="rounded bg-slate-100 px-1">text</code>. <code>count</code> =
+                <b>на сколько сайтов</b> поставить (опц., по умолчанию 1).
               </p>
-              <pre class="mt-1.5 overflow-auto rounded bg-slate-50 p-2 text-[11px] text-slate-600">anchor,link,count
-1Go,https://1go-slots.com/,10</pre>
+              <ul class="mt-1.5 list-disc space-y-1 pl-5 text-[12px] text-slate-600">
+                <li><b>Обычный режим</b> — заданы <code>anchor</code> + <code>link</code>: сами оборачиваем в <code>&lt;a href=link&gt;anchor&lt;/a&gt;</code>.</li>
+                <li><b>Готовый HTML</b> — задан <code>text</code>: ставим этот сниппет (текст со встроенной ссылкой и тегами) <b>как есть</b>. <code>link</code> можно оставить пустым — вытащим первый href из текста для проверки.</li>
+              </ul>
+              <pre class="mt-1.5 overflow-auto rounded bg-slate-50 p-2 text-[11px] text-slate-600">anchor,link,count,text
+1Go,https://1go-slots.com/,10,
+,https://1go-slots.com/,,&lt;p&gt;Играй на &lt;a href="https://1go-slots.com/"&gt;1Go&lt;/a&gt; сегодня&lt;/p&gt;</pre>
+              <p class="mt-1 text-[11px] text-slate-400">Сниппет с запятыми — в кавычках; в XLSX проще (просто ячейка).</p>
+            </div>
+            <div class="rounded-md border border-slate-200 p-3">
+              <p class="text-[12px] font-medium text-slate-500">Скрытие ссылки/текста (опц.)</p>
+              <p class="mt-0.5 text-slate-600">
+                Оборачиваем контент (<b>текст</b>, если задан; иначе <b>ссылку</b> <code>&lt;a href&gt;</code>) в
+                скрывающий <code>&lt;div&gt;</code>. Ссылка остаётся <b>в исходнике</b> страницы (наша проверка её
+                находит), но <b>не видна</b> посетителю. Выбрано несколько методов — на каждый сайт берём
+                <b>случайный</b> (разнообразит footprint).
+              </p>
+              <ul class="mt-1.5 list-disc space-y-1 pl-5 text-[12px] text-slate-600">
+                <li><b>Без скрытия</b> — ничего не выбрано: обычная видимая ссылка.</li>
+                <li><code>1px (sr-only)</code> — <code>position:absolute</code> + клип в 1px; классический a11y-хайд.</li>
+                <li><code>display:none</code> — элемент убран из разметки, соседи занимают место.</li>
+                <li><code>visibility:hidden</code> — невидим, но место держит.</li>
+                <li><code>opacity:0</code> — прозрачен (кликабелен), место держит.</li>
+                <li><code>hidden</code> — HTML-атрибут <code>&lt;div hidden&gt;</code>, аналог <code>display:none</code>.</li>
+                <li><code>за экран</code> — <code>position:absolute; left:-99999px</code>.</li>
+              </ul>
+              <p class="mt-1.5 rounded bg-amber-50 px-2 py-1 text-[11px] text-amber-700">
+                ⚠ Скрытые ссылки — против правил Google (может привести к санкции на сайт-донор). Используй осознанно.
+              </p>
             </div>
           </div>
         {:else if modesTab === 'homepage'}
@@ -1466,17 +1528,45 @@ Nawal,https://nawal.mx/,5,casino,English</pre>
           <div class="mt-3 space-y-2">
             <ul class="list-disc space-y-1 pl-5 text-slate-600">
               <li>Площадки — из пула <b>admin</b>-сайтов проекта без пересечений.</li>
-              <li>Правим контент/шаблон главной через wp-admin и <b>проверяем</b> видимость ссылки.</li>
+              <li>Правим контент/шаблон главной через wp-admin и <b>проверяем</b> наличие ссылки в исходнике.</li>
+              <li>Опц. <b>скрытие</b> — прячем ссылку/текст от посетителя, но не из исходника (см. блок ниже). Работает и здесь, и в «Сквозной».</li>
               <li>После создания — кнопка <b>Start</b>.</li>
             </ul>
             <div class="rounded-md border border-slate-200 p-3">
               <p class="text-[12px] font-medium text-slate-500">Формат · CSV / XLSX</p>
               <p class="mt-0.5 text-slate-600">
-                Столбцы <code class="rounded bg-slate-100 px-1">anchor, link, count</code>, где <code>count</code> =
-                на сколько сайтов поставить ссылку.
+                Столбцы <code class="rounded bg-slate-100 px-1">anchor, link, count</code> + опц.
+                <code class="rounded bg-slate-100 px-1">text</code>. <code>count</code> =
+                на сколько сайтов поставить (опц., по умолчанию 1).
               </p>
-              <pre class="mt-1.5 overflow-auto rounded bg-slate-50 p-2 text-[11px] text-slate-600">anchor,link,count
-1Go,https://1go-slots.com/,10</pre>
+              <ul class="mt-1.5 list-disc space-y-1 pl-5 text-[12px] text-slate-600">
+                <li><b>Обычный режим</b> — заданы <code>anchor</code> + <code>link</code>: сами оборачиваем в <code>&lt;a href=link&gt;anchor&lt;/a&gt;</code>.</li>
+                <li><b>Готовый HTML</b> — задан <code>text</code>: ставим сниппет (текст со встроенной ссылкой) <b>как есть</b>; <code>link</code> опц. (вытащим href из текста).</li>
+              </ul>
+              <pre class="mt-1.5 overflow-auto rounded bg-slate-50 p-2 text-[11px] text-slate-600">anchor,link,count,text
+1Go,https://1go-slots.com/,10,
+,https://1go-slots.com/,,&lt;p&gt;Обзор &lt;a href="https://1go-slots.com/"&gt;1Go&lt;/a&gt;&lt;/p&gt;</pre>
+            </div>
+            <div class="rounded-md border border-slate-200 p-3">
+              <p class="text-[12px] font-medium text-slate-500">Скрытие ссылки/текста (опц.)</p>
+              <p class="mt-0.5 text-slate-600">
+                Оборачиваем контент (<b>текст</b>, если задан; иначе <b>ссылку</b> <code>&lt;a href&gt;</code>) в
+                скрывающий <code>&lt;div&gt;</code>. Ссылка остаётся <b>в исходнике</b> страницы (наша проверка её
+                находит), но <b>не видна</b> посетителю. Выбрано несколько методов — на каждый сайт берём
+                <b>случайный</b> (разнообразит footprint).
+              </p>
+              <ul class="mt-1.5 list-disc space-y-1 pl-5 text-[12px] text-slate-600">
+                <li><b>Без скрытия</b> — ничего не выбрано: обычная видимая ссылка.</li>
+                <li><code>1px (sr-only)</code> — <code>position:absolute</code> + клип в 1px; классический a11y-хайд.</li>
+                <li><code>display:none</code> — элемент убран из разметки, соседи занимают место.</li>
+                <li><code>visibility:hidden</code> — невидим, но место держит.</li>
+                <li><code>opacity:0</code> — прозрачен (кликабелен), место держит.</li>
+                <li><code>hidden</code> — HTML-атрибут <code>&lt;div hidden&gt;</code>, аналог <code>display:none</code>.</li>
+                <li><code>за экран</code> — <code>position:absolute; left:-99999px</code>.</li>
+              </ul>
+              <p class="mt-1.5 rounded bg-amber-50 px-2 py-1 text-[11px] text-amber-700">
+                ⚠ Скрытые ссылки — против правил Google (может привести к санкции на сайт-донор). Используй осознанно.
+              </p>
             </div>
           </div>
         {:else}
@@ -1484,7 +1574,7 @@ Nawal,https://nawal.mx/,5,casino,English</pre>
           <ul class="mt-3 list-disc space-y-1.5 pl-5 text-slate-600">
             <li>Заголовки регистронезависимы; принимаются синонимы: <code>links/url → link</code>, <code>anchors → anchor</code>, <code>counts → count</code>, <code>keywords/kw → keyword</code>, <code>lang → language</code>.</li>
             <li>CSV в UTF-8 (разделитель — запятая) или XLSX (берётся первый лист, первая строка — заголовки).</li>
-            <li>Минимум для распознавания: тексты — <code class="rounded bg-slate-100 px-1">anchor, link, text</code>; кампания/ссылки — <code class="rounded bg-slate-100 px-1">anchor, link, count</code>.</li>
+            <li>Минимум для распознавания: тексты — <code class="rounded bg-slate-100 px-1">anchor, link, text</code>; кампания — <code class="rounded bg-slate-100 px-1">anchor, link, count</code>; сквозная/с главной — <code class="rounded bg-slate-100 px-1">anchor, link, count</code> + опц. <code class="rounded bg-slate-100 px-1">text</code> (готовый HTML-сниппет).</li>
             <li>Прокси, расписание, drip и фильтр пула сайтов — в блоке «Дополнительно» формы создания.</li>
           </ul>
         {/if}

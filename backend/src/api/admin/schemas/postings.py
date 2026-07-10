@@ -338,6 +338,10 @@ class CreateLinkRunFileParams(BaseModel):
     spread_days: int = Field(default=0, ge=0, le=365)
     # Селектор прокси-пула: "direct" | "all" | "provider:<name>" | "single:<id>".
     proxy_selector: str | None = Field(default=None, max_length=120)
+    # Методы скрытия ссылки/сниппета: оборачиваем контент в скрывающий <div>.
+    # Ключи: none|clip|display_none|visibility|opacity|hidden_attr|offscreen.
+    # Пусто/[none] = без скрытия. Несколько → воркер берёт случайный на каждый сайт.
+    hide_methods: list[str] = Field(default_factory=list, max_length=10)
     # Окно публикации [publish_from, publish_to] для этого прогона. Обе пустые →
     # глобальный дефолт из app_settings.
     publish_from: date | None = None

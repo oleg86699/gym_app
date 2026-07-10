@@ -573,13 +573,14 @@ async def link_candidates_count(
 async def create_link_run_endpoint(
     project_id: int,
     request: Request,
-    file: UploadFile = File(..., description="csv/xlsx: anchor, link, count (count = на сколько сайтов)"),
+    file: UploadFile = File(..., description="csv/xlsx: anchor, link, count[, text] (count = на сколько сайтов; text = готовый HTML-сниппет)"),
     params: str = Form(..., description="JSON: {name, task_type, priority}"),
     viewer: AdminUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_write),
 ) -> PostingRunResponse:
-    """Создать run сквозной/homepage ссылки из файла anchor,link,count. count =
-    на сколько сайтов поставить ссылку. Сайты — из пула администраторов (без
+    """Создать run сквозной/homepage ссылки из файла anchor,link,count[,text]. count =
+    на сколько сайтов поставить ссылку. text (опц.) — готовый HTML-сниппет со
+    встроенной ссылкой: ставим как есть. Сайты — из пула администраторов (без
     пересечений), запускается потом обычным /start."""
     try:
         parsed = CreateLinkRunFileParams.model_validate_json(params)
@@ -593,17 +594,18 @@ async def create_link_run_endpoint(
     await _require_tags_allowed(session, viewer, parsed.site_tags)
     fn = (file.filename or "").lower()
     if not fn.endswith((".csv", ".xlsx", ".xlsm")):
-        raise HTTPException(status_code=400, detail="Нужен .csv или .xlsx (anchor,link,count)")
+        raise HTTPException(status_code=400, detail="Нужен .csv или .xlsx (anchor,link,count[,text])")
     contents = await file.read()
     if len(contents) > 50 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="File too large (>50 MB)")
 
-    from domain.content_engine import parse_content_csv
-    pc = parse_content_csv(contents)
+    from domain.content_engine import parse_link_csv
+    pc = parse_link_csv(contents)
     if pc.error or not pc.rows:
         raise HTTPException(status_code=400,
-                            detail=pc.error or "Нет валидных строк (нужно anchor,link,count)")
-    links = [{"url": r["link"], "anchor": r.get("anchor") or "", "count": r.get("count") or 1}
+                            detail=pc.error or "Нет валидных строк (нужно link или text)")
+    links = [{"url": r["link"], "anchor": r.get("anchor") or "",
+              "count": r.get("count") or 1, "html": r.get("html") or ""}
              for r in pc.rows]
 
     app_cfg = await get_app_settings(session)
@@ -624,6 +626,7 @@ async def create_link_run_endpoint(
         proxy_selector=parsed.proxy_selector, spread_days=parsed.spread_days,
         scheduled_for=parsed.scheduled_for,
         publish_from=pub_from, publish_to=pub_to,
+        hide_methods=parsed.hide_methods,
     )
     log.info("postings.link_run.created", run_id=run.id, project_id=project_id,
              task_type=parsed.task_type, links=len(links), total=run.total_texts, actor_id=viewer.id)

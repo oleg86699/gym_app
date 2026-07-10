@@ -278,6 +278,10 @@ class TextItem(Base, TimestampedMixin):
     # как и где разместили (для verify, идемпотентности и удаления).
     link_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     link_anchor: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Готовый HTML-сниппет (текст со встроенной ссылкой + теги) — ставим КАК ЕСТЬ,
+    # вместо авто-обёртки <a href=link>anchor</a>. NULL = обычный режим (url+anchor).
+    # link_url при этом хранит целевой URL для verify/идемпотентности (парсим из html).
+    link_html: Mapped[str | None] = mapped_column(Text, nullable=True)
     placed_via: Mapped[str | None] = mapped_column(String(20), nullable=True)
     # id/маркер для поиска и удаления: widget_id | menu_item_id | template_id#block | file-marker
     placement_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)

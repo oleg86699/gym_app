@@ -88,8 +88,25 @@
   let newPriority = $state<PostingRunPriority>('normal')
   let newScheduledFor = $state('')  // datetime-local string
   let newSpreadDays = $state(0)  // drip-feed: размазать постинг на N дней (0 = сразу)
-  let linkRows = $state<{ url: string; anchor: string }[]>([{ url: '', anchor: '' }])
+  // html (опц.) — готовый HTML-сниппет со встроенной ссылкой: ставим как есть,
+  // вместо авто-обёртки <a href=url>anchor</a>. url при этом нужен только для verify
+  // (можно оставить пустым — вытащим первый href из сниппета).
+  let linkRows = $state<{ url: string; anchor: string; html: string }[]>([{ url: '', anchor: '', html: '' }])
   let linkSites = $state(10)  // на сколько сайтов ставить каждую ссылку (count)
+  // Методы скрытия: контент оборачивается в скрывающий <div> (ссылка остаётся в
+  // исходнике → verify проходит). Несколько выбранных → случайный на каждый сайт.
+  const HIDE_METHODS: { key: string; label: string; hint: string }[] = [
+    { key: 'clip', label: '1px (sr-only)', hint: 'position:absolute + clip 1px' },
+    { key: 'display_none', label: 'display:none', hint: 'убран из разметки' },
+    { key: 'visibility', label: 'visibility:hidden', hint: 'невидим, место держит' },
+    { key: 'opacity', label: 'opacity:0', hint: 'прозрачен, кликабелен' },
+    { key: 'hidden_attr', label: 'hidden (атрибут)', hint: '<div hidden>' },
+    { key: 'offscreen', label: 'за экран', hint: 'left:-99999px' },
+  ]
+  let hideMethods = $state<string[]>([])  // пусто = без скрытия
+  function toggleHide(k: string) {
+    hideMethods = hideMethods.includes(k) ? hideMethods.filter((x) => x !== k) : [...hideMethods, k]
+  }
   let linkCandidates = $state<number | null>(null)
 
   async function refreshLinkCandidates() {
@@ -215,16 +232,18 @@
         showToast('success', `Run "${run.name}" created`)
       } else {
         const links = linkRows
-          .map((r) => ({ url: r.url.trim(), anchor: r.anchor.trim() }))
-          .filter((r) => r.url)
-        if (links.length === 0) { showToast('error', 'Добавь хотя бы одну ссылку (URL)'); createBusy = false; return }
-        // строим CSV anchor,link,count (count = на сколько сайтов) и шлём файлом
+          .map((r) => ({ url: r.url.trim(), anchor: r.anchor.trim(), html: r.html.trim() }))
+          .filter((r) => r.url || r.html)
+        if (links.length === 0) { showToast('error', 'Добавь ссылку (URL) или готовый HTML-текст'); createBusy = false; return }
+        // строим CSV anchor,link,count,text (count = на сколько сайтов; text = готовый сниппет)
         const cnt = Math.max(1, linkSites)
-        const csv = 'anchor,link,count\n' + links.map((l) =>
-          `"${l.anchor.replace(/"/g, '""')}","${l.url.replace(/"/g, '""')}",${cnt}`).join('\n')
+        const q = (s: string) => `"${s.replace(/"/g, '""')}"`
+        const csv = 'anchor,link,count,text\n' + links.map((l) =>
+          `${q(l.anchor)},${q(l.url)},${cnt},${q(l.html)}`).join('\n')
         const file = new File([csv], 'links.csv', { type: 'text/csv' })
         const run = await postingsApi.createLinkRun(projectId, file, {
           name: newName, task_type: newTaskType, priority: newPriority,
+          hide_methods: hideMethods,
         })
         showToast('success', `Link-run "${run.name}" создан (${run.total_texts} целей). Запусти кнопкой Start.`)
       }
@@ -536,29 +555,52 @@
         </div>
         {:else}
         <div>
-          <span class="block text-sm font-medium text-slate-700">Ссылки (URL · anchor)</span>
+          <span class="block text-sm font-medium text-slate-700">Ссылки (URL · anchor · опц. HTML-текст)</span>
           <div class="mt-1 space-y-2">
             {#each linkRows as row, i}
-              <div class="flex gap-2">
-                <input type="url" placeholder="https://target.com/page" bind:value={row.url}
-                       class="flex-1 rounded-md border border-slate-300 px-2 py-1.5 text-sm font-mono" />
-                <input type="text" placeholder="anchor text" bind:value={row.anchor}
-                       class="flex-1 rounded-md border border-slate-300 px-2 py-1.5 text-sm" />
-                <button type="button" title="Убрать"
-                        onclick={() => { linkRows = linkRows.filter((_, j) => j !== i) }}
-                        class="rounded-md border border-slate-300 px-2 text-slate-400 hover:text-red-600">×</button>
+              <div class="rounded-md border border-slate-200 p-2 space-y-1.5">
+                <div class="flex gap-2">
+                  <input type="url" placeholder="https://target.com/page" bind:value={row.url}
+                         class="flex-1 rounded-md border border-slate-300 px-2 py-1.5 text-sm font-mono" />
+                  <input type="text" placeholder="anchor text" bind:value={row.anchor}
+                         class="flex-1 rounded-md border border-slate-300 px-2 py-1.5 text-sm" />
+                  <button type="button" title="Убрать"
+                          onclick={() => { linkRows = linkRows.filter((_, j) => j !== i) }}
+                          class="rounded-md border border-slate-300 px-2 text-slate-400 hover:text-red-600">×</button>
+                </div>
+                <textarea bind:value={row.html} rows="2"
+                          placeholder="(опц.) готовый HTML: <p>текст <a href=&quot;https://target.com&quot;>анкор</a> ещё текст</p> — ставим как есть"
+                          class="w-full rounded-md border border-slate-300 px-2 py-1.5 text-xs font-mono"></textarea>
               </div>
             {/each}
           </div>
-          <button type="button" onclick={() => { linkRows = [...linkRows, { url: '', anchor: '' }] }}
+          <button type="button" onclick={() => { linkRows = [...linkRows, { url: '', anchor: '', html: '' }] }}
                   class="mt-2 text-xs font-medium text-brand-600 hover:underline">+ ещё ссылку</button>
           <div class="mt-2 flex items-center gap-2">
             <label for="lnk_sites" class="text-xs font-medium text-slate-700">Сайтов на ссылку</label>
             <input id="lnk_sites" type="number" min="1" max="100000" bind:value={linkSites}
                    class="w-24 rounded-md border border-slate-300 px-2 py-1 text-sm" />
           </div>
+          <div class="mt-3">
+            <span class="block text-xs font-medium text-slate-700">Скрытие ссылки/текста (опц.)</span>
+            <p class="text-[11px] text-slate-400">Оборачиваем контент в скрывающий <code>&lt;div&gt;</code> — ссылка остаётся в исходнике страницы (проверка проходит), но не видна посетителю. Выбрано несколько — на каждый сайт берём случайный метод.</p>
+            <div class="mt-1.5 flex flex-wrap gap-1.5">
+              {#each HIDE_METHODS as m}
+                {@const on = hideMethods.includes(m.key)}
+                <button type="button" onclick={() => toggleHide(m.key)} title={m.hint}
+                        class="rounded-md border px-2 py-1 text-[11px] transition"
+                        class:border-brand-500={on} class:bg-brand-50={on} class:text-brand-700={on}
+                        class:border-slate-300={!on} class:text-slate-600={!on}>
+                  {on ? '✓ ' : ''}{m.label}
+                </button>
+              {/each}
+            </div>
+            {#if hideMethods.length === 0}
+              <p class="mt-1 text-[11px] text-slate-400">Ничего не выбрано → <b>без скрытия</b> (ставим как обычно).</p>
+            {/if}
+          </div>
           <p class="mt-2 rounded-md bg-amber-50 px-2 py-1.5 text-[11px] text-amber-700">
-            Каждая ссылка ставится на N доступных admin-сайтов (без пересечений). После создания — <b>Start</b>.
+            Каждая строка ставится на N доступных admin-сайтов (без пересечений). Если задан <b>HTML-текст</b> — ставим его как есть (URL можно оставить пустым, вытащим ссылку из текста для проверки); иначе оборачиваем <code>URL</code> в анкор. После создания — <b>Start</b>.
           </p>
         </div>
         {/if}

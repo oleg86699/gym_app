@@ -743,6 +743,7 @@ export const postings = {
       site_tags?: string | null
       site_domains?: string | null
       site_domains_key?: string | null
+      hide_methods?: string[]
     },
   ) => {
     const fd = new FormData()

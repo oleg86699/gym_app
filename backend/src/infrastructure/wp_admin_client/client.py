@@ -1235,16 +1235,70 @@ class WpAdminClient:
     def _link_html(url: str, anchor: str) -> str:
         return f'<a href="{escape(url, quote=True)}">{escape(anchor)}</a>'
 
-    async def _place_via_widget(self, base, nonce, probe, url, anchor) -> str | None:
+    # ─── Методы скрытия: оборачивают контент в <div>, но ссылка остаётся в
+    # HTML-ИСХОДНИКЕ страницы (verify проверяет исходник подстрокой → проходит). ──
+    _HIDE_STYLES = {
+        # sr-only / 1px-clip — «в пиксель», классический a11y-хайд
+        "clip": ("position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;"
+                 "clip:rect(0,0,0,0);white-space:nowrap;border:0;padding:0;"),
+        "display_none": "display:none;",
+        "visibility": "visibility:hidden;",
+        "opacity": "opacity:0;",
+        "offscreen": "position:absolute;left:-99999px;",
+    }
+    # + "hidden_attr" (атрибут <div hidden>) и "none" (без скрытия) — обрабатываются отдельно.
+    # Все валидные ключи методов скрытия (единый источник правды для API/UI/воркера).
+    HIDE_METHODS = frozenset(_HIDE_STYLES) | {"hidden_attr", "none"}
+
+    @staticmethod
+    def _wrap_hidden(content: str, method: str | None) -> str:
+        """Обернуть контент в скрывающий <div> по методу. Неизвестный/none → как есть."""
+        if not method or method == "none":
+            return content
+        if method == "hidden_attr":
+            return f"<div hidden>{content}</div>"
+        style = WpAdminClient._HIDE_STYLES.get(method)
+        return f'<div style="{style}">{content}</div>' if style else content
+
+    @staticmethod
+    def _effective_content(url: str, anchor: str, html: str | None,
+                           hide: str | None) -> str | None:
+        """Что реально размещаем как HTML-блок:
+          • hide задан → оборачиваем контент (сниппет html, иначе <a href>anchor</a>)
+            в скрывающий <div> → всегда custom-HTML-блок;
+          • hide=none/None → возвращаем html как есть (None = обычный режим <a>)."""
+        if not hide or hide == "none":
+            return html
+        base = html if html else WpAdminClient._link_html(url, anchor)
+        return WpAdminClient._wrap_hidden(base, hide)
+
+    @staticmethod
+    def _link_block(marker: str, url: str, anchor: str, html: str | None,
+                    *, wrap_p: bool = False) -> str:
+        """wp:html-блок для FSE-шаблона / контента страницы.
+        html задан → ставим готовый сниппет КАК ЕСТЬ между comment-сентинелами
+        <!--glref:marker-->…<!--/glref:marker--> (устойчиво к вложенным тегам в
+        сниппете при удалении); иначе строим <a href data-glref>anchor</a>
+        (опц. в <p> — для контента статической главной)."""
+        if html:
+            return (f'<!-- wp:html --><!--glref:{marker}-->{html}'
+                    f'<!--/glref:{marker}--><!-- /wp:html -->')
+        a = (f'<a href="{escape(url, quote=True)}" '
+             f'data-glref="{marker}">{escape(anchor)}</a>')
+        inner = f'<p>{a}</p>' if wrap_p else a
+        return f'<!-- wp:html -->{inner}<!-- /wp:html -->'
+
+    async def _place_via_widget(self, base, nonce, probe, url, anchor, html=None) -> str | None:
         sidebar = probe.footer_sidebar_id
         if not sidebar:
             return None
+        content = html if html else self._link_html(url, anchor)
         try:
             r = await self._client.post(
                 f"{base}/wp-json/wp/v2/widgets",
                 headers={"X-WP-Nonce": nonce, "Content-Type": "application/json"},
                 json={"id_base": "custom_html", "sidebar": sidebar,
-                      "instance": {"raw": {"title": "", "content": self._link_html(url, anchor)}}},
+                      "instance": {"raw": {"title": "", "content": content}}},
                 timeout=self._timeout, follow_redirects=False,
             )
             if r.status_code in (200, 201):
@@ -1254,8 +1308,9 @@ class WpAdminClient:
             log.debug("link.widget.error", error=str(e))
         return None
 
-    async def _place_via_nav_menu(self, base, nonce, probe, url, anchor) -> str | None:
-        if not probe.footer_menu_id:
+    async def _place_via_nav_menu(self, base, nonce, probe, url, anchor, html=None) -> str | None:
+        # menu-item держит только title+url, не произвольный HTML → сниппет тут не ставим
+        if html or not probe.footer_menu_id:
             return None
         try:
             r = await self._client.post(
@@ -1272,7 +1327,7 @@ class WpAdminClient:
             log.debug("link.navmenu.error", error=str(e))
         return None
 
-    async def _place_via_fse(self, base, nonce, probe, url, anchor) -> str | None:
+    async def _place_via_fse(self, base, nonce, probe, url, anchor, html=None) -> str | None:
         part_id = probe.footer_template_part_id
         if not part_id:
             return None
@@ -1281,8 +1336,7 @@ class WpAdminClient:
             return None
         content = part.get("content")
         raw = content.get("raw") if isinstance(content, dict) else (content or "")
-        block = (f'<!-- wp:html --><a href="{escape(url, quote=True)}" '
-                 f'data-glref="{part_id}">{escape(anchor)}</a><!-- /wp:html -->')
+        block = self._link_block(part_id, url, anchor, html)
         try:
             r = await self._client.post(   # POST = update в WP REST
                 f"{base}/wp-json/wp/v2/template-parts/{part_id}",
@@ -1298,16 +1352,23 @@ class WpAdminClient:
 
     async def place_sitewide_link(
         self, site: "WpSite", url: str, anchor: str, *,
+        html: str | None = None, hide: str | None = None,
         probe: LinkPlacementProbe | None = None,
     ) -> LinkPlaceOutcome:
         """Поставить сквозную ссылку. Цепочка REST-методов с обязательным verify:
         каждый метод размещает → verify (анонимно) → не подтвердилось → откат и
-        следующий метод. Вызывать после успешного login() администратором."""
+        следующий метод. Вызывать после успешного login() администратором.
+
+        html — готовый HTML-сниппет (со встроенной ссылкой): ставим как есть;
+        url при этом используется только для verify. hide — метод скрытия: контент
+        оборачивается в скрывающий <div> (ссылка остаётся в исходнике → verify ок).
+        nav_menu в html/hide-режиме пропускается (меню не держит произвольный HTML)."""
         base = self._site_base_url(site)
         nonce = await self._get_rest_nonce(base)
         if not nonce:
             return LinkPlaceOutcome(error=LinkPlaceKind.NO_NONCE)
         probe = probe or await self.probe_link_placement(site, nonce=nonce)
+        content = self._effective_content(url, anchor, html, hide)
 
         # FSE-тему пробуем шаблоном первым; иначе виджет → меню
         chain: list[tuple[str, object]] = []
@@ -1316,7 +1377,7 @@ class WpAdminClient:
         chain += [("widget", self._place_via_widget), ("nav_menu", self._place_via_nav_menu)]
 
         for via, method in chain:
-            ref = await method(base, nonce, probe, url, anchor)
+            ref = await method(base, nonce, probe, url, anchor, content)
             if not ref:
                 continue
             ok, urls = await self.verify_link(site, url)
@@ -1341,15 +1402,14 @@ class WpAdminClient:
                 return by_slug[slug]
         return None
 
-    async def _place_home_via_page(self, base, nonce, page_id, url, anchor) -> str | None:
-        """Дописать ссылку в контент статической главной (page_on_front)."""
+    async def _place_home_via_page(self, base, nonce, page_id, url, anchor, html=None) -> str | None:
+        """Дописать ссылку/сниппет в контент статической главной (page_on_front)."""
         _, page = await self._rest_get(base, f"/wp/v2/pages/{page_id}?context=edit", nonce)
         if not isinstance(page, dict):
             return None
         content = page.get("content")
         raw = content.get("raw") if isinstance(content, dict) else (content or "")
-        block = (f'<!-- wp:html --><p><a href="{escape(url, quote=True)}" '
-                 f'data-glref="home{page_id}">{escape(anchor)}</a></p><!-- /wp:html -->')
+        block = self._link_block(f"home{page_id}", url, anchor, html, wrap_p=True)
         try:
             r = await self._client.post(
                 f"{base}/wp-json/wp/v2/pages/{page_id}",
@@ -1362,8 +1422,8 @@ class WpAdminClient:
             log.debug("link.home_page.error", error=str(e))
         return None
 
-    async def _place_home_via_fse(self, base, nonce, url, anchor) -> str | None:
-        """Вставить блок в FSE-шаблон главной (front-page/home)."""
+    async def _place_home_via_fse(self, base, nonce, url, anchor, html=None) -> str | None:
+        """Вставить блок/сниппет в FSE-шаблон главной (front-page/home)."""
         tpl_id = await self._homepage_template_id(base, nonce)
         if not tpl_id:
             return None
@@ -1372,8 +1432,7 @@ class WpAdminClient:
             return None
         content = tpl.get("content")
         raw = content.get("raw") if isinstance(content, dict) else (content or "")
-        block = (f'<!-- wp:html --><a href="{escape(url, quote=True)}" '
-                 f'data-glref="htpl">{escape(anchor)}</a><!-- /wp:html -->')
+        block = self._link_block("htpl", url, anchor, html)
         try:
             r = await self._client.post(
                 f"{base}/wp-json/wp/v2/templates/{tpl_id}",
@@ -1388,23 +1447,28 @@ class WpAdminClient:
 
     async def place_homepage_link(
         self, site: "WpSite", url: str, anchor: str, *,
+        html: str | None = None, hide: str | None = None,
         probe: LinkPlacementProbe | None = None,
     ) -> LinkPlaceOutcome:
         """Ссылка с главной. Блочная тема → правим FSE-шаблон главной; статическая
-        главная (show_on_front=page) → дописываем в контент страницы. С verify."""
+        главная (show_on_front=page) → дописываем в контент страницы. С verify.
+
+        html — готовый HTML-сниппет (url только для verify). hide — метод скрытия:
+        оборачиваем контент в скрывающий <div> (ссылка остаётся в исходнике)."""
         base = self._site_base_url(site)
         nonce = await self._get_rest_nonce(base)
         if not nonce:
             return LinkPlaceOutcome(error=LinkPlaceKind.NO_NONCE)
         probe = probe or await self.probe_link_placement(site, nonce=nonce)
+        content = self._effective_content(url, anchor, html, hide)
 
         chain: list[tuple[str, object]] = []
         if probe.is_block_theme:
             chain.append(("home_template",
-                          lambda: self._place_home_via_fse(base, nonce, url, anchor)))
+                          lambda: self._place_home_via_fse(base, nonce, url, anchor, content)))
         if probe.show_on_front == "page" and probe.page_on_front:
             chain.append(("home_page",
-                          lambda: self._place_home_via_page(base, nonce, probe.page_on_front, url, anchor)))
+                          lambda: self._place_home_via_page(base, nonce, probe.page_on_front, url, anchor, content)))
 
         if not chain:
             return LinkPlaceOutcome(
@@ -1511,11 +1575,17 @@ class WpAdminClient:
         raw = content.get("raw") if isinstance(content, dict) else (content or "")
         if not raw:
             return False
-        # снимаем <a data-glref="marker">...</a> вместе с опциональными wp:html/<p> обёртками
+        m = re.escape(marker)
+        # 1) дефолт-ссылка: <a data-glref="marker">...</a> (± wp:html/<p> обёртки)
         cleaned = re.sub(
             r'(?:<!-- wp:html -->\s*)?(?:<p>\s*)?<a [^>]*data-glref="'
-            + re.escape(marker) + r'"[^>]*>.*?</a>(?:\s*</p>)?(?:\s*<!-- /wp:html -->)?',
+            + m + r'"[^>]*>.*?</a>(?:\s*</p>)?(?:\s*<!-- /wp:html -->)?',
             "", raw, flags=re.S)
+        # 2) готовый сниппет: <!--glref:marker-->...<!--/glref:marker--> (± wp:html)
+        cleaned = re.sub(
+            r'(?:<!-- wp:html -->\s*)?<!--glref:' + m + r'-->.*?<!--/glref:'
+            + m + r'-->(?:\s*<!-- /wp:html -->)?',
+            "", cleaned, flags=re.S)
         try:
             r = await self._client.post(
                 f"{base}/wp-json{rest_path.split('?')[0]}",
