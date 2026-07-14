@@ -945,15 +945,17 @@ async def run_batch_validation(
         proxy_url as _proxy_url,
         report_proxy_failure_by_url,
     )
-    _client_cache: dict[int | None, tuple[httpx.AsyncClient, str | None]] = {}
-
-    async def _get_client(px: Proxy | None) -> tuple[httpx.AsyncClient, str | None]:
-        key = px.id if px else None
-        if key not in _client_cache:
-            http_c = await _build_http_client(px)
-            purl_c = _proxy_url(px) if (px and px.is_active) else None
-            _client_cache[key] = (http_c, purl_c)
-        return _client_cache[key]
+    async def _new_client(px: Proxy | None) -> tuple[httpx.AsyncClient, str | None]:
+        """Свежий httpx-клиент на КАЖДЫЙ вызов — НЕ шарим между кредами.
+        Раньше клиент кэшировался по прокси и шарился всеми параллельными кредами;
+        отмена per-cred `asyncio.wait_for` рвала запрос в полёте и портила пул
+        общего клиента (httpx: 'Cannot send a request, as the client has been
+        closed') → соседние креды падали на Tier 2 и списывались в invalid. Свой
+        клиент на кред = отмена бьёт только по нему. Владелец (_one) закрывает все
+        созданные клиенты в finally. Тот же паттерн, что в постинге (_place_on_site)."""
+        http_c = await _build_http_client(px)
+        purl_c = _proxy_url(px) if (px and px.is_active) else None
+        return http_c, purl_c
 
     def _pick_proxy(exclude_ids: set[int]) -> Proxy | None:
         avail = [p for p in proxy_pool if p.id not in exclude_ids]
@@ -1002,11 +1004,12 @@ async def run_batch_validation(
         _PROXY_RETRIES = 3
 
         async def _validate_one_work(
-            cred: WpCredential,
+            cred: WpCredential, clients: list[httpx.AsyncClient],
         ) -> tuple[ValidateOutcome, httpx.AsyncClient | None, str | None]:
             """Tier1 XML-RPC с ротацией прокси + ретраем дохлых. Возвращает
             (outcome, http, purl) — клиент/прокси на котором получили результат
-            (его же переиспользуют Tier2/lang)."""
+            (его же переиспользуют Tier2/lang). Все созданные клиенты кладём в
+            `clients` — владелец (_one) закроет их в finally (в т.ч. при отмене)."""
             if cred.site:
                 await rate_limiter.acquire(cred.site.domain)
             pw = decrypt_password(cred.password)
@@ -1018,7 +1021,8 @@ async def run_batch_validation(
                 px = _pick_proxy(tried)
                 if px is not None:
                     tried.add(px.id)
-                http, purl = await _get_client(px)
+                http, purl = await _new_client(px)
+                clients.append(http)  # владелец закроет в finally
                 poster = XmlRpcPoster(http, timeout_seconds=VALIDATE_TIMEOUT_S, proxy_url=purl)
                 try:
                     outcome = await poster.validate(site=cred.site, login=cred.login, password=pw)
@@ -1260,7 +1264,16 @@ async def run_batch_validation(
                 #   2) И нет prior подтверждения can_admin_login=True
                 # Иначе сохраняем prior trust — текущий неудачный attempt
                 # мог быть из-за случайной 415/timeout/etc.
-                if not tier1_decisive and cred.can_admin_login is not True:
+                #
+                # НО чисто ИНФРА-провалы (network / 5xx — дохлый прокси, CF
+                # rate-limit, временный 503) — это «не смогли проверить», а НЕ
+                # «плохой доступ». Их не инвалидируем: cred остаётся transient
+                # (kind Tier1, напр. xmlrpc_disabled → ELSE в cred_status), чтобы
+                # Re-failed перепроверил, а не списал живой доступ навсегда.
+                _tier2_infra = login_res.error in (
+                    AdminLoginKind.NETWORK, AdminLoginKind.SERVER_ERROR,
+                )
+                if not tier1_decisive and cred.can_admin_login is not True and not _tier2_infra:
                     cred_values["is_valid"] = False
 
             # Сайт ОТВЕТИЛ через админку (ok / явный auth-fail) → он жив, даже
@@ -1323,93 +1336,103 @@ async def run_batch_validation(
                 # Без этого один зависший cred держит слот навсегда.
                 _http: httpx.AsyncClient | None = None
                 _purl: str | None = None
+                # httpx-клиенты ЭТОГО крода — свои, не общие. Закрываем в finally
+                # (в т.ч. при отмене) — отмена wait_for больше не портит соседей.
+                clients: list[httpx.AsyncClient] = []
                 try:
-                    outcome, _http, _purl = await asyncio.wait_for(
-                        _validate_one_work(cred), timeout=VALIDATE_PER_CRED_TIMEOUT_S
-                    )
-                except asyncio.TimeoutError:
-                    log.warning(
-                        "validate.cred_timeout",
-                        cred_id=cred.id,
-                        domain=cred.site.domain if cred.site else None,
-                        timeout_s=VALIDATE_PER_CRED_TIMEOUT_S,
-                    )
-                    outcome = ValidateOutcome(
-                        error=ErrorKind.TASK_TIMEOUT,
-                        error_message=f"hard timeout {VALIDATE_PER_CRED_TIMEOUT_S}s",
-                    )
-
-                # Запись результата отдельной wait_for-обёрткой — не должна тянуть
-                # больше нескольких секунд (один SQL), но защищаемся от хвоста.
-                try:
-                    kind = await asyncio.wait_for(
-                        _persist_outcome(cred.id, outcome), timeout=30
-                    )
-                except asyncio.TimeoutError:
-                    log.warning("validate.persist_timeout", cred_id=cred.id)
-                    kind = "transient"
-                except Exception as e:
-                    log.exception("validate.persist_failed", cred_id=cred.id, error=str(e))
-                    kind = "transient"
-
-                if kind == "ok":
-                    valid += 1
-                elif kind == "invalid":
-                    invalid += 1
-                elif kind != "skipped":
-                    transient += 1
-                processed += 1
-
-                # Tier2/lang идут через клиент/прокси Tier1. Если Tier1 отвалился
-                # по таймауту (_http=None) — берём свежий из пула.
-                if _http is None:
-                    _http, _purl = await _get_client(_pick_proxy(set()))
-
-                # Tier 2 (admin form-login + capability probes) — опционально,
-                # отдельной wait_for-обёрткой чтобы не задерживать счётчики.
-                if level in ("medium", "full"):
                     try:
-                        await asyncio.wait_for(
-                            _maybe_run_tier2(cred, outcome, _http, _purl),
+                        outcome, _http, _purl = await asyncio.wait_for(
+                            _validate_one_work(cred, clients),
                             timeout=VALIDATE_PER_CRED_TIMEOUT_S,
                         )
                     except asyncio.TimeoutError:
-                        log.warning("validate.tier2.timeout", cred_id=cred.id)
-                    except Exception as e:
-                        log.exception("validate.tier2.failed", cred_id=cred.id, error=str(e))
-
-                # Lang detection — отдельным шагом со своим таймаутом, чтобы
-                # медленный homepage GET не убивал запись результата валидации.
-                try:
-                    await asyncio.wait_for(
-                        _maybe_detect_lang(cred.id, outcome, _http),
-                        timeout=VALIDATE_TIMEOUT_S + 5,
-                    )
-                except asyncio.TimeoutError:
-                    log.warning("validate.lang.timeout", cred_id=cred.id)
-                except Exception as e:
-                    log.warning("validate.lang.step_failed", cred_id=cred.id, error=str(e))
-
-                # Периодически обновляем counters на батче (каждые 10 cred)
-                if processed % 10 == 0:
-                    async with WriteSession() as s3:
-                        await s3.execute(
-                            update(WpImportBatch).where(WpImportBatch.id == batch_id).values(
-                                valid_count=valid,
-                                invalid_count=invalid,
-                                transient_count=transient,
-                            )
+                        log.warning(
+                            "validate.cred_timeout",
+                            cred_id=cred.id,
+                            domain=cred.site.domain if cred.site else None,
+                            timeout_s=VALIDATE_PER_CRED_TIMEOUT_S,
                         )
-                        await s3.commit()
+                        outcome = ValidateOutcome(
+                            error=ErrorKind.TASK_TIMEOUT,
+                            error_message=f"hard timeout {VALIDATE_PER_CRED_TIMEOUT_S}s",
+                        )
+
+                    # Запись результата отдельной wait_for-обёрткой — не должна тянуть
+                    # больше нескольких секунд (один SQL), но защищаемся от хвоста.
+                    try:
+                        kind = await asyncio.wait_for(
+                            _persist_outcome(cred.id, outcome), timeout=30
+                        )
+                    except asyncio.TimeoutError:
+                        log.warning("validate.persist_timeout", cred_id=cred.id)
+                        kind = "transient"
+                    except Exception as e:
+                        log.exception("validate.persist_failed", cred_id=cred.id, error=str(e))
+                        kind = "transient"
+
+                    if kind == "ok":
+                        valid += 1
+                    elif kind == "invalid":
+                        invalid += 1
+                    elif kind != "skipped":
+                        transient += 1
+                    processed += 1
+
+                    # Tier2/lang идут через клиент/прокси Tier1. Если Tier1 отвалился
+                    # по таймауту (_http=None) — берём свежий (тоже в clients).
+                    if _http is None:
+                        _http, _purl = await _new_client(_pick_proxy(set()))
+                        clients.append(_http)
+
+                    # Tier 2 (admin form-login + capability probes) — опционально,
+                    # отдельной wait_for-обёрткой чтобы не задерживать счётчики.
+                    if level in ("medium", "full"):
+                        try:
+                            await asyncio.wait_for(
+                                _maybe_run_tier2(cred, outcome, _http, _purl),
+                                timeout=VALIDATE_PER_CRED_TIMEOUT_S,
+                            )
+                        except asyncio.TimeoutError:
+                            log.warning("validate.tier2.timeout", cred_id=cred.id)
+                        except Exception as e:
+                            log.exception("validate.tier2.failed", cred_id=cred.id, error=str(e))
+
+                    # Lang detection — отдельным шагом со своим таймаутом, чтобы
+                    # медленный homepage GET не убивал запись результата валидации.
+                    try:
+                        await asyncio.wait_for(
+                            _maybe_detect_lang(cred.id, outcome, _http),
+                            timeout=VALIDATE_TIMEOUT_S + 5,
+                        )
+                    except asyncio.TimeoutError:
+                        log.warning("validate.lang.timeout", cred_id=cred.id)
+                    except Exception as e:
+                        log.warning("validate.lang.step_failed", cred_id=cred.id, error=str(e))
+
+                    # Периодически обновляем counters на батче (каждые 10 cred)
+                    if processed % 10 == 0:
+                        async with WriteSession() as s3:
+                            await s3.execute(
+                                update(WpImportBatch).where(WpImportBatch.id == batch_id).values(
+                                    valid_count=valid,
+                                    invalid_count=invalid,
+                                    transient_count=transient,
+                                )
+                            )
+                            await s3.commit()
+                finally:
+                    # Закрываем httpx-клиенты крода (по одному на прокси-попытку).
+                    for _c in clients:
+                        try:
+                            await _c.aclose()
+                        except Exception:
+                            pass
 
         await asyncio.gather(*(_one(c) for c in creds), return_exceptions=False)
     finally:
-        # Закрываем все httpx-клиенты из кэша (по одному на прокси).
-        for _http_c, _ in _client_cache.values():
-            try:
-                await _http_c.aclose()
-            except Exception:
-                pass
+        # httpx-клиенты теперь у каждого крода свои и закрываются в _one (finally).
+        # Общего кэша клиентов больше нет — здесь закрывать нечего.
+        pass
 
     # Финализация
     async with WriteSession() as s_fin:
