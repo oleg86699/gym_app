@@ -130,6 +130,17 @@ def _first_href(html: str) -> str:
     return m.group(1).strip() if m else ""
 
 
+def _first_anchor(html: str) -> str:
+    """Видимый текст первого <a>…</a> сниппета — как анкор (для отображения/экспорта,
+    как в POST-задачах). Вложенные теги вычищаем, пробелы схлопываем."""
+    import re
+    m = re.search(r"<a\b[^>]*>(.*?)</a>", html or "", re.I | re.S)
+    if not m:
+        return ""
+    inner = re.sub(r"<[^>]+>", "", m.group(1))  # снять вложенные <b>/<span> и т.п.
+    return re.sub(r"\s+", " ", inner).strip()
+
+
 async def create_link_run(
     session: AsyncSession, *, project, creator, name: str, task_type: str,
     links: list[dict], concurrency: int, timeout_seconds: int,
@@ -153,15 +164,19 @@ async def create_link_run(
     простановку по N дней (not_before на айтемах). scheduled_for — отложенный старт
     (SCHEDULED → cron поднимет), иначе READY (ручной Start).
     """
-    # html — готовый сниппет (ставим как есть). url нужен для verify/идемпотентности:
-    # берём явный link, иначе первый href из html.
+    # html — готовый сниппет (ставим как есть). Колонки link/anchor имеют приоритет;
+    # если пустые — достаём из самого сниппета: url = первый href, anchor = текст <a>.
     norm = []
     for lk in links:
         html = (lk.get("html") or "").strip()
         url = (lk.get("url") or lk.get("link") or "").strip()
-        if html and not url:
-            url = _first_href(html)
-        norm.append({"url": url, "anchor": (lk.get("anchor") or "").strip(),
+        anchor = (lk.get("anchor") or "").strip()
+        if html:
+            if not url:
+                url = _first_href(html)
+            if not anchor:
+                anchor = _first_anchor(html)  # анкор из <a>-тега сниппета (как в POST)
+        norm.append({"url": url, "anchor": anchor,
                      "count": _link_count(lk), "html": html})
     norm = [lk for lk in norm if lk["url"] or lk["html"]]
 
