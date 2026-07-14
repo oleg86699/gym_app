@@ -224,9 +224,11 @@ async def recover_stalled_batches() -> dict:
 
     run_batch_validation отбивает повторный запуск гардом «already running» пока
     статус 'validating', поэтому сперва выводим батч из 'validating' (→ 'paused'),
-    затем переочередь validate_batch_task(scope='all') — cooldown сам пропустит
-    уже проверенных. provision_after=False: в авто-recovery НЕ создаём
-    пользователей на сайтах без ведома оператора.
+    затем переочередь validate_batch_task(scope='pending') — только НЕ проверенные
+    (last_validated_at IS NULL), т.е. незавершённый бэклог. scope='all' здесь был
+    багом: он тратил циклы на re-confirm уже готовых кредов вместо оставшихся
+    pending (счётчики стояли, бэклог не разгребался). provision_after=False:
+    в авто-recovery НЕ создаём пользователей на сайтах без ведома оператора.
     """
     from infrastructure.db.models import WpBatchStatus, WpCredential, WpImportBatch
 
@@ -275,7 +277,7 @@ async def recover_stalled_batches() -> dict:
         try:
             await validate_batch_task.kiq(
                 batch_id=bid,
-                scope="all",
+                scope="pending",  # только незавершённые (last_validated_at IS NULL)
                 level="full",
                 provision_after=False,
                 concurrency=settings.DEFAULT_VALIDATION_CONCURRENCY,
