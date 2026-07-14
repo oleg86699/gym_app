@@ -1538,9 +1538,22 @@ async def validate_links_endpoint(
             status_code=status.HTTP_409_CONFLICT,
             detail="No verified links to re-validate in this run.",
         )
+    # Очередь: не больше max_concurrent_link_checks проверок одновременно —
+    # иначе пачка внешних GET-ов забивает прокси-пул/CPU и мешает постингу.
+    # Под лимитом — запускаем сразу (claim 'running'); иначе оставляем 'queued',
+    # dispatch_queued_link_checks поднимет по мере освобождения слотов.
+    cfg = await get_app_settings(session)
+    limit = int(getattr(cfg, "max_concurrent_link_checks", 2) or 2)
+    running = int(await session.scalar(
+        select(func.count(PostingRun.id)).where(
+            PostingRun.link_check_status == "running",
+            PostingRun.deleted_at.is_(None),
+        )
+    ) or 0)
+    start_now = running < limit
     await session.execute(
         update(PostingRun).where(PostingRun.id == run_id).values(
-            link_check_status="queued",
+            link_check_status=("running" if start_now else "queued"),
             link_check_total=target,
             link_check_done=0,
             link_check_valid=0,
@@ -1548,9 +1561,11 @@ async def validate_links_endpoint(
     )
     await session.commit()
 
-    from workers.taskiq.validate_links import validate_run_links
-    await validate_run_links.kiq(run_id)
-    log.info("postings.validate_links_requested", run_id=run_id, actor_id=viewer.id, total=target)
+    if start_now:
+        from workers.taskiq.validate_links import validate_run_links
+        await validate_run_links.kiq(run_id)
+    log.info("postings.validate_links_requested", run_id=run_id, actor_id=viewer.id,
+             total=target, started=start_now, running=running, limit=limit)
     await audit_record(
         session, actor=viewer, action="postings.validate_links",
         resource_type="run", resource_id=run_id,

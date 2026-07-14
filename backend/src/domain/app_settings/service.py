@@ -40,6 +40,8 @@ MAX_CONCURRENCY_FLOOR = 100
 # Сколько батчей валидируется одновременно (остальные в очереди).
 MIN_MAX_CONCURRENT_BATCH_VALIDATIONS = 1
 MAX_MAX_CONCURRENT_BATCH_VALIDATIONS = 20
+MIN_MAX_CONCURRENT_LINK_CHECKS = 1
+MAX_MAX_CONCURRENT_LINK_CHECKS = 20
 
 # Пороги авто-выключения сайта (site-class фейлы подряд). Общий и отдельный CF.
 MIN_SITE_DISABLE_THRESHOLD = 3
@@ -86,6 +88,7 @@ async def update_app_settings(
     site_disable_threshold: int | None = None,
     site_disable_threshold_cf: int | None = None,
     max_concurrent_batch_validations: int | None = None,
+    max_concurrent_link_checks: int | None = None,
     default_publish_from: object = _UNSET,
     default_publish_to: object = _UNSET,
 ) -> AppSettings:
@@ -133,6 +136,14 @@ async def update_app_settings(
                 f"[{MIN_MAX_CONCURRENT_BATCH_VALIDATIONS}, {MAX_MAX_CONCURRENT_BATCH_VALIDATIONS}]"
             )
         row.max_concurrent_batch_validations = max_concurrent_batch_validations
+    if max_concurrent_link_checks is not None:
+        if not (MIN_MAX_CONCURRENT_LINK_CHECKS <= max_concurrent_link_checks
+                <= MAX_MAX_CONCURRENT_LINK_CHECKS):
+            raise ValueError(
+                f"max_concurrent_link_checks must be in "
+                f"[{MIN_MAX_CONCURRENT_LINK_CHECKS}, {MAX_MAX_CONCURRENT_LINK_CHECKS}]"
+            )
+        row.max_concurrent_link_checks = max_concurrent_link_checks
     if site_disable_threshold is not None:
         if not (MIN_SITE_DISABLE_THRESHOLD <= site_disable_threshold <= MAX_SITE_DISABLE_THRESHOLD):
             raise ValueError(

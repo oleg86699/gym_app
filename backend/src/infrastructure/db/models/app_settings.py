@@ -72,6 +72,14 @@ class AppSettings(Base, TimestampedMixin):
         Integer, nullable=False, server_default="3"
     )
 
+    # Сколько перепроверок ссылок (link-check) идёт ОДНОВРЕМЕННО. Остальные ждут
+    # в link_check_status='queued', dispatch_queued_link_checks поднимает по мере
+    # освобождения слотов — чтобы пачка проверок не забивала прокси-пул/CPU и не
+    # мешала постингу (это внешние GET-ы страниц постов).
+    max_concurrent_link_checks: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="2"
+    )
+
     # Окно публикации: каждому посту воркер ставит случайную дату в диапазоне
     # [publish_from, publish_to]. Если оба NULL — все посты публикуются текущим
     # моментом. Если окно уже в прошлом — воркер клампит к now (см. posting.py).

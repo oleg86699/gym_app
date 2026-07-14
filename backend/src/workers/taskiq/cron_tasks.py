@@ -345,6 +345,55 @@ async def dispatch_queued_batches() -> dict:
     return {"ok": True, "promoted": len(promoted), "active": active}
 
 
+@broker.task(
+    task_name="postings.dispatch_queued_link_checks",
+    schedule=[{"cron": "* * * * *"}],
+)
+async def dispatch_queued_link_checks() -> dict:
+    """Поднять перепроверки ссылок из очереди (link_check_status='queued') по мере
+    освобождения слотов. Лимит одновременных = app_settings.max_concurrent_link_checks.
+    Claim'им слот (сразу 'running'), чтобы следующий тик не поднял повторно."""
+    from domain.app_settings.service import get_app_settings
+    from infrastructure.db.models import PostingRun
+
+    async with WriteSession() as s:
+        # Застрявшие 'running' (воркер умер на деплое до finally задачи, что ставит
+        # 'done') — вернуть в 'queued', иначе слот заблокирован навсегда. Порог с
+        # запасом: даже большая проверка (сотни ссылок) укладывается сильно быстрее.
+        await s.execute(
+            update(PostingRun).where(
+                PostingRun.link_check_status == "running",
+                PostingRun.link_check_at.isnot(None),
+                PostingRun.link_check_at < datetime.now(UTC) - timedelta(minutes=30),
+            ).values(link_check_status="queued"))
+        await s.commit()
+        cfg = await get_app_settings(s)
+        limit = int(getattr(cfg, "max_concurrent_link_checks", 2) or 2)
+        active = int(await s.scalar(
+            select(func.count(PostingRun.id)).where(
+                PostingRun.link_check_status == "running",
+                PostingRun.deleted_at.is_(None))) or 0)
+        slots = limit - active
+        if slots <= 0:
+            return {"ok": True, "promoted": 0, "active": active}
+        rows = (await s.execute(
+            select(PostingRun).where(
+                PostingRun.link_check_status == "queued",
+                PostingRun.deleted_at.is_(None),
+            ).order_by(PostingRun.id).limit(slots))).scalars().all()
+        promoted = [r.id for r in rows]
+        for r in rows:
+            r.link_check_status = "running"   # claim слот
+        await s.commit()
+
+    from workers.taskiq.validate_links import validate_run_links
+    for rid in promoted:
+        await validate_run_links.kiq(rid)
+    if promoted:
+        log.info("linkchecks.queue_dispatched", ids=promoted, count=len(promoted))
+    return {"ok": True, "promoted": len(promoted), "active": active}
+
+
 @broker.task(task_name="content.generate_campaign")
 async def generate_campaign_task(run_id: int) -> dict:
     """Генерация csv_campaign-рана (отдельная полоса, не блокирует постинг)."""
