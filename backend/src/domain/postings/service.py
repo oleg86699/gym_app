@@ -342,6 +342,63 @@ async def get_text_item(session: AsyncSession, item_id: int) -> TextItem | None:
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
+# Айтем в активной работе воркера — удалять нельзя (гонка с постингом/генерацией).
+_UNDELETABLE_ITEM_STATUSES: frozenset[str] = frozenset({
+    TextItemStatus.POSTING.value,
+    TextItemStatus.GENERATING.value,
+})
+
+
+async def delete_text_item(
+    session: AsyncSession, *, run_id: int, item_id: int, actor_id: int | None = None,
+) -> dict:
+    """Hard-delete одного text_item прогона + пересчёт денорм-счётчиков рана.
+
+    Если ран стоял в needs_review и после удаления не осталось needs_review/активных
+    айтемов — финализируем ран в done (posted/failed/skipped — терминальные).
+    Айтемы в активной работе (posting/generating) удалять запрещаем.
+    """
+    item = await session.scalar(
+        select(TextItem).where(
+            TextItem.id == item_id, TextItem.posting_run_id == run_id)
+    )
+    if item is None:
+        return {"ok": False, "status": "not_found"}
+    st = item.status
+    if st in _UNDELETABLE_ITEM_STATUSES:
+        return {"ok": False, "status": "active", "item_status": st}
+
+    run = await session.scalar(select(PostingRun).where(PostingRun.id == run_id))
+
+    await session.execute(sa_delete(TextItem).where(TextItem.id == item_id))
+    # Декремент денорм-счётчиков рана (ADR-003). total всегда; posted/failed/skipped
+    # — только если удаляемый айтем был в этом терминальном статусе.
+    vals: dict = {"total_texts": PostingRun.total_texts - 1}
+    if st == TextItemStatus.POSTED.value:
+        vals["posted_count"] = PostingRun.posted_count - 1
+    elif st == TextItemStatus.FAILED.value:
+        vals["failed_count"] = PostingRun.failed_count - 1
+    elif st == TextItemStatus.SKIPPED.value:
+        vals["skipped_count"] = PostingRun.skipped_count - 1
+    await session.execute(
+        update(PostingRun).where(PostingRun.id == run_id).values(**vals))
+    await session.commit()
+
+    # Финализация: ран висел в needs_review из-за таких айтемов — если их (и любых
+    # активных) больше нет, ран завершён.
+    new_run_status: str | None = None
+    if run is not None and run.status == PostingRunStatus.NEEDS_REVIEW.value:
+        counts = await run_progress_counts(session, run_id)
+        remaining = (counts["pending"] + counts["posting"] + counts["generating"]
+                     + counts["needs_review"])
+        if remaining == 0:
+            await set_run_status(
+                session, run_id=run_id, status=PostingRunStatus.DONE)
+            new_run_status = PostingRunStatus.DONE.value
+
+    return {"ok": True, "deleted_status": st, "run_status": new_run_status}
+
+
 # Статусы, в которых разрешено редактировать содержимое.
 # Запрещаем только POSTING (воркер прямо сейчас использует этот контент).
 # Для POSTED правки сохраняются локально; для синка с WP нужна отдельная фича

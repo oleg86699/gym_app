@@ -57,6 +57,7 @@ from domain.postings.service import (
     can_view_run,
     count_active_runs_for_user,
     create_run,
+    delete_text_item,
     get_run,
     item_sort_key,
     list_runs_for_project,
@@ -761,6 +762,32 @@ async def remove_link_endpoint(
         session, actor=viewer, action="postings.remove_link",
         resource_type="text_item", resource_id=item_id,
         changes={"run_id": run_id, "status": res.get("status")},
+    )
+    return res
+
+
+@postings_router.post("/{run_id}/text-items/{item_id}/delete",
+                      status_code=status.HTTP_200_OK)
+async def delete_text_item_endpoint(
+    run_id: int,
+    item_id: int,
+    viewer: AdminUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_write),
+) -> dict:
+    """Удалить один text_item прогона (hard-delete) + пересчёт счётчиков рана.
+    Айтемы в активной работе (posting/generating) удалять нельзя."""
+    run, _ = await _load_run_or_403(session, run_id, viewer, manage=True)
+    res = await delete_text_item(session, run_id=run.id, item_id=item_id, actor_id=viewer.id)
+    if not res.get("ok"):
+        if res.get("status") == "active":
+            raise HTTPException(status_code=409,
+                                detail="Айтем в работе (posting/generating) — удалить нельзя")
+        raise HTTPException(status_code=404, detail="Item not found")
+    await audit_record(
+        session, actor=viewer, action="postings.delete_text_item",
+        resource_type="text_item", resource_id=item_id,
+        changes={"run_id": run_id, "deleted_status": res.get("deleted_status"),
+                 "run_status": res.get("run_status")},
     )
     return res
 

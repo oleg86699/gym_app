@@ -680,6 +680,11 @@ export const postings = {
       `/admin/api/postings/${runId}/text-items`,
       query as Record<string, string | number | undefined>,
     ),
+  deleteTextItem: (runId: number, itemId: number) =>
+    api.post<{ ok: boolean; deleted_status: string; run_status: string | null }>(
+      `/admin/api/postings/${runId}/text-items/${itemId}/delete`,
+      {},
+    ),
   update: (
     runId: number,
     payload: {

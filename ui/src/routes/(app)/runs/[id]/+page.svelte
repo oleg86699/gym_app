@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ArrowLeft, ArrowRight, CheckCheck, Copy, Play, RefreshCw, RotateCw, Send, Wand2, X } from 'lucide-svelte'
+  import { ArrowLeft, ArrowRight, CheckCheck, Copy, Play, RefreshCw, RotateCw, Send, Trash2, Wand2, X } from 'lucide-svelte'
   import { goto } from '$app/navigation'
   import { page } from '$app/state'
   import { onDestroy, onMount } from 'svelte'
@@ -603,12 +603,36 @@
     loadItems()
   }
 
-  // ─── Сортировка колонок таблицы текстов (клиентская, по загруженным) ──
+  // ─── Сортировка колонок таблицы текстов ──
+  // Клиентская сортировка идёт по ЗАГРУЖЕННЫМ айтемам. Чтобы сортировка была по
+  // ВСЕМ (а не только по первой странице), при клике догружаем остальные страницы
+  // текущего фильтра. Для фильтра по статусу (напр. needs_review) их обычно мало.
   let sortKey = $state<string | null>(null)
   let sortDir = $state<'asc' | 'desc'>('asc')
-  function toggleSort(key: string) {
+  let loadingAll = $state(false)
+  async function loadAllRemaining() {
+    if (loadingAll) return
+    loadingAll = true
+    const token = itemsReqToken
+    try {
+      while (hasMore && nextCursor) {
+        const res = await postingsApi.textItems(runId, { limit: PER_PAGE, status: currentStatusParam(), cursor: nextCursor })
+        if (token !== itemsReqToken) return
+        items = [...items, ...res.items]
+        nextCursor = res.next_cursor
+        hasMore = res.has_more
+        loadedPages += 1
+      }
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    } finally {
+      loadingAll = false
+    }
+  }
+  async function toggleSort(key: string) {
     if (sortKey === key) sortDir = sortDir === 'asc' ? 'desc' : 'asc'
     else { sortKey = key; sortDir = 'asc' }
+    if (hasMore) await loadAllRemaining()  // сортируем по всем, не по первой странице
   }
   function itemSortVal(it: TextItem, key: string): string | number {
     switch (key) {
@@ -718,6 +742,23 @@
     itemBusy = null
     await loadItems()                       // показать claim (generating) сразу
     await pollItemSettled(itemId, action)   // обновлять строку до завершения
+  }
+
+  async function deleteItem(item: TextItem) {
+    if (!confirm(`Удалить айтем #${item.id} (${item.status}) из задачи? Это необратимо.`)) return
+    itemBusy = item.id
+    try {
+      const res = await postingsApi.deleteTextItem(runId, item.id)
+      items = items.filter((i) => i.id !== item.id)
+      showToast('success', res.run_status === 'done'
+        ? 'Айтем удалён. Задача завершена (done).'
+        : `Айтем #${item.id} удалён`)
+      await Promise.all([loadProgress(), loadRun()])
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    } finally {
+      itemBusy = null
+    }
   }
 
   // ─── Display helpers ───────────────────────────────────────────────
@@ -1452,6 +1493,13 @@
                           </button>
                         {/if}
                       {/if}
+                    {/if}
+                    {#if item.status !== 'posting' && item.status !== 'generating'}
+                      <button type="button" title="Удалить айтем из задачи (безвозвратно)"
+                              onclick={() => deleteItem(item)} disabled={itemBusy === item.id}
+                              class="inline-flex items-center justify-center rounded-md border border-red-300 p-1.5 text-red-500 transition hover:bg-red-50 disabled:opacity-40">
+                        <Trash2 size={15} />
+                      </button>
                     {/if}
                   </div>
                 </td>
