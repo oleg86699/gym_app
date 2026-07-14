@@ -1169,6 +1169,27 @@ async def _post_one_item(
                     creator_allowed_tags=creator_allowed_tags,
                 )
 
+            # pool_fallback (ПО-ДОМЕННО): под фильтром пула для money-домена ЭТОГО
+            # айтема кандидатов не осталось — добираем из ПОЛНОГО пула (снимаем
+            # lang/tld/tags/domains; RBAC creator_allowed_tags и дедуп по target_domain
+            # сохраняются). Язык уже отработал по этому домену → теперь остальное.
+            # Другие домены/раны, где языковые сайты ещё есть, продолжают по фильтру —
+            # «сначала по фильтру, потом остальное» соблюдается для каждого домена.
+            if (not candidates and getattr(run, "pool_fallback", False)
+                    and (_f_langs or _f_tlds or _f_tags or _f_domains)):
+                async with WriteSession() as s:
+                    candidates = await _pick_candidate_sites(
+                        s,
+                        project_id=run.project_id,
+                        run_id=run.id,
+                        exclude_site_ids=tried_sites
+                        | {sid for sid in registry._exhausted},
+                        limit=5,
+                        site_langs=None, site_tlds=None, site_tags=None, site_domains=None,
+                        target_domain=item.target_domain,
+                        creator_allowed_tags=creator_allowed_tags,
+                    )
+
             if not candidates:
                 # Сайтов больше нет — вернём text_item в pending. Финальное решение
                 # (need_more_admins vs done) примет основной цикл при следующем
