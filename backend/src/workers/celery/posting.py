@@ -2019,6 +2019,23 @@ async def _run_posting_async(run_id: int) -> dict:
                         final_status = PostingRunStatus.NEEDS_REVIEW
                         log_ctx.info("posting.needs_review_remaining", count=int(nr))
                         break
+                    # Остались pending с ГОТОВЫМ текстом (не drip — future not_before уже
+                    # отфильтрован выше)? Значит их НЕ УДАЛОСЬ разместить (пул исчерпан) —
+                    # это НЕ done, а need_more_admins. Иначе теряем задачи: run зелёный,
+                    # а сотни pending не размещены. Восстановимо (Retry failed / Resume
+                    # после долива пула). Раньше здесь безусловно ставился done.
+                    async with WriteSession() as s:
+                        pend_ready = await s.scalar(
+                            select(func.count(TextItem.id)).where(
+                                TextItem.posting_run_id == run_id,
+                                TextItem.status == TextItemStatus.PENDING.value,
+                                TextItem.text_id.isnot(None),
+                            )
+                        )
+                    if pend_ready and pend_ready > 0:
+                        final_status = PostingRunStatus.NEED_MORE_ADMINS
+                        log_ctx.warning("posting.pending_unplaced", count=int(pend_ready))
+                        break
                     log_ctx.info("posting.no_pending_left")
                     break
 
