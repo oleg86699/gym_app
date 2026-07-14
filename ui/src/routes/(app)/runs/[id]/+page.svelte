@@ -1142,15 +1142,20 @@
     </div>
   {/if}
 
-  {#if run && !isLinkRun}
+  {#if run}
     <div class="rounded-lg border border-slate-200 bg-white p-4">
       <h2 class="text-sm font-medium text-slate-700">Параметры</h2>
       <dl class="mt-2 grid grid-cols-2 gap-x-6 gap-y-3 text-sm sm:grid-cols-3">
-        <div>
-          <dt class="text-xs text-slate-400">Метод постинга</dt>
-          <dd class="text-slate-800">{postingMethodLabel(run.posting_method)}</dd>
-        </div>
-        {#if !isLinkRun}
+        {#if isLinkRun}
+          <div>
+            <dt class="text-xs text-slate-400">Тип</dt>
+            <dd class="text-slate-800">{run.task_type === 'homepage_link' ? 'Ссылка с главной' : 'Сквозная ссылка'}</dd>
+          </div>
+        {:else}
+          <div>
+            <dt class="text-xs text-slate-400">Метод постинга</dt>
+            <dd class="text-slate-800">{postingMethodLabel(run.posting_method)}</dd>
+          </div>
           <div>
             <dt class="text-xs text-slate-400">Валидация ссылки</dt>
             <dd class="text-slate-800">{run.post_verify === 'auto' ? 'Автовалидация (перепост до подтверждения)' : 'Отметка ✓/✗'}</dd>
@@ -1174,6 +1179,22 @@
           <dt class="text-xs text-slate-400">Пул доступов</dt>
           <dd class="text-slate-800">{poolLabel}</dd>
         </div>
+        {#if isLinkRun}
+          <div>
+            <dt class="text-xs text-slate-400">Макс. на сайт</dt>
+            <dd class="text-slate-800">{run.max_posts_per_site}</dd>
+          </div>
+          <div>
+            <dt class="text-xs text-slate-400">Авто-добор по пулу</dt>
+            <dd class="text-slate-800">{run.pool_fallback ? 'да' : 'нет'}</dd>
+          </div>
+          {#if run.proxy_selector && run.proxy_selector !== 'direct'}
+            <div>
+              <dt class="text-xs text-slate-400">Прокси</dt>
+              <dd class="text-slate-800">{run.proxy_selector}</dd>
+            </div>
+          {/if}
+        {/if}
         {#if run.content_params}
           <div>
             <dt class="text-xs text-slate-400">Язык</dt>
@@ -1706,21 +1727,23 @@
                   </select>
                 </div>
               </div>
-              <div>
-                <label for="ed_method" class="block text-sm font-medium text-slate-700">Метод постинга</label>
-                <select id="ed_method" bind:value={eMethod} class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
-                  <option value="auto">Auto — XML-RPC → wp-admin</option>
-                  <option value="xmlrpc_only">XML-RPC only</option>
-                  <option value="admin_only">wp-admin only</option>
-                </select>
-              </div>
-              <div>
-                <label for="ed_verify" class="block text-sm font-medium text-slate-700">Валидация ссылки</label>
-                <select id="ed_verify" bind:value={eVerify} class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
-                  <option value="mark">Отметка ✓/✗</option>
-                  <option value="auto">Автовалидация (перепост)</option>
-                </select>
-              </div>
+              {#if !isLinkRun}
+                <div>
+                  <label for="ed_method" class="block text-sm font-medium text-slate-700">Метод постинга</label>
+                  <select id="ed_method" bind:value={eMethod} class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
+                    <option value="auto">Auto — XML-RPC → wp-admin</option>
+                    <option value="xmlrpc_only">XML-RPC only</option>
+                    <option value="admin_only">wp-admin only</option>
+                  </select>
+                </div>
+                <div>
+                  <label for="ed_verify" class="block text-sm font-medium text-slate-700">Валидация ссылки</label>
+                  <select id="ed_verify" bind:value={eVerify} class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
+                    <option value="mark">Отметка ✓/✗</option>
+                    <option value="auto">Автовалидация (перепост)</option>
+                  </select>
+                </div>
+              {/if}
             </div>
           {/if}
         </div>
