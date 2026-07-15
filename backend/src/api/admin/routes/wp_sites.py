@@ -831,7 +831,7 @@ def _row_for_export(cred: WpCredential, site: WpSite) -> list:
         site_url,
         cred.login,
         decrypt_password(cred.password) if cred.password else "",
-        cred.tag or "",
+        ",".join(cred.tags) if cred.tags else "",  # tags — TEXT[] (multi-tag), не скаляр
         "true" if cred.is_valid else "false",
         "true" if site.is_active else "false",
         site.language or "",
