@@ -8,7 +8,9 @@ CF-браузеры остаются под потолком cf_browser_concurre
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0058_batch_validation_concurrency"
+# NB: alembic_version.version_num — varchar(32). Ревизия ≤32 символов!
+# "0058_batch_validation_concurrency" (33) не влезал → StringDataRightTruncation.
+revision = "0058_batch_val_concurrency"
 down_revision = "0057_max_concurrent_link_checks"
 branch_labels = None
 depends_on = None
