@@ -39,7 +39,7 @@
   async function loadDirectories() {
     try {
       const [us, gs] = await Promise.all([
-        usersApi.list({ limit: 500 }).catch(() => ({ items: [] as User[] })),
+        usersApi.list({ limit: 200 }).catch(() => ({ items: [] as User[] })),  // 200 = MAX_LIMIT
         groupsApi.list().catch(() => [] as { id: number; name: string }[]),
       ])
       allUsers = (us as { items: User[] }).items ?? []
