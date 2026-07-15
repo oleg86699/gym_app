@@ -272,10 +272,7 @@ async def create_site_endpoint(
 # int_parsing ("unable to parse string as an integer", input="export").
 @router.get("/export")
 async def export_credentials(
-    format: str = Query(default="csv", pattern="^(csv|json)$"),
-    include_invalid: bool = Query(
-        default=False, description="Включать ли credentials с is_valid=false"
-    ),
+    format: str = Query(default="csv", pattern="^(csv|txt|json|xlsx)$"),
     status: str = Query(
         default="all",
         pattern="^(all|active|auto-disabled|off|usable|unusable|cred_valid|cred_invalid|cred_transient|rpc_postable|admin_capable|admin_postable)$",
@@ -286,21 +283,21 @@ async def export_credentials(
     session: AsyncSession = Depends(get_db_read),
 ) -> StreamingResponse:
     """
-    Экспорт credentials с РАСШИФРОВАННЫМИ паролями.
+    Экспорт credentials с РАСШИФРОВАННЫМИ паролями — как экспорт батчей.
 
-    Отдаёт РОВНО то, что видно в таблице под текущим фильтром: `status` (usable/
-    unusable/cred_*/каналы) + `search` по домену. `include_invalid` —
-    ортогональный тумблер (valid-only vs полный бэкап с is_valid=false).
+    Форматы: csv | txt (domain⇥url⇥login⇥password) | json | xlsx. Отдаёт ВСЕ
+    (не удалённые) credentials сайтов, попавших под текущий фильтр таблицы
+    (`status` + `search` по домену) — ровно то, что видно на экране. Валидность —
+    в колонке is_valid (отдельного «только валидные» тумблера нет: он давал
+    пустой файл на фильтрах вроде «unusable»).
 
-    Доступно только super_admin. Используется для бэкапа/миграции/передачи
-    доступов. Колонки CSV совместимы с форматом импорта (`domain,login,
-    password,...`), доп. поля внизу — для аудита.
+    Доступно только super_admin (plaintext-пароли). Колонки совместимы с форматом
+    импорта.
     """
     log.warning(
         "wp_sites.export.requested",
         actor_id=actor.id,
         format=format,
-        include_invalid=include_invalid,
         status=status,
         search=search,
     )
@@ -309,12 +306,11 @@ async def export_credentials(
     await audit_record(
         session, actor=actor, action="wp_sites.export",
         resource_type="wp_credentials",
-        changes={"format": format, "include_invalid": include_invalid,
-                 "status": status, "search": search},
+        changes={"format": format, "status": status, "search": search},
     )
 
     # Фильтр таблицы → множество site_id. Считаем один раз (сайтов немного —
-    # десятки-сотни, много меньше 32767 bind-параметров). None = без фильтра
+    # тысячи максимум, много меньше 32767 bind-параметров). None = без фильтра
     # (весь пул, статус=all и пустой поиск), [] = ничего не подошло под фильтр.
     site_filter_ids: list[int] | None = None
     if status != "all" or search:
@@ -324,21 +320,23 @@ async def export_credentials(
         )
         site_filter_ids = [r for (r,) in rows.all()]
 
+    suffix = f"-{status}" if status != "all" else ""
+    filename = f"wp-credentials{suffix}.{format}"
+    resp_headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    mime = _FORMAT_TO_MIME[format]
+
+    if format == "csv":
+        return StreamingResponse(
+            _stream_export_csv(session, site_filter_ids), media_type=mime, headers=resp_headers)
+    if format == "txt":
+        return StreamingResponse(
+            _stream_export_txt(session, site_filter_ids), media_type=mime, headers=resp_headers)
     if format == "json":
         return StreamingResponse(
-            _stream_export_json(session, include_invalid, site_filter_ids),
-            media_type="application/json; charset=utf-8",
-            headers={
-                "Content-Disposition": 'attachment; filename="wp-credentials.json"',
-            },
-        )
-    return StreamingResponse(
-        _stream_export_csv(session, include_invalid, site_filter_ids),
-        media_type="text/csv; charset=utf-8",
-        headers={
-            "Content-Disposition": 'attachment; filename="wp-credentials.csv"',
-        },
-    )
+            _stream_export_json(session, site_filter_ids), media_type=mime, headers=resp_headers)
+    # xlsx — целиком в память (openpyxl write_only ok и для сотен тысяч строк)
+    data = await _build_export_xlsx_bytes(session, site_filter_ids)
+    return StreamingResponse(iter([data]), media_type=mime, headers=resp_headers)
 
 
 @router.get("/validation-status")
@@ -799,17 +797,23 @@ async def import_endpoint(
 # то же что и backup БД + знание ключа. Использование разумное: миграция,
 # offline-бэкап, передача доступов клиенту/исполнителю.
 
+# Колонки как в экспорте батчей (+ бэкап-поля): url — готовый endpoint/https-корень
+# (нужен для TXT domain→url→login→pw и обратного импорта); tag/last_used_at/source_
+# filename/note — для миграции/бэкапа. Порядок совместим с форматом импорта.
 _EXPORT_HEADER = [
     "domain",
+    "url",
     "login",
     "password",
     "tag",
     "is_valid",
     "site_active",
+    "language",
     "hint_path",
     "hint_port",
     "amount_use",
     "last_used_at",
+    "last_validated_at",
     "source_filename",
     "note",
 ]
@@ -818,31 +822,41 @@ _EXPORT_BATCH = 500
 
 
 def _row_for_export(cred: WpCredential, site: WpSite) -> list:
+    # url: разрешённый рабочий endpoint, если валидация его нашла; иначе фолбэк
+    # https://{domain} (у ещё не валидированных). Пусто у ещё не валидированных —
+    # как в батч-экспорте.
+    site_url = site.last_working_url or (f"https://{site.domain}" if site.domain else "")
     return [
         site.domain,
+        site_url,
         cred.login,
         decrypt_password(cred.password) if cred.password else "",
         cred.tag or "",
         "true" if cred.is_valid else "false",
         "true" if site.is_active else "false",
+        site.language or "",
         site.hint_path or "",
         str(site.hint_port) if site.hint_port else "",
         cred.amount_use or 0,
         cred.last_used_at.isoformat() if cred.last_used_at else "",
+        cred.last_validated_at.isoformat() if cred.last_validated_at else "",
         cred.source_filename or "",
         (cred.note or "").replace("\n", " ")[:1000],
     ]
 
 
 async def _iter_credentials_for_export(
-    session: AsyncSession, include_invalid: bool,
+    session: AsyncSession,
     site_filter_ids: list[int] | None = None,
 ) -> AsyncIterator[tuple[WpCredential, WpSite]]:
     """Идём батчами по 500, чтобы не материализовать пул целиком.
 
-    site_filter_ids: если задан — экспортируем только credentials этих сайтов
-    (ровно то, что видно в таблице под текущим фильтром status+search). None —
-    весь пул. Пустой список → ничего (фильтр не дал ни одного сайта)."""
+    Отдаём ВСЕ (не удалённые) credentials сайтов, попавших под текущий фильтр
+    таблицы (status+search) — ровно то, что видно на экране. Валидность видна в
+    колонке is_valid; отдельного «только валидные» фильтра нет (иначе фильтр вроде
+    «unusable» + valid-only давал пустой файл).
+
+    site_filter_ids: None — весь пул; список — только эти сайты; [] — ничего."""
     if site_filter_ids is not None and not site_filter_ids:
         return
     after_id = 0
@@ -857,8 +871,6 @@ async def _iter_credentials_for_export(
             .order_by(WpCredential.id)
             .limit(_EXPORT_BATCH)
         )
-        if not include_invalid:
-            stmt = stmt.where(WpCredential.is_valid.is_(True))
         if site_filter_ids is not None:
             stmt = stmt.where(WpCredential.site_id.in_(site_filter_ids))
         rows = list((await session.execute(stmt)).scalars().all())
@@ -875,8 +887,7 @@ async def _iter_credentials_for_export(
 
 
 async def _stream_export_csv(
-    session: AsyncSession, include_invalid: bool,
-    site_filter_ids: list[int] | None = None,
+    session: AsyncSession, site_filter_ids: list[int] | None = None,
 ) -> AsyncIterator[bytes]:
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\n")
@@ -886,9 +897,7 @@ async def _stream_export_csv(
     buf.truncate()
 
     n = 0
-    async for cred, site in _iter_credentials_for_export(
-        session, include_invalid, site_filter_ids
-    ):
+    async for cred, site in _iter_credentials_for_export(session, site_filter_ids):
         writer.writerow([str(c) if c is not None else "" for c in _row_for_export(cred, site)])
         n += 1
         if n % _EXPORT_BATCH == 0:
@@ -899,21 +908,52 @@ async def _stream_export_csv(
         yield buf.getvalue().encode("utf-8")
 
 
+async def _stream_export_txt(
+    session: AsyncSession, site_filter_ids: list[int] | None = None,
+) -> AsyncIterator[bytes]:
+    """TXT (Zebroid): domain<TAB>url<TAB>login<TAB>password — по строке на cred.
+    Симметрично формату импорта (url-колонка при обратном импорте игнорируется)."""
+    async for cred, site in _iter_credentials_for_export(session, site_filter_ids):
+        row = _row_for_export(cred, site)  # [domain, url, login, password, ...]
+        yield f"{row[0]}\t{row[1]}\t{row[2]}\t{row[3]}\n".encode("utf-8")
+
+
 async def _stream_export_json(
-    session: AsyncSession, include_invalid: bool,
-    site_filter_ids: list[int] | None = None,
+    session: AsyncSession, site_filter_ids: list[int] | None = None,
 ) -> AsyncIterator[bytes]:
     yield b"[\n"
     first = True
-    async for cred, site in _iter_credentials_for_export(
-        session, include_invalid, site_filter_ids
-    ):
+    async for cred, site in _iter_credentials_for_export(session, site_filter_ids):
         row = _row_for_export(cred, site)
         obj = dict(zip(_EXPORT_HEADER, row, strict=True))
         prefix = b"" if first else b",\n"
         first = False
         yield prefix + json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8")
     yield b"\n]\n"
+
+
+async def _build_export_xlsx_bytes(
+    session: AsyncSession, site_filter_ids: list[int] | None = None,
+) -> bytes:
+    """openpyxl write_only — минимум памяти на больших пулах."""
+    from openpyxl import Workbook
+
+    wb = Workbook(write_only=True)
+    ws = wb.create_sheet("credentials")
+    ws.append(_EXPORT_HEADER)
+    async for cred, site in _iter_credentials_for_export(session, site_filter_ids):
+        ws.append([str(c) if c is not None else "" for c in _row_for_export(cred, site)])
+    bio = io.BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
+
+
+_FORMAT_TO_MIME = {
+    "csv": "text/csv; charset=utf-8",
+    "txt": "text/plain; charset=utf-8",
+    "json": "application/json; charset=utf-8",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
 
 
 # ─── Валидатор credentials (on-demand + status) ──────────────────────

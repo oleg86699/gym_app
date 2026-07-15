@@ -339,9 +339,10 @@
   }
 
   // Export credentials с расшифрованными паролями (super_admin only).
-  // Экспортируем РОВНО то, что видно в таблице — текущий фильтр (filterStatus)
-  // + поиск (search) уходят в query, бэкенд отдаёт только эти сайты.
-  function exportCreds(format: 'csv' | 'json', includeInvalid: boolean) {
+  // Как в экспорте батчей: 4 формата, экспортируем РОВНО то, что видно в таблице —
+  // текущий фильтр (filterStatus) + поиск (search) уходят в query, бэкенд отдаёт
+  // все credentials этих сайтов (валидность видна в колонке is_valid).
+  function exportCreds(format: 'csv' | 'xlsx' | 'txt' | 'json') {
     const filtered = filterStatus !== 'all' || !!search
     const scope = filtered
       ? `Область: только показанное — фильтр «${filterStatus}»` +
@@ -351,12 +352,10 @@
       `⚠ Скачать credentials с РАСшифрованными паролями?\n\n` +
       `Файл содержит секретные данные — храни безопасно и не передавай ` +
       `по незащищённым каналам.\n\n` +
-      `Формат: ${format.toUpperCase()}` +
-      `${includeInvalid ? ' (включая is_valid=false)' : ' (только валидные)'}\n` +
+      `Формат: ${format.toUpperCase()}\n` +
       scope
     if (!confirm(msg)) return
     const params = new URLSearchParams({ format })
-    if (includeInvalid) params.set('include_invalid', 'true')
     if (filterStatus !== 'all') params.set('status', filterStatus)
     if (search) params.set('search', search)
     // Триггерим скачивание — браузер увидит Content-Disposition: attachment
@@ -725,27 +724,27 @@
         </button>
         <DropdownMenu
           label="⤓ Export"
-          title="Скачать все credentials с расшифрованными паролями (super_admin only)"
+          title="Скачать credentials выбранного фильтра с расшифрованными паролями (super_admin only)"
           items={[
             {
-              label: 'CSV (valid only)',
-              description: 'Готов к ре-импорту: domain,login,password,...',
-              onClick: () => exportCreds('csv', false),
+              label: 'CSV',
+              description: 'domain,url,login,password,… — по фильтру таблицы',
+              onClick: () => exportCreds('csv'),
             },
             {
-              label: 'CSV (full backup)',
-              description: 'Включая is_valid=false',
-              onClick: () => exportCreds('csv', true),
+              label: 'Excel (XLSX)',
+              description: 'Таблица для просмотра/правки',
+              onClick: () => exportCreds('xlsx'),
             },
             {
-              label: 'JSON (valid only)',
+              label: 'TXT (domain→url→login→pw)',
+              description: 'Zebroid-формат, для ре-импорта',
+              onClick: () => exportCreds('txt'),
+            },
+            {
+              label: 'JSON',
               description: 'Массив объектов, для скриптов',
-              onClick: () => exportCreds('json', false),
-            },
-            {
-              label: 'JSON (full backup)',
-              description: 'Включая is_valid=false',
-              onClick: () => exportCreds('json', true),
+              onClick: () => exportCreds('json'),
             },
           ]}
         />
