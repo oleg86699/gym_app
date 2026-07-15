@@ -568,7 +568,18 @@ export interface AiModel {
   created_at: string
 }
 
-export interface AiProvider {
+// Владение/шаринг (общее для провайдеров и промптов)
+export interface AiShareInfo {
+  owner_user_id: number | null
+  owner_username: string | null
+  owner_group_id: number | null
+  shared_all: boolean
+  shared_user_ids: number[]
+  shared_group_ids: number[]
+  can_manage: boolean
+}
+
+export interface AiProvider extends AiShareInfo {
   id: number
   name: string
   type: AiProviderType
@@ -579,12 +590,19 @@ export interface AiProvider {
   models: AiModel[]
 }
 
-export interface PromptTemplate {
+export interface PromptTemplate extends AiShareInfo {
   id: number
   name: string
   body: string
   notes: string | null
   created_at: string
+}
+
+// Replace-семантика: переданные поля заменяют текущие наборы
+export interface AiShareRequest {
+  shared_all?: boolean | null
+  user_ids?: number[] | null
+  group_ids?: number[] | null
 }
 
 export type TextItemStatus =

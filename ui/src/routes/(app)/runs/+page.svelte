@@ -310,6 +310,7 @@
   let campPromptId = $state<number | null>(null)
   let campModelId = $state<number | null>(null)
   let campModels = $state<AiModel[]>([])
+  let campModelOwner = $state<Record<number, string>>({})  // подпись «чей ключ» на модель
   let campPrompts = $state<PromptTemplate[]>([])
   let campAiLoaded = $state(false)
   let newProjectId = $state<number | null>(null)
@@ -495,10 +496,24 @@
     if (campAiLoaded) return
     try {
       const [provs, prompts] = await Promise.all([aiSettings.listProviders(), aiSettings.listPrompts()])
-      campModels = provs.filter((p) => p.is_active).flatMap((p) =>
-        p.models.filter((m) => m.is_active && (m.purpose === 'content' || m.purpose === 'any')))
+      const meId = $currentUser?.id ?? null
+      const active = provs.filter((p) => p.is_active)
+      const isContent = (m: AiModel) => m.is_active && (m.purpose === 'content' || m.purpose === 'any')
+      campModels = active.flatMap((p) => p.models.filter(isContent))
+      // подпись «чей ключ» + список моделей на своём ключе (дефолт)
+      const owner: Record<number, string> = {}
+      const ownModelIds: number[] = []
+      for (const p of active) {
+        const who = p.owner_user_id && p.owner_user_id === meId ? 'мой' : p.shared_all ? 'общий' : 'команда'
+        for (const m of p.models.filter(isContent)) {
+          owner[m.id] = `${p.name} · ${who}`
+          if (p.owner_user_id === meId) ownModelIds.push(m.id)
+        }
+      }
+      campModelOwner = owner
       campPrompts = prompts
-      campModelId = campModels[0]?.id ?? null
+      // по умолчанию — своя модель/ключ, иначе первая доступная
+      campModelId = ownModelIds[0] ?? campModels[0]?.id ?? null
       campPromptId = campPrompts[0]?.id ?? null
       campAiLoaded = true
     } catch { /* нет ключей — режим reuse всё равно работает */ }
@@ -1049,7 +1064,7 @@
                 {:else}
                   <select id="nrr_model" bind:value={campModelId}
                           class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
-                    {#each campModels as m}<option value={m.id}>{m.display_name} ({m.model_id})</option>{/each}
+                    {#each campModels as m}<option value={m.id}>{m.display_name} ({m.model_id}){campModelOwner[m.id] ? ` — ${campModelOwner[m.id]}` : ''}</option>{/each}
                   </select>
                 {/if}
               </div>

@@ -1,7 +1,8 @@
 """Схемы AI-настроек (C2-5): провайдеры, модели, шаблоны промптов.
 
 Ключ провайдера принимается на вход, но НИКОГДА не возвращается — только
-флаг has_key.
+флаг has_key. Провайдеры/промпты владеемы и шарятся (owner + shared_all +
+списки пользователей/групп).
 """
 
 from __future__ import annotations
@@ -54,6 +55,14 @@ class ProviderResponse(BaseModel):
     created_at: datetime
     has_key: bool = True
     models: list[ModelResponse] = []
+    # ── Владение / шаринг ──
+    owner_user_id: int | None = None
+    owner_username: str | None = None
+    owner_group_id: int | None = None
+    shared_all: bool = False
+    shared_user_ids: list[int] = []
+    shared_group_ids: list[int] = []
+    can_manage: bool = False  # может ли текущий зритель редактировать/шарить
 
 
 # ─── Model ──────────────────────────────────────────────────────────
@@ -96,3 +105,19 @@ class PromptResponse(BaseModel):
     body: str
     notes: str | None
     created_at: datetime
+    # ── Владение / шаринг ──
+    owner_user_id: int | None = None
+    owner_username: str | None = None
+    owner_group_id: int | None = None
+    shared_all: bool = False
+    shared_user_ids: list[int] = []
+    shared_group_ids: list[int] = []
+    can_manage: bool = False
+
+
+# ─── Sharing ────────────────────────────────────────────────────────
+class ShareRequest(BaseModel):
+    """Replace-семантика: переданные поля заменяют текущие наборы (None = не трогать)."""
+    shared_all: bool | None = None
+    user_ids: list[int] | None = None
+    group_ids: list[int] | None = None

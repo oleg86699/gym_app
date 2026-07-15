@@ -5,6 +5,7 @@ import type {
   AdminPage,
   AiModel,
   AiProvider,
+  AiShareRequest,
   PromptTemplate,
   AppSettings,
   AuditListResponse,
@@ -829,6 +830,8 @@ export const aiSettings = {
     payload: { name?: string; type?: string; api_key?: string; base_url?: string | null; is_active?: boolean },
   ) => api.patch<AiProvider>(`/admin/api/ai/providers/${id}`, payload),
   deleteProvider: (id: number) => api.del(`/admin/api/ai/providers/${id}`),
+  shareProvider: (id: number, payload: AiShareRequest) =>
+    api.post<AiProvider>(`/admin/api/ai/providers/${id}/share`, payload),
 
   createModel: (payload: {
     provider_id: number; display_name: string; model_id: string
@@ -849,4 +852,6 @@ export const aiSettings = {
   updatePrompt: (id: number, payload: { name?: string; body?: string; notes?: string | null }) =>
     api.patch<PromptTemplate>(`/admin/api/ai/prompts/${id}`, payload),
   deletePrompt: (id: number) => api.del(`/admin/api/ai/prompts/${id}`),
+  sharePrompt: (id: number, payload: AiShareRequest) =>
+    api.post<PromptTemplate>(`/admin/api/ai/prompts/${id}/share`, payload),
 }

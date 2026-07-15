@@ -1,15 +1,28 @@
 <script lang="ts">
-  import { HelpCircle } from 'lucide-svelte'
+  import { HelpCircle, Share2 } from 'lucide-svelte'
   import { onMount } from 'svelte'
 
-  import { aiSettings } from '$lib/api/admin'
+  import { aiSettings, groups as groupsApi, users as usersApi } from '$lib/api/admin'
   import { ApiError } from '$lib/api/client'
-  import type { AiModel, AiProvider, PromptTemplate } from '$lib/api/types'
+  import type { AiModel, AiProvider, AiShareInfo, AiShareRequest, PromptTemplate, User } from '$lib/api/types'
   import { showToast } from '$lib/stores/toast'
+  import { currentUser } from '$lib/stores/user'
 
   let providers = $state<AiProvider[]>([])
   let prompts = $state<PromptTemplate[]>([])
   let loading = $state(true)
+
+  // Кто я (для UI шаринга). can_manage на каждом ресурсе приходит с бэка.
+  let me = $derived($currentUser)
+  let isSuper = $derived(me?.is_super_admin ?? false)
+  let isGroupAdmin = $derived((me?.roles ?? []).some((r) => r.name === 'group_admin'))
+  let myGroupId = $derived(me?.group?.id ?? null)
+
+  // Справочники для пикеров шаринга (список уже отфильтрован бэком по правам).
+  let allUsers = $state<User[]>([])
+  let allGroups = $state<{ id: number; name: string }[]>([])
+  const userName = (id: number) => allUsers.find((u) => u.id === id)?.username ?? `#${id}`
+  const groupName = (id: number) => allGroups.find((g) => g.id === id)?.name ?? `#${id}`
 
   async function refresh() {
     loading = true
@@ -23,7 +36,86 @@
       loading = false
     }
   }
-  onMount(refresh)
+  async function loadDirectories() {
+    try {
+      const [us, gs] = await Promise.all([
+        usersApi.list({ limit: 500 }).catch(() => ({ items: [] as User[] })),
+        groupsApi.list().catch(() => [] as { id: number; name: string }[]),
+      ])
+      allUsers = (us as { items: User[] }).items ?? []
+      allGroups = (gs as { id: number; name: string }[]) ?? []
+    } catch { /* пикеры просто будут пустыми */ }
+  }
+  onMount(() => { refresh(); loadDirectories() })
+
+  // Бейдж видимости ресурса
+  function visBadge(r: AiShareInfo): { text: string; cls: string } {
+    if (r.shared_all) return { text: 'виден всем', cls: 'bg-emerald-100 text-emerald-700' }
+    const parts: string[] = []
+    if (r.shared_group_ids.length) parts.push(`групп ${r.shared_group_ids.length}`)
+    if (r.shared_user_ids.length) parts.push(`юзеров ${r.shared_user_ids.length}`)
+    if (parts.length) return { text: 'общий · ' + parts.join(', '), cls: 'bg-blue-100 text-blue-700' }
+    return { text: 'приватный', cls: 'bg-slate-100 text-slate-600' }
+  }
+  const ownerLabel = (r: AiShareInfo) =>
+    r.owner_user_id && r.owner_user_id === me?.id ? 'моё' : (r.owner_username ?? '—')
+
+  // ─── Share modal ───
+  let shareOpen = $state(false)
+  let shareKind = $state<'provider' | 'prompt'>('provider')
+  let shareTarget = $state<AiProvider | PromptTemplate | null>(null)
+  let sh_all = $state(false)
+  let sh_userIds = $state<number[]>([])
+  let sh_groupIds = $state<number[]>([])
+  let shareBusy = $state(false)
+
+  function openShare(kind: 'provider' | 'prompt', r: AiProvider | PromptTemplate) {
+    shareKind = kind; shareTarget = r
+    sh_all = r.shared_all
+    sh_userIds = [...r.shared_user_ids]
+    sh_groupIds = [...r.shared_group_ids]
+    shareOpen = true
+  }
+  function toggleId(arr: number[], id: number): number[] {
+    return arr.includes(id) ? arr.filter((x) => x !== id) : [...arr, id]
+  }
+  const shareMyGroup = $derived(myGroupId != null && sh_groupIds.includes(myGroupId))
+  function toggleMyGroup() {
+    if (myGroupId == null) return
+    sh_groupIds = toggleId(sh_groupIds, myGroupId)
+  }
+  async function submitShare() {
+    if (!shareTarget) return
+    // Собираем payload по правам роли: не отправляем то, что менять нельзя.
+    const payload: AiShareRequest = {}
+    if (isSuper) {
+      payload.shared_all = sh_all
+      payload.user_ids = sh_userIds
+      payload.group_ids = sh_groupIds
+    } else if (isGroupAdmin) {
+      // только пользователи своей группы (те, что видны в пикере) — иначе бэк отобьёт 403
+      payload.user_ids = sh_userIds.filter((id) => allUsers.some((u) => u.id === id))
+      payload.group_ids = shareMyGroup && myGroupId != null ? [myGroupId] : []
+    } else {
+      // обычный юзер: только своя группа (для промптов)
+      payload.group_ids = shareMyGroup && myGroupId != null ? [myGroupId] : []
+    }
+    shareBusy = true
+    try {
+      if (shareKind === 'provider') await aiSettings.shareProvider(shareTarget.id, payload)
+      else await aiSettings.sharePrompt(shareTarget.id, payload)
+      showToast('success', 'Доступ обновлён')
+      shareOpen = false
+      await refresh()
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    } finally {
+      shareBusy = false
+    }
+  }
+  // Кнопка Share видна: провайдер — super/group_admin; промпт — ещё и юзеру (своей группе).
+  const canShare = (kind: 'provider' | 'prompt', r: AiShareInfo) =>
+    r.can_manage && (isSuper || isGroupAdmin || (kind === 'prompt' && myGroupId != null))
 
   function typeBadge(t: string): string {
     switch (t) {
@@ -188,16 +280,26 @@
         {#each providers as p (p.id)}
           <div class="rounded-lg border border-slate-200 bg-white">
             <div class="flex items-center justify-between border-b border-slate-100 px-4 py-3">
-              <div class="flex items-center gap-2">
+              <div class="flex min-w-0 flex-wrap items-center gap-2">
                 <span class="font-medium text-slate-900">{p.name}</span>
                 <span class="rounded px-2 py-0.5 text-xs font-medium {typeBadge(p.type)}">{p.type}</span>
                 {#if !p.is_active}<span class="rounded bg-slate-100 px-2 py-0.5 text-xs text-slate-500">disabled</span>{/if}
                 {#if p.has_key}<span class="rounded bg-emerald-50 px-2 py-0.5 text-xs text-emerald-600">🔑 key set</span>{/if}
+                <span class="rounded px-2 py-0.5 text-xs font-medium {visBadge(p).cls}">{visBadge(p).text}</span>
+                <span class="text-xs text-slate-400">владелец: {ownerLabel(p)}</span>
               </div>
-              <div class="flex items-center gap-2">
-                <button onclick={() => openModelCreate(p.id)} class="rounded-md border border-slate-300 px-2.5 py-1 text-xs">+ Модель</button>
-                <button onclick={() => openProvEdit(p)} class="rounded-md border border-slate-300 px-2.5 py-1 text-xs">Изм.</button>
-                <button onclick={() => delProvider(p)} class="rounded-md border border-red-200 px-2.5 py-1 text-xs text-red-600 hover:bg-red-50">Удал.</button>
+              <div class="flex shrink-0 items-center gap-2">
+                {#if canShare('provider', p)}
+                  <button onclick={() => openShare('provider', p)} title="Поделиться ключом"
+                          class="inline-flex items-center gap-1 rounded-md border border-slate-300 px-2.5 py-1 text-xs hover:bg-slate-50">
+                    <Share2 size={13} /> Share
+                  </button>
+                {/if}
+                {#if p.can_manage}
+                  <button onclick={() => openModelCreate(p.id)} class="rounded-md border border-slate-300 px-2.5 py-1 text-xs">+ Модель</button>
+                  <button onclick={() => openProvEdit(p)} class="rounded-md border border-slate-300 px-2.5 py-1 text-xs">Изм.</button>
+                  <button onclick={() => delProvider(p)} class="rounded-md border border-red-200 px-2.5 py-1 text-xs text-red-600 hover:bg-red-50">Удал.</button>
+                {/if}
               </div>
             </div>
             {#if p.models.length === 0}
@@ -215,8 +317,10 @@
                       <td class="px-2 py-2 text-xs text-slate-500">t={m.temperature} · {m.max_tokens}tok</td>
                       <td class="px-2 py-2 text-xs">{#if !m.is_active}<span class="text-slate-400">disabled</span>{/if}</td>
                       <td class="px-4 py-2 text-right">
-                        <button onclick={() => openModelEdit(m)} class="text-xs text-brand-600 hover:underline">изм.</button>
-                        <button onclick={() => delModel(m)} class="ml-2 text-xs text-red-600 hover:underline">удал.</button>
+                        {#if p.can_manage}
+                          <button onclick={() => openModelEdit(m)} class="text-xs text-brand-600 hover:underline">изм.</button>
+                          <button onclick={() => delModel(m)} class="ml-2 text-xs text-red-600 hover:underline">удал.</button>
+                        {/if}
                       </td>
                     </tr>
                   {/each}
@@ -252,13 +356,25 @@
             <div class="rounded-lg border border-slate-200 bg-white px-4 py-3">
               <div class="flex items-start justify-between">
                 <div class="min-w-0">
-                  <span class="font-medium text-slate-900">{t.name}</span>
-                  {#if t.notes}<span class="ml-2 text-xs text-slate-400">{t.notes}</span>{/if}
+                  <div class="flex flex-wrap items-center gap-2">
+                    <span class="font-medium text-slate-900">{t.name}</span>
+                    <span class="rounded px-2 py-0.5 text-xs font-medium {visBadge(t).cls}">{visBadge(t).text}</span>
+                    <span class="text-xs text-slate-400">владелец: {ownerLabel(t)}</span>
+                    {#if t.notes}<span class="text-xs text-slate-400">· {t.notes}</span>{/if}
+                  </div>
                   <p class="mt-1 line-clamp-2 whitespace-pre-wrap font-mono text-xs text-slate-500">{t.body}</p>
                 </div>
                 <div class="ml-3 flex shrink-0 gap-2">
-                  <button onclick={() => openPromptEdit(t)} class="rounded-md border border-slate-300 px-2.5 py-1 text-xs">Изм.</button>
-                  <button onclick={() => delPrompt(t)} class="rounded-md border border-red-200 px-2.5 py-1 text-xs text-red-600 hover:bg-red-50">Удал.</button>
+                  {#if canShare('prompt', t)}
+                    <button onclick={() => openShare('prompt', t)} title="Поделиться промптом"
+                            class="inline-flex items-center gap-1 rounded-md border border-slate-300 px-2.5 py-1 text-xs hover:bg-slate-50">
+                      <Share2 size={13} /> Share
+                    </button>
+                  {/if}
+                  {#if t.can_manage}
+                    <button onclick={() => openPromptEdit(t)} class="rounded-md border border-slate-300 px-2.5 py-1 text-xs">Изм.</button>
+                    <button onclick={() => delPrompt(t)} class="rounded-md border border-red-200 px-2.5 py-1 text-xs text-red-600 hover:bg-red-50">Удал.</button>
+                  {/if}
                 </div>
               </div>
             </div>
@@ -268,6 +384,80 @@
     </section>
   {/if}
 </div>
+
+<!-- ─── Share modal ─── -->
+{#if shareOpen && shareTarget}
+  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+  <div class="fixed inset-0 z-30 flex items-center justify-center bg-slate-900/40 p-4" onclick={() => (shareOpen = false)}>
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="w-full max-w-md rounded-lg bg-white p-6 shadow-xl" onclick={(e) => e.stopPropagation()}>
+      <h2 class="text-lg font-semibold text-slate-900">Доступ: {shareTarget.name}</h2>
+      <p class="mt-1 text-xs text-slate-500">{shareKind === 'provider' ? 'Кому открыт этот ключ.' : 'Кому открыт этот промпт.'}</p>
+      <div class="mt-4 space-y-4">
+        {#if isSuper}
+          <label class="flex items-center gap-2 text-sm text-slate-700">
+            <input type="checkbox" bind:checked={sh_all} /> Виден всем (дефолт для всех пользователей)
+          </label>
+          {#if !sh_all}
+            <div>
+              <p class="text-xs font-medium text-slate-700">Группы</p>
+              <div class="mt-1 max-h-32 overflow-auto rounded-md border border-slate-200 p-2">
+                {#each allGroups as g (g.id)}
+                  <label class="flex items-center gap-2 text-sm">
+                    <input type="checkbox" checked={sh_groupIds.includes(g.id)} onchange={() => (sh_groupIds = toggleId(sh_groupIds, g.id))} /> {g.name}
+                  </label>
+                {:else}
+                  <p class="text-xs text-slate-400">Групп нет</p>
+                {/each}
+              </div>
+            </div>
+            <div>
+              <p class="text-xs font-medium text-slate-700">Пользователи</p>
+              <div class="mt-1 max-h-32 overflow-auto rounded-md border border-slate-200 p-2">
+                {#each allUsers as u (u.id)}
+                  <label class="flex items-center gap-2 text-sm">
+                    <input type="checkbox" checked={sh_userIds.includes(u.id)} onchange={() => (sh_userIds = toggleId(sh_userIds, u.id))} /> {u.username}
+                  </label>
+                {:else}
+                  <p class="text-xs text-slate-400">Пользователей нет</p>
+                {/each}
+              </div>
+            </div>
+          {/if}
+        {:else if isGroupAdmin}
+          {#if myGroupId != null}
+            <label class="flex items-center gap-2 text-sm text-slate-700">
+              <input type="checkbox" checked={shareMyGroup} onchange={toggleMyGroup} /> Открыть всей моей группе
+            </label>
+          {/if}
+          <div>
+            <p class="text-xs font-medium text-slate-700">Пользователи моей группы</p>
+            <div class="mt-1 max-h-40 overflow-auto rounded-md border border-slate-200 p-2">
+              {#each allUsers as u (u.id)}
+                <label class="flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={sh_userIds.includes(u.id)} onchange={() => (sh_userIds = toggleId(sh_userIds, u.id))} /> {u.username}
+                </label>
+              {:else}
+                <p class="text-xs text-slate-400">Нет пользователей</p>
+              {/each}
+            </div>
+          </div>
+        {:else if myGroupId != null}
+          <label class="flex items-center gap-2 text-sm text-slate-700">
+            <input type="checkbox" checked={shareMyGroup} onchange={toggleMyGroup} /> Открыть моей группе
+          </label>
+        {:else}
+          <p class="text-sm text-slate-500">Вы не состоите в группе — шарить некому.</p>
+        {/if}
+      </div>
+      <div class="flex justify-end gap-2 pt-4">
+        <button type="button" onclick={() => (shareOpen = false)} class="rounded-md border border-slate-300 px-3 py-1.5 text-sm">Cancel</button>
+        <button type="button" onclick={submitShare} disabled={shareBusy}
+                class="rounded-md bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50">Сохранить</button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <!-- ─── Provider modal ─── -->
 {#if provOpen}
