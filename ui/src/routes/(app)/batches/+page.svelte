@@ -159,39 +159,22 @@
 
   // ─── Validate modal ────────────────────────────────────────────────
 
-  let validateFor = $state<WpBatch | null>(null)
-  let vScope = $state<'all' | 'invalid' | 'pending'>('all')
-  let vConcurrency = $state(5)
-  let vProxyId = $state<number | null>(null)
-  let vDetectLang = $state(true)
-  let validateBusy = $state(false)
+  // Валидация одной кнопкой, без формы: весь пул прокси, full-цикл, concurrency
+  // из настроек (batch_validation_concurrency). Всё это — дефолты бэкенда, поэтому
+  // шлём только scope='all'.
+  let validatingId = $state<number | null>(null)
 
-  function openValidate(b: WpBatch) {
-    validateFor = b
-    vScope = 'all'
-    vConcurrency = 5
-    vProxyId = null
-    vDetectLang = true
-  }
-
-  async function submitValidate(e: SubmitEvent) {
-    e.preventDefault()
-    if (!validateFor) return
-    validateBusy = true
+  async function doValidate(b: WpBatch) {
+    if (validatingId) return
+    validatingId = b.id
     try {
-      await batchesApi.validate(validateFor.id, {
-        scope: vScope,
-        concurrency: vConcurrency,
-        proxy_id: vProxyId,
-        detect_language: vDetectLang,
-      })
-      showToast('success', `Validation started (scope: ${vScope})`)
-      validateFor = null
+      await batchesApi.validate(b.id, { scope: 'all' })
+      showToast('success', 'Валидация запущена: весь пул, full, concurrency из настроек')
       await refresh()
     } catch (e) {
       showToast('error', e instanceof ApiError ? e.message : String(e))
     } finally {
-      validateBusy = false
+      validatingId = null
     }
   }
 
@@ -335,7 +318,7 @@
                 {#if isSuper}
                   <div class="inline-flex flex-wrap items-center justify-end gap-2 text-xs">
                     {#if b.status === 'uploaded' || b.status === 'done'}
-                      <button onclick={() => openValidate(b)} class="text-brand-600 hover:underline"><Play size={14} class="inline-block align-text-bottom" /> Validate</button>
+                      <button onclick={() => doValidate(b)} disabled={validatingId === b.id} class="text-brand-600 hover:underline disabled:text-slate-400"><Play size={14} class="inline-block align-text-bottom" /> {validatingId === b.id ? 'Starting…' : 'Validate'}</button>
                     {/if}
                     {#if b.status === 'validating' && !b.pause_requested}
                       <button onclick={() => doPause(b)} class="text-amber-700 hover:underline"><Pause size={14} class="inline-block align-text-bottom" /> Pause</button>
@@ -516,55 +499,6 @@
   </div>
 {/if}
 
-<!-- Validate modal -->
-{#if validateFor}
-  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="fixed inset-0 z-30 flex items-center justify-center bg-slate-900/40 p-4" onclick={() => (validateFor = null)}>
-    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div class="w-full max-w-md rounded-lg bg-white p-6 shadow-xl" onclick={(e) => e.stopPropagation()}>
-      <h2 class="text-lg font-semibold text-slate-900">Validate batch #{validateFor.id}</h2>
-      <p class="mt-1 text-xs text-slate-500">{validateFor.name} · {validateFor.total_credentials} credentials</p>
-      <form onsubmit={submitValidate} class="mt-4 space-y-3">
-        <div>
-          <label for="v_scope" class="block text-xs font-medium text-slate-700">Scope</label>
-          <select id="v_scope" bind:value={vScope}
-                  class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
-            <option value="all">All ({validateFor.total_credentials})</option>
-            <option value="invalid">Only invalid ({validateFor.invalid_count})</option>
-            <option value="pending">Pending (never validated)</option>
-          </select>
-        </div>
-        <div>
-          <label for="v_conc" class="block text-xs font-medium text-slate-700">Concurrency</label>
-          <input id="v_conc" type="number" bind:value={vConcurrency} min="1" max="50"
-                 class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
-          <p class="mt-1 text-[11px] text-slate-400">Default 5. Больше = быстрее, но больше шанс на CF-блокировку.</p>
-        </div>
-        <div>
-          <label for="v_proxy" class="block text-xs font-medium text-slate-700">Proxy (recommended)</label>
-          <select id="v_proxy" bind:value={vProxyId}
-                  class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
-            <option value={null}>— весь пул (ротация + ретрай дохлых) —</option>
-          </select>
-        </div>
-        <div>
-          <label class="flex items-center gap-2 text-sm text-slate-700">
-            <input type="checkbox" bind:checked={vDetectLang} class="rounded border-slate-300" />
-            Detect site language (+1 GET per site)
-          </label>
-        </div>
-        <div class="flex justify-end gap-2 pt-2">
-          <button type="button" onclick={() => (validateFor = null)}
-                  class="rounded-md border border-slate-300 px-3 py-1.5 text-sm">Cancel</button>
-          <button type="submit" disabled={validateBusy}
-                  class="rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:bg-slate-300">
-            {#if validateBusy}Starting…{:else}<Play size={14} class="inline-block align-text-bottom" /> Start validation{/if}
-          </button>
-        </div>
-      </form>
-    </div>
-  </div>
-{/if}
 
 <style>
   /* Анимированные stripes — индикатор "идёт валидация" в pending-зоне бара. */

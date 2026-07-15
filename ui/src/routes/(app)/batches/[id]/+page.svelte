@@ -4,10 +4,10 @@
   import { page } from '$app/state'
   import { onDestroy, onMount } from 'svelte'
 
-  import { proxies as proxiesApi, wpBatches as batchesApi } from '$lib/api/admin'
+  import { wpBatches as batchesApi } from '$lib/api/admin'
   import { ApiError } from '$lib/api/client'
   import RoleLegend from '$lib/components/ui/RoleLegend.svelte'
-  import type { BatchCredEntry, Proxy, WpBatch, WpBatchStatus } from '$lib/api/types'
+  import type { BatchCredEntry, WpBatch, WpBatchStatus } from '$lib/api/types'
   import { copyText } from '$lib/clipboard'
   import { showToast } from '$lib/stores/toast'
   import { currentUser } from '$lib/stores/user'
@@ -16,7 +16,6 @@
 
   let batch = $state<WpBatch | null>(null)
   let creds = $state<BatchCredEntry[]>([])
-  let proxiesList = $state<Proxy[]>([])
   let loading = $state(true)
   let credsLoading = $state(false)
   let hasMore = $state(false)
@@ -163,13 +162,6 @@
     document.getElementById('creds-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 
-  async function loadProxies() {
-    try {
-      const r = await proxiesApi.list({ status: 'active', limit: 200 })
-      proxiesList = r.items
-    } catch { proxiesList = [] }
-  }
-
   async function refresh() {
     await loadBatch()
     await loadCreds(true)
@@ -231,13 +223,6 @@
 
   // ─── Actions ───────────────────────────────────────────────────────
 
-  let validateOpen = $state(false)
-  let vScope = $state<'all' | 'invalid' | 'pending'>('all')
-  let vConcurrency = $state<number | null>(null)  // пусто = серверный дефолт
-  let vProxyId = $state<number | null>(null)
-  let vDetectLang = $state(true)
-  let vLevel = $state<'light' | 'medium' | 'full'>('full')   // по умолчанию полный цикл
-  let vProvision = $state(true)
   let vBusy = $state(false)
 
   // Provision (создание наших author-аккаунтов) для всего батча
@@ -248,22 +233,15 @@
   let resetConfirm = $state('')
   let resetBusy = $state(false)
 
-  async function submitValidate(e: SubmitEvent) {
-    e.preventDefault()
-    if (!batch) return
+  // Одна кнопка, без формы: запустить валидацию ВСЕГО батча — весь пул прокси,
+  // full-цикл, concurrency из настроек (batch_validation_concurrency). Всё это —
+  // дефолты бэкенда, поэтому шлём только scope.
+  async function doValidate() {
+    if (!batch || vBusy) return
     vBusy = true
     try {
-      await batchesApi.validate(batchId, {
-        scope: vScope,
-        concurrency: vConcurrency ?? undefined,
-        proxy_id: vProxyId,
-        detect_language: vDetectLang,
-        level: vLevel,
-        provision_after: vProvision,
-        provision_role: 'author',
-      })
-      showToast('success', `Validation started (${vScope}, ${vLevel})${vProvision ? ' + provision' : ''}`)
-      validateOpen = false
+      await batchesApi.validate(batchId, { scope: 'all' })
+      showToast('success', 'Валидация запущена: весь пул, full, concurrency из настроек')
       await refresh()
     } catch (e) {
       showToast('error', e instanceof ApiError ? e.message : String(e))
@@ -439,9 +417,10 @@
   {#if batch}
     <div class="flex flex-wrap gap-2">
       {#if batch.status === 'uploaded' || batch.status === 'done'}
-        <button onclick={() => (validateOpen = true)}
-                class="rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-700">
-          <Play size={14} class="inline-block align-text-bottom" /> Validate
+        <button onclick={doValidate} disabled={vBusy}
+                title="Запустить валидацию всего батча: весь пул прокси, full, concurrency из настроек"
+                class="rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:bg-slate-300">
+          {#if vBusy}Starting…{:else}<Play size={14} class="inline-block align-text-bottom" /> Validate{/if}
         </button>
       {/if}
       {#if batch.status === 'validating' && !batch.pause_requested}
@@ -896,69 +875,6 @@
     <p class="text-xs text-slate-400">Auto-refresh каждые 3 сек.</p>
   {/if}
 </div>
-
-<!-- Validate modal -->
-{#if validateOpen && batch}
-  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="fixed inset-0 z-30 flex items-center justify-center bg-slate-900/40 p-4" onclick={() => (validateOpen = false)}>
-    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div class="w-full max-w-md rounded-lg bg-white p-6 shadow-xl" onclick={(e) => e.stopPropagation()}>
-      <h2 class="text-lg font-semibold text-slate-900">Validate batch #{batch.id}</h2>
-      <p class="mt-1 text-xs text-slate-500">{batch.name} · {batch.total_credentials} credentials</p>
-      <form onsubmit={submitValidate} class="mt-4 space-y-3">
-        <div>
-          <label for="bv_scope" class="block text-xs font-medium text-slate-700">Scope</label>
-          <select id="bv_scope" bind:value={vScope}
-                  class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
-            <option value="all">All ({batch.total_credentials})</option>
-            <option value="invalid">Only invalid ({batch.invalid_count})</option>
-            <option value="pending">Pending (never validated)</option>
-          </select>
-        </div>
-        {#if isSuper}
-        <div class="rounded-md border border-emerald-200 bg-emerald-50 p-2 text-[11px] text-emerald-800">
-          Полный цикл (всегда): <b>full</b>-валидация (XML-RPC + admin-login + probes)
-          <b>и создание наших author-аккаунтов</b> там, где мы админ с правом create_users.
-          Отдельной опции нет.
-        </div>
-        <div>
-          <label for="bv_conc" class="block text-xs font-medium text-slate-700">Concurrency <span class="text-slate-400">(пусто = по умолчанию сервера)</span></label>
-          <input id="bv_conc" type="number" bind:value={vConcurrency} min="1" max="50" placeholder="сервер"
-                 class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm" />
-        </div>
-        <div>
-          <label for="bv_proxy" class="block text-xs font-medium text-slate-700">Proxy</label>
-          <select id="bv_proxy" bind:value={vProxyId}
-                  class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
-            <option value={null}>— весь пул (ротация + ретрай дохлых) —</option>
-          </select>
-          <p class="mt-1 text-[11px] text-slate-400">
-            Round-robin по всему живому пулу с перебором при дохлом прокси (рекомендуется).
-          </p>
-        </div>
-        <div>
-          <label class="flex items-center gap-2 text-sm text-slate-700">
-            <input type="checkbox" bind:checked={vDetectLang} class="rounded border-slate-300" />
-            Detect site language (+1 GET per site)
-          </label>
-        </div>
-        {:else}
-          <p class="text-[11px] text-slate-400">
-            Проверим каждый доступ (XML-RPC + админ-логин, включая обход Cloudflare). Это займёт несколько минут.
-          </p>
-        {/if}
-        <div class="flex justify-end gap-2 pt-2">
-          <button type="button" onclick={() => (validateOpen = false)}
-                  class="rounded-md border border-slate-300 px-3 py-1.5 text-sm">Cancel</button>
-          <button type="submit" disabled={vBusy}
-                  class="rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:bg-slate-300">
-            {#if vBusy}Starting…{:else}<Play size={14} class="inline-block align-text-bottom" /> Start{/if}
-          </button>
-        </div>
-      </form>
-    </div>
-  </div>
-{/if}
 
 <!-- Reset-validation modal (DANGER) -->
 {#if resetOpen && batch}
