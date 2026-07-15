@@ -15,6 +15,7 @@
   import { runModeLabel } from '$lib/runLabels'
   import type {
     AiModel,
+    AiProvider,
     PostingRun,
     PostingRunPriority,
     PostingRunStatus,
@@ -309,10 +310,23 @@
   let campLang = $state('English')
   let campPromptId = $state<number | null>(null)
   let campModelId = $state<number | null>(null)
-  let campModels = $state<AiModel[]>([])
-  let campModelOwner = $state<Record<number, string>>({})  // подпись «чей ключ» на модель
+  let campProviders = $state<AiProvider[]>([])  // доступные ключи (с ≥1 content-моделью)
+  let campProviderId = $state<number | null>(null)  // выбранный ключ
+  let campProviderLabel = $state<Record<number, string>>({})
   let campPrompts = $state<PromptTemplate[]>([])
   let campAiLoaded = $state(false)
+  const isContentModel = (m: AiModel) => m.is_active && (m.purpose === 'content' || m.purpose === 'any')
+  // модели выбранного ключа
+  let campKeyModels = $derived(
+    (campProviders.find((p) => p.id === campProviderId)?.models ?? []).filter(isContentModel),
+  )
+  function firstModelOfKey(pid: number | null): number | null {
+    const m = campProviders.find((p) => p.id === pid)?.models.find(isContentModel)
+    return m?.id ?? null
+  }
+  function onCampKeyChange() {
+    campModelId = firstModelOfKey(campProviderId)  // сменили ключ → первая его модель
+  }
   let newProjectId = $state<number | null>(null)
   let newName = $state('')
   let nameTouched = $state(false)  // юзер правил имя руками → не перетираем из файла
@@ -497,23 +511,18 @@
     try {
       const [provs, prompts] = await Promise.all([aiSettings.listProviders(), aiSettings.listPrompts()])
       const meId = $currentUser?.id ?? null
-      const active = provs.filter((p) => p.is_active)
-      const isContent = (m: AiModel) => m.is_active && (m.purpose === 'content' || m.purpose === 'any')
-      campModels = active.flatMap((p) => p.models.filter(isContent))
-      // подпись «чей ключ» + список моделей на своём ключе (дефолт)
-      const owner: Record<number, string> = {}
-      const ownModelIds: number[] = []
-      for (const p of active) {
-        const who = p.owner_user_id && p.owner_user_id === meId ? 'мой' : p.shared_all ? 'общий' : 'команда'
-        for (const m of p.models.filter(isContent)) {
-          owner[m.id] = `${p.name} · ${who}`
-          if (p.owner_user_id === meId) ownModelIds.push(m.id)
-        }
-      }
-      campModelOwner = owner
+      // ключи (провайдеры) с ≥1 активной content-моделью
+      campProviders = provs.filter((p) => p.is_active && p.models.some(isContentModel))
+      const who = (p: AiProvider) =>
+        p.owner_user_id && p.owner_user_id === meId ? 'мой' : p.shared_all ? 'общий' : 'команда'
+      campProviderLabel = Object.fromEntries(
+        campProviders.map((p): [number, string] => [p.id, `${p.name} (${p.type}) — ${who(p)}`]),
+      )
       campPrompts = prompts
-      // по умолчанию — своя модель/ключ, иначе первая доступная
-      campModelId = ownModelIds[0] ?? campModels[0]?.id ?? null
+      // по умолчанию — свой ключ, иначе первый; модель — первая content-модель этого ключа
+      const own = campProviders.find((p) => p.owner_user_id === meId)
+      campProviderId = (own ?? campProviders[0])?.id ?? null
+      campModelId = firstModelOfKey(campProviderId)
       campPromptId = campPrompts[0]?.id ?? null
       campAiLoaded = true
     } catch { /* нет ключей — режим reuse всё равно работает */ }
@@ -1056,18 +1065,28 @@
 
             {#if campContentMode !== 'reuse'}
               <div>
-                <label for="nrr_model" class="block text-sm font-medium text-slate-700">AI-модель *</label>
-                {#if campModels.length === 0}
+                <label for="nrr_key" class="block text-sm font-medium text-slate-700">Ключ / Провайдер *</label>
+                {#if campProviders.length === 0}
                   <p class="mt-1 rounded-md bg-amber-50 px-2 py-1.5 text-[11px] text-amber-700">
-                    Нет активных content-моделей. Добавь провайдера и модель на странице <b>AI Settings</b>.
+                    Нет доступных ключей с content-моделью. Добавь провайдера и модель на странице <b>AI Settings</b>.
                   </p>
                 {:else}
-                  <select id="nrr_model" bind:value={campModelId}
+                  <select id="nrr_key" bind:value={campProviderId} onchange={onCampKeyChange}
                           class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
-                    {#each campModels as m}<option value={m.id}>{m.display_name} ({m.model_id}){campModelOwner[m.id] ? ` — ${campModelOwner[m.id]}` : ''}</option>{/each}
+                    {#each campProviders as p}<option value={p.id}>{campProviderLabel[p.id] ?? p.name}</option>{/each}
                   </select>
+                  <p class="mt-1 text-[11px] text-slate-400">Один ключ — несколько моделей. По умолчанию выбран ваш собственный.</p>
                 {/if}
               </div>
+              {#if campProviders.length > 0}
+                <div>
+                  <label for="nrr_model" class="block text-sm font-medium text-slate-700">AI-модель *</label>
+                  <select id="nrr_model" bind:value={campModelId}
+                          class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm">
+                    {#each campKeyModels as m}<option value={m.id}>{m.display_name} ({m.model_id})</option>{/each}
+                  </select>
+                </div>
+              {/if}
               <div>
                 <label for="nrr_prompt" class="block text-sm font-medium text-slate-700">Шаблон промпта</label>
                 <select id="nrr_prompt" bind:value={campPromptId}
