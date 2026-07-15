@@ -72,6 +72,15 @@ class AppSettings(Base, TimestampedMixin):
         Integer, nullable=False, server_default="3"
     )
 
+    # Сколько кредов валидируется ОДНОВРЕМЕННО ВНУТРИ одного батча (per-batch
+    # семафор). Валидация I/O-bound (XMLRPC/admin-HTTP через прокси), поэтому
+    # крутится сильно выше числа ядер. CF-браузеры при этом всё равно под своим
+    # потолком cf_browser_concurrency — тяжёлая полоса не разрастается. Тюнится
+    # без рестарта (recover/dispatch/on-demand берут значение отсюда).
+    batch_validation_concurrency: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="20"
+    )
+
     # Сколько перепроверок ссылок (link-check) идёт ОДНОВРЕМЕННО. Остальные ждут
     # в link_check_status='queued', dispatch_queued_link_checks поднимает по мере
     # освобождения слотов — чтобы пачка проверок не забивала прокси-пул/CPU и не

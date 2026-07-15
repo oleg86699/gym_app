@@ -807,6 +807,7 @@ export interface AppSettings {
   site_disable_threshold_cf: number
   max_concurrent_batch_validations: number
   max_concurrent_link_checks: number
+  batch_validation_concurrency: number
   default_publish_from: string | null  // ISO date "YYYY-MM-DD"
   default_publish_to: string | null
   limits: {
@@ -828,6 +829,8 @@ export interface AppSettings {
     max_max_concurrent_batch_validations: number
     min_max_concurrent_link_checks: number
     max_max_concurrent_link_checks: number
+    min_batch_validation_concurrency: number
+    max_batch_validation_concurrency: number
   }
 }
 

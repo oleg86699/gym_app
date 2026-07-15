@@ -426,8 +426,10 @@ async def validate_endpoint(
     level = "full"
     proxy_id = payload.proxy_id if is_super else None
     provision_after = is_super
-    # super: явное значение из диалога или серверный дефолт; supplier: фикс 8.
-    concurrency = (payload.concurrency or settings.DEFAULT_VALIDATION_CONCURRENCY) if is_super else 8
+    # super: явное значение из диалога или рантайм-дефолт из настроек; supplier: 8.
+    from domain.app_settings.service import get_app_settings
+    _batch_conc = (await get_app_settings(session)).batch_validation_concurrency
+    concurrency = (payload.concurrency or _batch_conc) if is_super else 8
 
     from workers.taskiq.cron_tasks import validate_batch_task
 
@@ -540,9 +542,11 @@ async def resume_endpoint(
     # вдобавок provision. Раньше resume форсил light — легаси-артефакт, ронял
     # xmlrpc-disabled сайты в transient.
     level = "full"
+    from domain.app_settings.service import get_app_settings
+    _batch_conc = (await get_app_settings(session)).batch_validation_concurrency
     await validate_batch_task.kiq(batch_id=batch_id, scope="all", actor_id=actor.id,
                                   level=level, provision_after=actor.is_super_admin,
-                                  concurrency=settings.DEFAULT_VALIDATION_CONCURRENCY)
+                                  concurrency=_batch_conc)
     log.info("batches.resume", actor_id=actor.id, batch_id=batch_id, level=level)
     return {"ok": True}
 
@@ -557,9 +561,11 @@ async def revalidate_failed_endpoint(
     from workers.taskiq.cron_tasks import validate_batch_task
     # Валидация ВСЕГДА full (для всех ролей) — см. resume. super_admin вдобавок provision.
     level = "full"
+    from domain.app_settings.service import get_app_settings
+    _batch_conc = (await get_app_settings(session)).batch_validation_concurrency
     await validate_batch_task.kiq(batch_id=batch_id, scope="invalid", actor_id=actor.id,
                                   level=level, provision_after=actor.is_super_admin,
-                                  concurrency=settings.DEFAULT_VALIDATION_CONCURRENCY)
+                                  concurrency=_batch_conc)
     log.info("batches.revalidate_failed", actor_id=actor.id, batch_id=batch_id, level=level)
     return {"ok": True}
 

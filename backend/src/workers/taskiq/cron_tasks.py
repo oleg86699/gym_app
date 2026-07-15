@@ -265,6 +265,10 @@ async def recover_stalled_batches() -> dict:
         if not stale_ids:
             return {"ok": True, "recovered": 0}
 
+        # Скорость валидации — из рантайм-настройки (тюнится без рестарта).
+        from domain.app_settings.service import get_app_settings
+        batch_conc = (await get_app_settings(s)).batch_validation_concurrency
+
         # Выводим из 'validating' (иначе гард в run_batch_validation отобьёт).
         await s.execute(
             update(WpImportBatch)
@@ -280,7 +284,7 @@ async def recover_stalled_batches() -> dict:
                 scope="pending",  # только незавершённые (last_validated_at IS NULL)
                 level="full",
                 provision_after=False,
-                concurrency=settings.DEFAULT_VALIDATION_CONCURRENCY,
+                concurrency=batch_conc,
             )
         except Exception as e:
             log.warning("recover.batch_enqueue_failed", batch_id=bid, error=str(e))
@@ -306,6 +310,7 @@ async def dispatch_queued_batches() -> dict:
     async with WriteSession() as s:
         cfg = await get_app_settings(s)
         limit = int(getattr(cfg, "max_concurrent_batch_validations", 3) or 3)
+        batch_conc = int(getattr(cfg, "batch_validation_concurrency", 20) or 20)
         active = int(await s.scalar(
             select(func.count()).select_from(WpImportBatch).where(
                 WpImportBatch.status == WpBatchStatus.VALIDATING.value,
@@ -332,7 +337,7 @@ async def dispatch_queued_batches() -> dict:
         await validate_batch_task.kiq(
             batch_id=bid,
             scope=params.get("scope", "all"),
-            concurrency=params.get("concurrency") or settings.DEFAULT_VALIDATION_CONCURRENCY,
+            concurrency=params.get("concurrency") or batch_conc,
             detect_lang=params.get("detect_lang", True),
             actor_id=params.get("actor_id"),
             level="full",

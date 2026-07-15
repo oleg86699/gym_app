@@ -7,6 +7,7 @@ from datetime import date
 from pydantic import BaseModel, ConfigDict, Field
 
 from domain.app_settings.service import (
+    MAX_BATCH_VALIDATION_CONCURRENCY,
     MAX_CF_BROWSER_CONCURRENCY,
     MAX_CONCURRENCY,
     MAX_CONCURRENCY_FLOOR,
@@ -16,6 +17,7 @@ from domain.app_settings.service import (
     MAX_SITE_DISABLE_THRESHOLD,
     MAX_SITE_DISABLE_THRESHOLD_CF,
     MAX_TIMEOUT_SECONDS,
+    MIN_BATCH_VALIDATION_CONCURRENCY,
     MIN_CF_BROWSER_CONCURRENCY,
     MIN_CONCURRENCY,
     MIN_CONCURRENCY_FLOOR,
@@ -40,6 +42,7 @@ class AppSettingsResponse(BaseModel):
     site_disable_threshold_cf: int
     max_concurrent_batch_validations: int
     max_concurrent_link_checks: int
+    batch_validation_concurrency: int
     default_publish_from: date | None
     default_publish_to: date | None
     # Удобно для UI чтобы рендерить ограничения без хардкода
@@ -63,6 +66,8 @@ class AppSettingsResponse(BaseModel):
             "max_max_concurrent_batch_validations": MAX_MAX_CONCURRENT_BATCH_VALIDATIONS,
             "min_max_concurrent_link_checks": MIN_MAX_CONCURRENT_LINK_CHECKS,
             "max_max_concurrent_link_checks": MAX_MAX_CONCURRENT_LINK_CHECKS,
+            "min_batch_validation_concurrency": MIN_BATCH_VALIDATION_CONCURRENCY,
+            "max_batch_validation_concurrency": MAX_BATCH_VALIDATION_CONCURRENCY,
         }
     )
 
@@ -103,6 +108,10 @@ class UpdateAppSettingsRequest(BaseModel):
     max_concurrent_link_checks: int | None = Field(
         default=None, ge=MIN_MAX_CONCURRENT_LINK_CHECKS,
         le=MAX_MAX_CONCURRENT_LINK_CHECKS
+    )
+    batch_validation_concurrency: int | None = Field(
+        default=None, ge=MIN_BATCH_VALIDATION_CONCURRENCY,
+        le=MAX_BATCH_VALIDATION_CONCURRENCY
     )
     # Внимание: чтобы отличить "не передали поле" от "передали null", используем
     # model_fields_set в роуте.

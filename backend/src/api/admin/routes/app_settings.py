@@ -54,6 +54,7 @@ async def update_settings(
             site_disable_threshold_cf=payload.site_disable_threshold_cf,
             max_concurrent_batch_validations=payload.max_concurrent_batch_validations,
             max_concurrent_link_checks=payload.max_concurrent_link_checks,
+            batch_validation_concurrency=payload.batch_validation_concurrency,
             default_publish_from=pub_from,
             default_publish_to=pub_to,
         )
@@ -93,6 +94,7 @@ async def update_settings(
             "site_disable_threshold_cf": row.site_disable_threshold_cf,
             "max_concurrent_batch_validations": row.max_concurrent_batch_validations,
             "max_concurrent_link_checks": row.max_concurrent_link_checks,
+            "batch_validation_concurrency": row.batch_validation_concurrency,
             "default_publish_from": str(row.default_publish_from) if row.default_publish_from else None,
             "default_publish_to": str(row.default_publish_to) if row.default_publish_to else None,
         },

@@ -21,6 +21,7 @@
   let formSiteDisableCf = $state(8)
   let formMaxConcurrentBatches = $state(3)
   let formMaxConcurrentLinkChecks = $state(2)
+  let formBatchValidationConcurrency = $state(20)
   let formPublishFrom = $state('')   // "" = окно не задано
   let formPublishTo = $state('')
 
@@ -41,6 +42,7 @@
         formSiteDisableCf !== cfg.site_disable_threshold_cf ||
         formMaxConcurrentBatches !== cfg.max_concurrent_batch_validations ||
         formMaxConcurrentLinkChecks !== cfg.max_concurrent_link_checks ||
+        formBatchValidationConcurrency !== cfg.batch_validation_concurrency ||
         formPublishFrom !== (cfg.default_publish_from ?? '') ||
         formPublishTo !== (cfg.default_publish_to ?? '')),
   )
@@ -72,6 +74,7 @@
       formSiteDisableCf = cfg.site_disable_threshold_cf
       formMaxConcurrentBatches = cfg.max_concurrent_batch_validations
       formMaxConcurrentLinkChecks = cfg.max_concurrent_link_checks
+      formBatchValidationConcurrency = cfg.batch_validation_concurrency
       formPublishFrom = cfg.default_publish_from ?? ''
       formPublishTo = cfg.default_publish_to ?? ''
     } catch (e) {
@@ -98,6 +101,7 @@
         site_disable_threshold_cf: formSiteDisableCf,
         max_concurrent_batch_validations: formMaxConcurrentBatches,
         max_concurrent_link_checks: formMaxConcurrentLinkChecks,
+        batch_validation_concurrency: formBatchValidationConcurrency,
         default_publish_from: formPublishFrom || null,
         default_publish_to: formPublishTo || null,
       })
@@ -279,6 +283,21 @@
             Сколько батчей валидируется <b>одновременно</b>. Остальные ждут в статусе
             <b>«в очереди»</b> и поднимаются по мере освобождения слотов — чтобы загрузка
             кучи файлов разом не плодила сотни потоков/браузеров. Рекоменд.: <b>3</b>.
+          </p>
+          <div class="mt-4 max-w-xs">
+            <label for="cfg_bvc" class="block text-xs font-medium uppercase tracking-wider text-slate-500">
+              Кредов параллельно (скорость) <span class="text-slate-400 normal-case">({cfg.limits.min_batch_validation_concurrency}–{cfg.limits.max_batch_validation_concurrency})</span>
+            </label>
+            <input id="cfg_bvc" type="number" bind:value={formBatchValidationConcurrency}
+                   min={cfg.limits.min_batch_validation_concurrency} max={cfg.limits.max_batch_validation_concurrency}
+                   disabled={!canEdit}
+                   class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm disabled:bg-slate-100" />
+          </div>
+          <p class="mt-2 text-[11px] text-slate-400">
+            Сколько credentials валидируется <b>параллельно ВНУТРИ</b> одного батча — главный
+            рычаг скорости. Валидация I/O-bound (запросы через прокси), поэтому крутится
+            сильно выше числа ядер. CF-браузеры при этом под своим потолком (ниже) —
+            тяжёлая полоса не разрастётся. Применяется на следующем цикле батча. Рекоменд.: <b>20</b>.
           </p>
           <div class="mt-4 max-w-xs">
             <label for="cfg_mclc" class="block text-xs font-medium uppercase tracking-wider text-slate-500">

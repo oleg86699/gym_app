@@ -42,6 +42,10 @@ MIN_MAX_CONCURRENT_BATCH_VALIDATIONS = 1
 MAX_MAX_CONCURRENT_BATCH_VALIDATIONS = 20
 MIN_MAX_CONCURRENT_LINK_CHECKS = 1
 MAX_MAX_CONCURRENT_LINK_CHECKS = 20
+# Сколько кредов валидируется одновременно ВНУТРИ батча (per-batch семафор).
+# I/O-bound → потолок высокий; аккуратно крутить под железо/прокси.
+MIN_BATCH_VALIDATION_CONCURRENCY = 1
+MAX_BATCH_VALIDATION_CONCURRENCY = 50
 
 # Пороги авто-выключения сайта (site-class фейлы подряд). Общий и отдельный CF.
 MIN_SITE_DISABLE_THRESHOLD = 3
@@ -89,6 +93,7 @@ async def update_app_settings(
     site_disable_threshold_cf: int | None = None,
     max_concurrent_batch_validations: int | None = None,
     max_concurrent_link_checks: int | None = None,
+    batch_validation_concurrency: int | None = None,
     default_publish_from: object = _UNSET,
     default_publish_to: object = _UNSET,
 ) -> AppSettings:
@@ -144,6 +149,14 @@ async def update_app_settings(
                 f"[{MIN_MAX_CONCURRENT_LINK_CHECKS}, {MAX_MAX_CONCURRENT_LINK_CHECKS}]"
             )
         row.max_concurrent_link_checks = max_concurrent_link_checks
+    if batch_validation_concurrency is not None:
+        if not (MIN_BATCH_VALIDATION_CONCURRENCY <= batch_validation_concurrency
+                <= MAX_BATCH_VALIDATION_CONCURRENCY):
+            raise ValueError(
+                f"batch_validation_concurrency must be in "
+                f"[{MIN_BATCH_VALIDATION_CONCURRENCY}, {MAX_BATCH_VALIDATION_CONCURRENCY}]"
+            )
+        row.batch_validation_concurrency = batch_validation_concurrency
     if site_disable_threshold is not None:
         if not (MIN_SITE_DISABLE_THRESHOLD <= site_disable_threshold <= MAX_SITE_DISABLE_THRESHOLD):
             raise ValueError(
