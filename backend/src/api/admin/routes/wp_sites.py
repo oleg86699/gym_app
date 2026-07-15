@@ -267,6 +267,92 @@ async def create_site_endpoint(
     )
 
 
+# ВАЖНО: литеральные GET-маршруты (/export, /validation-status) объявлены ДО
+# динамического `/{site_id}` — иначе FastAPI матчит их как site_id и падает
+# int_parsing ("unable to parse string as an integer", input="export").
+@router.get("/export")
+async def export_credentials(
+    format: str = Query(default="csv", pattern="^(csv|json)$"),
+    include_invalid: bool = Query(
+        default=False, description="Включать ли credentials с is_valid=false"
+    ),
+    status: str = Query(
+        default="all",
+        pattern="^(all|active|auto-disabled|off|usable|unusable|cred_valid|cred_invalid|cred_transient|rpc_postable|admin_capable|admin_postable)$",
+        description="Фильтр таблицы: экспортируем только сайты этого статуса",
+    ),
+    search: str | None = Query(default=None, max_length=200),
+    actor: AdminUser = Depends(require_super_admin),
+    session: AsyncSession = Depends(get_db_read),
+) -> StreamingResponse:
+    """
+    Экспорт credentials с РАСШИФРОВАННЫМИ паролями.
+
+    Отдаёт РОВНО то, что видно в таблице под текущим фильтром: `status` (usable/
+    unusable/cred_*/каналы) + `search` по домену. `include_invalid` —
+    ортогональный тумблер (valid-only vs полный бэкап с is_valid=false).
+
+    Доступно только super_admin. Используется для бэкапа/миграции/передачи
+    доступов. Колонки CSV совместимы с форматом импорта (`domain,login,
+    password,...`), доп. поля внизу — для аудита.
+    """
+    log.warning(
+        "wp_sites.export.requested",
+        actor_id=actor.id,
+        format=format,
+        include_invalid=include_invalid,
+        status=status,
+        search=search,
+    )
+    from domain.audit.service import record as audit_record
+
+    await audit_record(
+        session, actor=actor, action="wp_sites.export",
+        resource_type="wp_credentials",
+        changes={"format": format, "include_invalid": include_invalid,
+                 "status": status, "search": search},
+    )
+
+    # Фильтр таблицы → множество site_id. Считаем один раз (сайтов немного —
+    # десятки-сотни, много меньше 32767 bind-параметров). None = без фильтра
+    # (весь пул, статус=all и пустой поиск), [] = ничего не подошло под фильтр.
+    site_filter_ids: list[int] | None = None
+    if status != "all" or search:
+        from domain.wp_sites.service import apply_site_list_filters
+        rows = await session.execute(
+            apply_site_list_filters(select(WpSite.id), search=search, status=status)
+        )
+        site_filter_ids = [r for (r,) in rows.all()]
+
+    if format == "json":
+        return StreamingResponse(
+            _stream_export_json(session, include_invalid, site_filter_ids),
+            media_type="application/json; charset=utf-8",
+            headers={
+                "Content-Disposition": 'attachment; filename="wp-credentials.json"',
+            },
+        )
+    return StreamingResponse(
+        _stream_export_csv(session, include_invalid, site_filter_ids),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": 'attachment; filename="wp-credentials.csv"',
+        },
+    )
+
+
+@router.get("/validation-status")
+async def get_validation_status(
+    _: AdminUser = Depends(get_current_user),
+) -> dict:
+    """Состояние массовой валидации (для UI прогресс-бара). Объявлен ДО
+    `/{site_id}` по той же причине, что и /export (иначе int_parsing)."""
+    from domain.wp_validation.service import get_state
+
+    state = await get_state()
+    return state.__dict__
+
+
 @router.get("/{site_id}", response_model=WpSiteDetail)
 async def get_site_endpoint(
     site_id: int,
@@ -749,9 +835,16 @@ def _row_for_export(cred: WpCredential, site: WpSite) -> list:
 
 
 async def _iter_credentials_for_export(
-    session: AsyncSession, include_invalid: bool
+    session: AsyncSession, include_invalid: bool,
+    site_filter_ids: list[int] | None = None,
 ) -> AsyncIterator[tuple[WpCredential, WpSite]]:
-    """Идём батчами по 500, чтобы не материализовать пул целиком."""
+    """Идём батчами по 500, чтобы не материализовать пул целиком.
+
+    site_filter_ids: если задан — экспортируем только credentials этих сайтов
+    (ровно то, что видно в таблице под текущим фильтром status+search). None —
+    весь пул. Пустой список → ничего (фильтр не дал ни одного сайта)."""
+    if site_filter_ids is not None and not site_filter_ids:
+        return
     after_id = 0
     while True:
         stmt = (
@@ -766,6 +859,8 @@ async def _iter_credentials_for_export(
         )
         if not include_invalid:
             stmt = stmt.where(WpCredential.is_valid.is_(True))
+        if site_filter_ids is not None:
+            stmt = stmt.where(WpCredential.site_id.in_(site_filter_ids))
         rows = list((await session.execute(stmt)).scalars().all())
         if not rows:
             return
@@ -780,7 +875,8 @@ async def _iter_credentials_for_export(
 
 
 async def _stream_export_csv(
-    session: AsyncSession, include_invalid: bool
+    session: AsyncSession, include_invalid: bool,
+    site_filter_ids: list[int] | None = None,
 ) -> AsyncIterator[bytes]:
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\n")
@@ -790,7 +886,9 @@ async def _stream_export_csv(
     buf.truncate()
 
     n = 0
-    async for cred, site in _iter_credentials_for_export(session, include_invalid):
+    async for cred, site in _iter_credentials_for_export(
+        session, include_invalid, site_filter_ids
+    ):
         writer.writerow([str(c) if c is not None else "" for c in _row_for_export(cred, site)])
         n += 1
         if n % _EXPORT_BATCH == 0:
@@ -802,66 +900,20 @@ async def _stream_export_csv(
 
 
 async def _stream_export_json(
-    session: AsyncSession, include_invalid: bool
+    session: AsyncSession, include_invalid: bool,
+    site_filter_ids: list[int] | None = None,
 ) -> AsyncIterator[bytes]:
     yield b"[\n"
     first = True
-    async for cred, site in _iter_credentials_for_export(session, include_invalid):
+    async for cred, site in _iter_credentials_for_export(
+        session, include_invalid, site_filter_ids
+    ):
         row = _row_for_export(cred, site)
         obj = dict(zip(_EXPORT_HEADER, row, strict=True))
         prefix = b"" if first else b",\n"
         first = False
         yield prefix + json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8")
     yield b"\n]\n"
-
-
-@router.get("/export")
-async def export_credentials(
-    format: str = Query(default="csv", pattern="^(csv|json)$"),
-    include_invalid: bool = Query(
-        default=False, description="Включать ли credentials с is_valid=false"
-    ),
-    actor: AdminUser = Depends(require_super_admin),
-    session: AsyncSession = Depends(get_db_read),
-) -> StreamingResponse:
-    """
-    Полный экспорт credentials с РАСШИФРОВАННЫМИ паролями.
-
-    Доступно только super_admin. Используется для бэкапа/миграции/передачи
-    доступов. В audit log запишется (когда сделаем audit log в этапе 3).
-
-    Колонки CSV совместимы с форматом импорта (`domain,login,password,...`),
-    дополнительные поля внизу — для аудита.
-    """
-    log.warning(
-        "wp_sites.export.requested",
-        actor_id=actor.id,
-        format=format,
-        include_invalid=include_invalid,
-    )
-    from domain.audit.service import record as audit_record
-
-    await audit_record(
-        session, actor=actor, action="wp_sites.export",
-        resource_type="wp_credentials",
-        changes={"format": format, "include_invalid": include_invalid},
-    )
-
-    if format == "json":
-        return StreamingResponse(
-            _stream_export_json(session, include_invalid),
-            media_type="application/json; charset=utf-8",
-            headers={
-                "Content-Disposition": 'attachment; filename="wp-credentials.json"',
-            },
-        )
-    return StreamingResponse(
-        _stream_export_csv(session, include_invalid),
-        media_type="text/csv; charset=utf-8",
-        headers={
-            "Content-Disposition": 'attachment; filename="wp-credentials.csv"',
-        },
-    )
 
 
 # ─── Валидатор credentials (on-demand + status) ──────────────────────
@@ -895,14 +947,3 @@ async def trigger_validate(
     await validate_ondemand.kiq(scope=scope, actor_id=actor.id)
     log.info("wp_sites.validate.triggered", actor_id=actor.id, scope=scope)
     return {"ok": True, "running": True, "scope": scope}
-
-
-@router.get("/validation-status")
-async def get_validation_status(
-    _: AdminUser = Depends(get_current_user),
-) -> dict:
-    """Состояние массовой валидации (для UI прогресс-бара)."""
-    from domain.wp_validation.service import get_state
-
-    state = await get_state()
-    return state.__dict__

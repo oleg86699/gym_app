@@ -338,19 +338,30 @@
     return { label: 'pending', cls: 'bg-slate-100 text-slate-500', title: `${p} cred ждут валидации` }
   }
 
-  // Export всех credentials с расшифрованными паролями (super_admin only)
+  // Export credentials с расшифрованными паролями (super_admin only).
+  // Экспортируем РОВНО то, что видно в таблице — текущий фильтр (filterStatus)
+  // + поиск (search) уходят в query, бэкенд отдаёт только эти сайты.
   function exportCreds(format: 'csv' | 'json', includeInvalid: boolean) {
+    const filtered = filterStatus !== 'all' || !!search
+    const scope = filtered
+      ? `Область: только показанное — фильтр «${filterStatus}»` +
+        (search ? ` + поиск «${search}»` : '')
+      : `Область: весь пул (фильтр не выбран)`
     const msg =
-      `⚠ Скачать ВСЕ credentials с РАСшифрованными паролями?\n\n` +
+      `⚠ Скачать credentials с РАСшифрованными паролями?\n\n` +
       `Файл содержит секретные данные — храни безопасно и не передавай ` +
       `по незащищённым каналам.\n\n` +
-      `Формат: ${format.toUpperCase()}${includeInvalid ? ' (включая is_valid=false)' : ''}`
+      `Формат: ${format.toUpperCase()}` +
+      `${includeInvalid ? ' (включая is_valid=false)' : ' (только валидные)'}\n` +
+      scope
     if (!confirm(msg)) return
-    const url = `/admin/api/wp-sites/export?format=${format}` +
-                (includeInvalid ? '&include_invalid=true' : '')
+    const params = new URLSearchParams({ format })
+    if (includeInvalid) params.set('include_invalid', 'true')
+    if (filterStatus !== 'all') params.set('status', filterStatus)
+    if (search) params.set('search', search)
     // Триггерим скачивание — браузер увидит Content-Disposition: attachment
     // и не уйдёт со страницы.
-    window.location.href = url
+    window.location.href = `/admin/api/wp-sites/export?${params.toString()}`
   }
 
   // Import CSV

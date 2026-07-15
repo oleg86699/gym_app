@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import structlog
-from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy import and_, exists, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -66,27 +66,21 @@ def _clean_domain(d: str) -> str:
 # ─── WpSite ───────────────────────────────────────────────────────────
 
 
-async def list_sites(
-    session: AsyncSession,
-    *,
-    after_id: int | None = None,
-    limit: int = 50,
-    search: str | None = None,
-    # all | active | auto-disabled | off  (site-domain status)
-    # usable | unusable                   (operational verdict)
-    # cred_valid | cred_invalid | cred_transient  (есть ≥1 cred такого статуса)
-    status: str = "all",
-    sort: str = "alpha",   # alpha | recent | valid_desc | transient_desc
-) -> tuple[list[WpSite], int]:
-    from sqlalchemy import exists
+def apply_site_list_filters(stmt, *, search: str | None, status: str):
+    """Применяет фильтры списка сайтов (search + status) к select по WpSite.
 
-    base = (
-        select(WpSite)
-        .where(WpSite.deleted_at.is_(None))
-        .options(selectinload(WpSite.credentials))
-    )
+    Общий код для list_sites (таблица) и экспорта — чтобы «Export» отдавал РОВНО
+    те сайты, что видно в таблице под текущим фильтром. Добавляет только WHERE
+    (deleted_at + search + status); сортировку/пагинацию/options делает вызывающий.
+
+      status: all | active | auto-disabled | off  (site-domain status)
+              usable | unusable                   (operational verdict)
+              cred_valid | cred_invalid | cred_transient  (есть ≥1 cred такого)
+              rpc_postable | admin_capable | admin_postable  (булевы каналы)
+    """
+    stmt = stmt.where(WpSite.deleted_at.is_(None))
     if search:
-        base = base.where(WpSite.domain.ilike(f"%{search.strip()}%"))
+        stmt = stmt.where(WpSite.domain.ilike(f"%{search.strip()}%"))
 
     def _has_cred(cred_status: str):
         return exists().where(
@@ -105,35 +99,54 @@ async def list_sites(
         )
 
     if status == "active":
-        base = base.where(WpSite.is_active.is_(True))
+        stmt = stmt.where(WpSite.is_active.is_(True))
     elif status == "auto-disabled":
-        base = base.where(WpSite.is_active.is_(False), WpSite.auto_disabled_at.is_not(None))
+        stmt = stmt.where(WpSite.is_active.is_(False), WpSite.auto_disabled_at.is_not(None))
     elif status == "off":
-        base = base.where(WpSite.is_active.is_(False), WpSite.auto_disabled_at.is_(None))
+        stmt = stmt.where(WpSite.is_active.is_(False), WpSite.auto_disabled_at.is_(None))
     elif status == "usable":
         # домен жив + есть рабочий cred
-        base = base.where(WpSite.is_active.is_(True), _has_cred("valid"))
+        stmt = stmt.where(WpSite.is_active.is_(True), _has_cred("valid"))
     elif status == "unusable":
         # домен off ИЛИ нет ни одного valid cred
-        base = base.where(or_(WpSite.is_active.is_(False), ~_has_cred("valid")))
+        stmt = stmt.where(or_(WpSite.is_active.is_(False), ~_has_cred("valid")))
     elif status == "cred_valid":
-        base = base.where(_has_cred("valid"))
+        stmt = stmt.where(_has_cred("valid"))
     elif status == "cred_invalid":
-        base = base.where(_has_cred("invalid"))
+        stmt = stmt.where(_has_cred("invalid"))
     elif status == "cred_transient":
-        base = base.where(_has_cred("transient"))
+        stmt = stmt.where(_has_cred("transient"))
     # Каналы (реальные булевы флаги) — согласованы с карточкой CHANNELS и с тем,
     # что воркер реально берёт в пул.
     elif status == "rpc_postable":
         # пул постинга — cred постит через XML-RPC
-        base = base.where(_has_cred_flag(WpCredential.can_post_via_xmlrpc))
+        stmt = stmt.where(_has_cred_flag(WpCredential.can_post_via_xmlrpc))
     elif status == "admin_capable":
         # пул ССЫЛОК — cred логинится в wp-admin (candidate_link_sites)
-        base = base.where(_has_cred_flag(WpCredential.can_admin_login))
+        stmt = stmt.where(_has_cred_flag(WpCredential.can_admin_login))
     elif status == "admin_postable":
         # cred умеет постить через admin (Tier 3 / CF-сайты)
-        base = base.where(_has_cred_flag(WpCredential.can_post_via_admin))
+        stmt = stmt.where(_has_cred_flag(WpCredential.can_post_via_admin))
     # else "all" — no filter
+    return stmt
+
+
+async def list_sites(
+    session: AsyncSession,
+    *,
+    after_id: int | None = None,
+    limit: int = 50,
+    search: str | None = None,
+    # all | active | auto-disabled | off  (site-domain status)
+    # usable | unusable                   (operational verdict)
+    # cred_valid | cred_invalid | cred_transient  (есть ≥1 cred такого статуса)
+    status: str = "all",
+    sort: str = "alpha",   # alpha | recent | valid_desc | transient_desc
+) -> tuple[list[WpSite], int]:
+    base = apply_site_list_filters(
+        select(WpSite).options(selectinload(WpSite.credentials)),
+        search=search, status=status,
+    )
 
     total = (
         await session.execute(

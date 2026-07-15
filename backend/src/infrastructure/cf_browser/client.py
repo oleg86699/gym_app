@@ -11,6 +11,7 @@ is_browser_available() == False и Tier 3 просто недоступен — 
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from urllib.parse import urlparse
@@ -147,7 +148,18 @@ async def browser_login_session(
     (для curl_cffi-реплея) либо None. Идемпотентно кеширует сессию.
 
     Обрабатывает cookie-гонку WordPress (флапающий «cookies are blocked»):
-    при неудаче — reload + повтор сабмита."""
+    при неудаче — reload + повтор сабмита.
+
+    CANCELLATION-SAFE. Вся браузерная работа + закрытие вынесены в отдельную
+    задачу `_run`, а внешнее ожидание (см. ниже) НЕ даёт отмене оборвать cleanup
+    на полпути. Зачем: валидатор гоняет каждый cred под `asyncio.wait_for`
+    (per-cred timeout). CF managed-challenge headful-браузером может длиться
+    дольше этого таймаута → wait_for отменяет корутину ПРЯМО ВНУТРИ браузерной
+    сессии. Раньше отмена рвала `await browser.close()` в finally → headful-
+    chromium + node-драйвер утекали процессами (накопилось ~1.5k процессов,
+    load average сервера → 231, nginx 502). Теперь отмена гасит `_run`, но его
+    finally/`async with async_playwright` доводятся до конца → процессы не текут.
+    (Постинг вызывает эту же функцию без wait_for — там отмены и не было.)"""
     if not is_browser_available():
         return None
     from patchright.async_api import async_playwright
@@ -155,69 +167,84 @@ async def browser_login_session(
     host = urlparse(base).netloc
     proxy_pw = _pw_proxy(proxy_url)
     sem = _semaphore(concurrency)
-    async with sem:
-        try:
-            async with async_playwright() as p:
-                # headful (под Xvfb): CF Managed Challenge ("Just a moment…")
-                # headless НЕ проходит (жёсткий 403); headful — проходит.
-                browser = await p.chromium.launch(headless=False, args=_LAUNCH_ARGS)
-                try:
-                    ctx_kw = {"ignore_https_errors": True}
-                    if proxy_pw:
-                        ctx_kw["proxy"] = proxy_pw
-                    ctx = await browser.new_context(**ctx_kw)
-                    # NB: НЕ перехватываем запросы (ctx.route) — patchright теряет
-                    # stealth, и CF начинает блокировать. Картинки гасим launch-аргом.
-                    page = await ctx.new_page()
-                    ua = await page.evaluate("() => navigator.userAgent")
-                    logged = False
-                    for _ in range(2):  # cookie-гонка → reload + повтор
-                        # domcontentloaded (не networkidle: CF-challenge держит
-                        # соединения и networkidle висит до таймаута).
-                        await page.goto(f"{base}/wp-login.php",
-                                        wait_until="domcontentloaded", timeout=timeout_ms)
-                        try:
-                            # ждём пока CF managed-challenge авто-решится → форма логина
-                            await page.wait_for_selector("#user_login", timeout=40000)
-                        except Exception:
-                            break
-                        await page.fill("#user_login", login)
-                        await page.fill("#user_pass", password)
-                        await page.click("#wp-submit")
-                        try:
-                            await page.wait_for_load_state("networkidle", timeout=30000)
-                        except Exception:
-                            pass
-                        cks = await ctx.cookies()
-                        if (any("wordpress_logged_in" in c["name"] for c in cks)
-                                or "/wp-admin" in page.url):
-                            logged = True
-                            break
-                    cookies = await ctx.cookies()
-                finally:
-                    # ВСЕГДА закрываем браузер. Раньше close() был только на
-                    # success-пути → при исключении (CF-таймаут/навигация/логин)
-                    # headful-chromium под Xvfb утекал процессом+FD, и воркер за
-                    # ~18ч упирался в «Too many open files» (asyncpg не мог открыть
-                    # соединение). 64 зомби-браузера накопилось.
+
+    async def _run() -> dict | None:
+        async with async_playwright() as p:
+            # headful (под Xvfb): CF Managed Challenge ("Just a moment…")
+            # headless НЕ проходит (жёсткий 403); headful — проходит.
+            browser = await p.chromium.launch(headless=False, args=_LAUNCH_ARGS)
+            try:
+                ctx_kw = {"ignore_https_errors": True}
+                if proxy_pw:
+                    ctx_kw["proxy"] = proxy_pw
+                ctx = await browser.new_context(**ctx_kw)
+                # NB: НЕ перехватываем запросы (ctx.route) — patchright теряет
+                # stealth, и CF начинает блокировать. Картинки гасим launch-аргом.
+                page = await ctx.new_page()
+                ua = await page.evaluate("() => navigator.userAgent")
+                logged = False
+                for _ in range(2):  # cookie-гонка → reload + повтор
+                    # domcontentloaded (не networkidle: CF-challenge держит
+                    # соединения и networkidle висит до таймаута).
+                    await page.goto(f"{base}/wp-login.php",
+                                    wait_until="domcontentloaded", timeout=timeout_ms)
                     try:
-                        await browser.close()
+                        # ждём пока CF managed-challenge авто-решится → форма логина
+                        await page.wait_for_selector("#user_login", timeout=40000)
+                    except Exception:
+                        break
+                    await page.fill("#user_login", login)
+                    await page.fill("#user_pass", password)
+                    await page.click("#wp-submit")
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=30000)
                     except Exception:
                         pass
+                    cks = await ctx.cookies()
+                    if (any("wordpress_logged_in" in c["name"] for c in cks)
+                            or "/wp-admin" in page.url):
+                        logged = True
+                        break
+                cookies = await ctx.cookies()
+            finally:
+                # ВСЕГДА закрываем браузер. wait_for(20): не виснуть в finally на
+                # застрявшем graceful-close — драйвер всё равно добьёт chromium при
+                # выходе из `async with async_playwright` (stop() убивает node-
+                # процесс, а тот — своих детей-chromium).
+                try:
+                    await asyncio.wait_for(browser.close(), timeout=20)
+                except Exception:
+                    pass
+        if not logged:
+            log.info("cf_browser.login.failed", host=host)
+            return None
+        session = {"cookies": [{"name": c["name"], "value": c["value"],
+                                "domain": c.get("domain") or host, "path": c.get("path") or "/"}
+                               for c in cookies],
+                   "user_agent": ua}
+        await cache_session(host, proxy_url, session)
+        log.info("cf_browser.login.ok", host=host, cookies=len(session["cookies"]))
+        return session
+
+    async with sem:
+        task = asyncio.ensure_future(_run())
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Внешняя отмена (per-cred wait_for валидатора). Просим _run
+            # завершиться и ДОЖИДАЕМСЯ его cleanup, не давая отмене оборвать
+            # закрытие браузера на полпути. task отменяем РОВНО раз → его finally
+            # (browser.close) и `async with` (stop драйвера) доигрывают штатно.
+            task.cancel()
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    pass
+            raise
         except Exception as e:  # noqa: BLE001
             log.warning("cf_browser.login.error", host=host, error=str(e)[:200])
             return None
-
-    if not logged:
-        log.info("cf_browser.login.failed", host=host)
-        return None
-    session = {"cookies": [{"name": c["name"], "value": c["value"],
-                            "domain": c.get("domain") or host, "path": c.get("path") or "/"}
-                           for c in cookies],
-               "user_agent": ua}
-    await cache_session(host, proxy_url, session)
-    log.info("cf_browser.login.ok", host=host, cookies=len(session["cookies"]))
-    return session
 
 
 # ─── curl_cffi-реплей запросом с сессией ──────────────────────────────
