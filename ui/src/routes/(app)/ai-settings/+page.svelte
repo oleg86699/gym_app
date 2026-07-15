@@ -396,8 +396,9 @@
       <div class="mt-4 space-y-4">
         {#if isSuper}
           <label class="flex items-center gap-2 text-sm text-slate-700">
-            <input type="checkbox" bind:checked={sh_all} /> Виден всем (дефолт для всех пользователей)
+            <input type="checkbox" bind:checked={sh_all} /> Виден всем пользователям
           </label>
+          <p class="-mt-2 text-xs text-slate-400">По умолчанию ключ приватный (только владельца) — этот тумблер открывает его всем осознанно.</p>
           {#if !sh_all}
             <div>
               <p class="text-xs font-medium text-slate-700">Группы</p>
