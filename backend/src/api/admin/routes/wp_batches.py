@@ -680,6 +680,18 @@ _RESULT_HEADER = [
 ]
 
 
+def _site_root_url(url: str) -> str:
+    """URL сайта без служебного endpoint-суффикса (/xmlrpc.php, /wp-login.php).
+    last_working_url у XML-RPC-валидированных — это .../xmlrpc.php; для колонки url
+    срезаем его, оставляя URL сайта (схему/порт/подпуть сохраняем)."""
+    if not url:
+        return url
+    for suf in ("/xmlrpc.php", "/wp-login.php"):
+        if url.endswith(suf):
+            return url[: -len(suf)]
+    return url
+
+
 def _cred_to_row(cred, *, include_password: bool) -> dict:
     """Унифицированная сериализация cred → dict для любого формата."""
     site = cred.site
@@ -696,11 +708,11 @@ def _cred_to_row(cred, *, include_password: bool) -> dict:
         channel = "admin"
     else:
         channel = cred.last_validation_kind or ""
-    # url: готовый (разрешённый) XML-RPC endpoint, если discovery/валидация его нашли;
-    # иначе фолбэк на базовый https://{domain} (у domain-only, ещё не валидированных).
+    # url: URL сайта (корень рабочего адреса без /xmlrpc.php); фолбэк https://{domain}.
     site_url = ""
     if site:
-        site_url = site.last_working_url or (f"https://{site.domain}" if site.domain else "")
+        site_url = _site_root_url(
+            site.last_working_url or (f"https://{site.domain}" if site.domain else ""))
     return {
         "domain": (site.domain if site else "") or "",
         "url": site_url,
