@@ -575,6 +575,7 @@ export const appSettings = {
     max_concurrent_batch_validations?: number
     max_concurrent_link_checks?: number
     batch_validation_concurrency?: number
+    content_gen_concurrency?: number
     default_publish_from?: string | null
     default_publish_to?: string | null
   }) => api.put<AppSettings>('/admin/api/app-settings', payload),

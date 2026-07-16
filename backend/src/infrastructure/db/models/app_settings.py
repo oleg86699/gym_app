@@ -81,6 +81,12 @@ class AppSettings(Base, TimestampedMixin):
         Integer, nullable=False, server_default="20"
     )
 
+    # Сколько текстов csv_campaign генерится ОДНОВРЕМЕННО (bulk/авто-старт). AI-bound,
+    # упирается в rate-limit ключа. Тюнится без рестарта (generate_run_items читает).
+    content_gen_concurrency: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="5"
+    )
+
     # Сколько перепроверок ссылок (link-check) идёт ОДНОВРЕМЕННО. Остальные ждут
     # в link_check_status='queued', dispatch_queued_link_checks поднимает по мере
     # освобождения слотов — чтобы пачка проверок не забивала прокси-пул/CPU и не

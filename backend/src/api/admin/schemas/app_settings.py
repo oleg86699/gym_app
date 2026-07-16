@@ -11,6 +11,7 @@ from domain.app_settings.service import (
     MAX_CF_BROWSER_CONCURRENCY,
     MAX_CONCURRENCY,
     MAX_CONCURRENCY_FLOOR,
+    MAX_CONTENT_GEN_CONCURRENCY,
     MAX_GLOBAL_POSTING_CONCURRENCY,
     MAX_MAX_CONCURRENT_BATCH_VALIDATIONS,
     MAX_MAX_CONCURRENT_LINK_CHECKS,
@@ -21,6 +22,7 @@ from domain.app_settings.service import (
     MIN_CF_BROWSER_CONCURRENCY,
     MIN_CONCURRENCY,
     MIN_CONCURRENCY_FLOOR,
+    MIN_CONTENT_GEN_CONCURRENCY,
     MIN_GLOBAL_POSTING_CONCURRENCY,
     MIN_MAX_CONCURRENT_BATCH_VALIDATIONS,
     MIN_MAX_CONCURRENT_LINK_CHECKS,
@@ -43,6 +45,7 @@ class AppSettingsResponse(BaseModel):
     max_concurrent_batch_validations: int
     max_concurrent_link_checks: int
     batch_validation_concurrency: int
+    content_gen_concurrency: int
     default_publish_from: date | None
     default_publish_to: date | None
     # Удобно для UI чтобы рендерить ограничения без хардкода
@@ -68,6 +71,8 @@ class AppSettingsResponse(BaseModel):
             "max_max_concurrent_link_checks": MAX_MAX_CONCURRENT_LINK_CHECKS,
             "min_batch_validation_concurrency": MIN_BATCH_VALIDATION_CONCURRENCY,
             "max_batch_validation_concurrency": MAX_BATCH_VALIDATION_CONCURRENCY,
+            "min_content_gen_concurrency": MIN_CONTENT_GEN_CONCURRENCY,
+            "max_content_gen_concurrency": MAX_CONTENT_GEN_CONCURRENCY,
         }
     )
 
@@ -112,6 +117,10 @@ class UpdateAppSettingsRequest(BaseModel):
     batch_validation_concurrency: int | None = Field(
         default=None, ge=MIN_BATCH_VALIDATION_CONCURRENCY,
         le=MAX_BATCH_VALIDATION_CONCURRENCY
+    )
+    content_gen_concurrency: int | None = Field(
+        default=None, ge=MIN_CONTENT_GEN_CONCURRENCY,
+        le=MAX_CONTENT_GEN_CONCURRENCY
     )
     # Внимание: чтобы отличить "не передали поле" от "передали null", используем
     # model_fields_set в роуте.

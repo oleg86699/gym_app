@@ -826,6 +826,7 @@ export interface AppSettings {
   max_concurrent_batch_validations: number
   max_concurrent_link_checks: number
   batch_validation_concurrency: number
+  content_gen_concurrency: number
   default_publish_from: string | null  // ISO date "YYYY-MM-DD"
   default_publish_to: string | null
   limits: {
@@ -849,6 +850,8 @@ export interface AppSettings {
     max_max_concurrent_link_checks: number
     min_batch_validation_concurrency: number
     max_batch_validation_concurrency: number
+    min_content_gen_concurrency: number
+    max_content_gen_concurrency: number
   }
 }
 

@@ -22,6 +22,7 @@
   let formMaxConcurrentBatches = $state(3)
   let formMaxConcurrentLinkChecks = $state(2)
   let formBatchValidationConcurrency = $state(20)
+  let formContentGenConcurrency = $state(5)
   let formPublishFrom = $state('')   // "" = окно не задано
   let formPublishTo = $state('')
 
@@ -43,6 +44,7 @@
         formMaxConcurrentBatches !== cfg.max_concurrent_batch_validations ||
         formMaxConcurrentLinkChecks !== cfg.max_concurrent_link_checks ||
         formBatchValidationConcurrency !== cfg.batch_validation_concurrency ||
+        formContentGenConcurrency !== cfg.content_gen_concurrency ||
         formPublishFrom !== (cfg.default_publish_from ?? '') ||
         formPublishTo !== (cfg.default_publish_to ?? '')),
   )
@@ -75,6 +77,7 @@
       formMaxConcurrentBatches = cfg.max_concurrent_batch_validations
       formMaxConcurrentLinkChecks = cfg.max_concurrent_link_checks
       formBatchValidationConcurrency = cfg.batch_validation_concurrency
+      formContentGenConcurrency = cfg.content_gen_concurrency
       formPublishFrom = cfg.default_publish_from ?? ''
       formPublishTo = cfg.default_publish_to ?? ''
     } catch (e) {
@@ -102,6 +105,7 @@
         max_concurrent_batch_validations: formMaxConcurrentBatches,
         max_concurrent_link_checks: formMaxConcurrentLinkChecks,
         batch_validation_concurrency: formBatchValidationConcurrency,
+        content_gen_concurrency: formContentGenConcurrency,
         default_publish_from: formPublishFrom || null,
         default_publish_to: formPublishTo || null,
       })
@@ -298,6 +302,21 @@
             рычаг скорости. Валидация I/O-bound (запросы через прокси), поэтому крутится
             сильно выше числа ядер. CF-браузеры при этом под своим потолком (ниже) —
             тяжёлая полоса не разрастётся. Применяется на следующем цикле батча. Рекоменд.: <b>20</b>.
+          </p>
+          <div class="mt-4 max-w-xs">
+            <label for="cfg_cgc" class="block text-xs font-medium uppercase tracking-wider text-slate-500">
+              Текстов генерится параллельно <span class="text-slate-400 normal-case">({cfg.limits.min_content_gen_concurrency}–{cfg.limits.max_content_gen_concurrency})</span>
+            </label>
+            <input id="cfg_cgc" type="number" bind:value={formContentGenConcurrency}
+                   min={cfg.limits.min_content_gen_concurrency} max={cfg.limits.max_content_gen_concurrency}
+                   disabled={!canEdit}
+                   class="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm disabled:bg-slate-100" />
+          </div>
+          <p class="mt-2 text-[11px] text-slate-400">
+            Сколько текстов csv-кампании генерится <b>одновременно</b> (кнопка «Сгенерировать» /
+            авто-старт постинга). Раньше строго по одному → медленно на больших задачах.
+            AI-bound: упирается в <b>rate-limit ключа</b>, поэтому крути под лимит своего ключа.
+            Подхватывается без рестарта. Рекоменд.: <b>5</b>.
           </p>
           <div class="mt-4 max-w-xs">
             <label for="cfg_mclc" class="block text-xs font-medium uppercase tracking-wider text-slate-500">

@@ -13,10 +13,12 @@ texts + text_items. Режимы:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
 import re
+import time
 from datetime import UTC, datetime, timedelta
 
 import structlog
@@ -35,9 +37,26 @@ from infrastructure.db.models import (
 
 log = structlog.get_logger(__name__)
 
-# Общий потолок одновременных LLM-вызовов (своя полоса; env-крутилка).
-GEN_MAX_CONCURRENCY = int(os.getenv("GEN_MAX_CONCURRENCY", "8"))
+# Абсолютный жёсткий потолок одновременных LLM-вызовов (защита от кривой настройки).
+# Реальная конц*  берётся из AppSettings.content_gen_concurrency (рантайм-тюнинг).
+GEN_MAX_CONCURRENCY = int(os.getenv("GEN_MAX_CONCURRENCY", "50"))
 gen_limiter = RedisConcurrencyLimiter("generation", stale_ttl_s=300.0)
+
+# content_gen_concurrency читается на КАЖДЫЙ LLM-вызов (_gen) и на старте bulk —
+# кешируем на 15с, чтобы не бить БД. Рантайм-правка подхватывается в пределах ~15с.
+_gen_conc_cache: dict = {"val": None, "ts": 0.0}
+
+
+async def _gen_concurrency() -> int:
+    """Текущий потолок одновременной генерации (AppSettings, кеш 15с, hard-cap)."""
+    now = time.monotonic()
+    if _gen_conc_cache["val"] is None or now - _gen_conc_cache["ts"] > 15:
+        from domain.app_settings.service import get_app_settings
+        async with WriteSession() as s:
+            val = int((await get_app_settings(s)).content_gen_concurrency)
+        _gen_conc_cache["val"] = max(1, min(val, GEN_MAX_CONCURRENCY))
+        _gen_conc_cache["ts"] = now
+    return _gen_conc_cache["val"]
 
 _SPIN_PROMPT = (
     "Rewrite the text in spintax format: wrap synonym groups in {{}} separated by |, "
@@ -56,8 +75,9 @@ def _row_vars(row: dict, language: str | None) -> dict:
 
 
 async def _gen(model: AiModel, prompt: str) -> str:
-    """Один генерационный вызов под gen-лимитером."""
-    async with gen_limiter.slot(limit=GEN_MAX_CONCURRENCY):
+    """Один генерационный вызов под gen-лимитером (глобальный потолок =
+    content_gen_concurrency, тюнится без рестарта)."""
+    async with gen_limiter.slot(limit=await _gen_concurrency()):
         async with WriteSession() as s:
             return await generate_text(s, model=model, prompt=prompt)
 
@@ -913,16 +933,33 @@ async def generate_run_items(run_id: int, *, finalize: bool = False) -> dict:
         else:
             ordered = sorted(empty_ids)
         await _gen_progress(run_id, done=0, total=len(ordered))
+        # Параллельно: до content_gen_concurrency айтемов одновременно (generate_item
+        # независим — своя сессия/claim). Глобальный потолок LLM держит gen_limiter,
+        # так что фактическая конкуренция вызовов не превысит настройку и при многих
+        # прогонах. Периодически проверяем стоп (пауза/отмена), не на каждом айтеме.
+        conc = await _gen_concurrency()
+        sem = asyncio.Semaphore(conc)
         done = 0
-        for iid in ordered:
-            if await _stop():
-                break
-            try:
-                await generate_item(iid, regenerate=False)
-            except Exception as e:  # один айтем не валит весь bulk
-                log.warning("content_engine.bulk_gen.item_failed", item_id=iid, error=str(e))
-            done += 1
-            await _gen_progress(run_id, done=done)
+        stopped = False
+
+        async def _gen_one(iid: int) -> None:
+            nonlocal done, stopped
+            async with sem:
+                if stopped:
+                    return
+                try:
+                    await generate_item(iid, regenerate=False)
+                except Exception as e:  # один айтем не валит весь bulk
+                    log.warning("content_engine.bulk_gen.item_failed",
+                                item_id=iid, error=str(e))
+                done += 1
+                if done % conc == 0 or done >= len(ordered):
+                    await _gen_progress(run_id, done=done)
+                    if await _stop():
+                        stopped = True
+
+        await asyncio.gather(*(_gen_one(iid) for iid in ordered))
+        await _gen_progress(run_id, done=done)
         # manual bulk → обратно READY (виден Start). НО только если ран всё ещё
         # UNPACKING: если постинг уже подхватил ран (RUNNING/QUEUED — параллельный
         # gen+post), статус его, не перетираем. Стриминг (finalize) не трогает.

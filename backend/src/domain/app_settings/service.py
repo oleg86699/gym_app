@@ -47,6 +47,11 @@ MAX_MAX_CONCURRENT_LINK_CHECKS = 20
 MIN_BATCH_VALIDATION_CONCURRENCY = 1
 MAX_BATCH_VALIDATION_CONCURRENCY = 50
 
+# Сколько текстов csv_campaign генерится ОДНОВРЕМЕННО (bulk «Сгенерировать» /
+# авто-старт). AI-bound → упирается в rate-limit ключа; крутить под лимит ключа.
+MIN_CONTENT_GEN_CONCURRENCY = 1
+MAX_CONTENT_GEN_CONCURRENCY = 30
+
 # Пороги авто-выключения сайта (site-class фейлы подряд). Общий и отдельный CF.
 MIN_SITE_DISABLE_THRESHOLD = 3
 MAX_SITE_DISABLE_THRESHOLD = 200
@@ -94,6 +99,7 @@ async def update_app_settings(
     max_concurrent_batch_validations: int | None = None,
     max_concurrent_link_checks: int | None = None,
     batch_validation_concurrency: int | None = None,
+    content_gen_concurrency: int | None = None,
     default_publish_from: object = _UNSET,
     default_publish_to: object = _UNSET,
 ) -> AppSettings:
@@ -157,6 +163,14 @@ async def update_app_settings(
                 f"[{MIN_BATCH_VALIDATION_CONCURRENCY}, {MAX_BATCH_VALIDATION_CONCURRENCY}]"
             )
         row.batch_validation_concurrency = batch_validation_concurrency
+    if content_gen_concurrency is not None:
+        if not (MIN_CONTENT_GEN_CONCURRENCY <= content_gen_concurrency
+                <= MAX_CONTENT_GEN_CONCURRENCY):
+            raise ValueError(
+                f"content_gen_concurrency must be in "
+                f"[{MIN_CONTENT_GEN_CONCURRENCY}, {MAX_CONTENT_GEN_CONCURRENCY}]"
+            )
+        row.content_gen_concurrency = content_gen_concurrency
     if site_disable_threshold is not None:
         if not (MIN_SITE_DISABLE_THRESHOLD <= site_disable_threshold <= MAX_SITE_DISABLE_THRESHOLD):
             raise ValueError(
