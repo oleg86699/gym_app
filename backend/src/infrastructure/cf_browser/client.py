@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from urllib.parse import urlparse
 
 import structlog
@@ -44,8 +45,12 @@ _LAUNCH_ARGS = [
 # даже под отменой → прежний drive-to-completion больше не нужен. Анти-детект не
 # страдает: CF видит контекст (куки/IP/поведение), не PID процесса (callout bap).
 
-# Пересоздаём браузер каждые N выданных контекстов (память/фрагментация драйвера).
+# Пересоздаём браузер каждые N выданных контекстов (память/фрагментация драйвера)…
 _RECYCLE_AFTER = int(os.getenv("CF_BROWSER_RECYCLE_AFTER", "50"))
+# …ЛИБО по возрасту браузера: пул recycle-ит СВОЙ браузер раньше, чем reaper
+# (порог 900с) сочтёт его старым. Так активный браузер не гибнет от reaper при
+# любой скорости (иначе reaper бил бы долгоживущий браузер и пул терял reuse).
+_RECYCLE_AFTER_S = int(os.getenv("CF_BROWSER_RECYCLE_AFTER_S", "480"))
 # Сколько ждём слот семафора, прежде чем счесть контексты зомби и форс-рециклить.
 _ACQUIRE_TIMEOUT_S = int(os.getenv("CF_BROWSER_ACQUIRE_TIMEOUT_S", "120"))
 _CLOSE_TIMEOUT_S = 15
@@ -79,6 +84,7 @@ class _BrowserPool:
         self._sem_size = 0
         self._active = 0           # живых контекстов сейчас
         self._task_count = 0       # выдано контекстов с последнего recycle
+        self._launched_at = 0.0    # time.monotonic() последнего launch (для recycle)
         self._bg_tasks: set = set()  # фоновые close/recycle (защита от GC)
 
     def _ensure_sem(self, concurrency: int | None) -> asyncio.Semaphore:
@@ -131,6 +137,7 @@ class _BrowserPool:
                 self._browser = await self._pw_ctx.chromium.launch(
                     headless=False, args=_LAUNCH_ARGS)
                 self._task_count = 0
+                self._launched_at = time.monotonic()
                 log.info("cf_browser.pool.launched", attempt=attempt)
                 return
             except Exception as e:  # noqa: BLE001
@@ -200,16 +207,23 @@ class _BrowserPool:
         self._bg_tasks.add(t)
         t.add_done_callback(self._bg_tasks.discard)
 
+    def _should_recycle(self) -> bool:
+        """Пора ли пересоздать браузер: по числу контекстов ИЛИ по возрасту."""
+        if self._task_count >= _RECYCLE_AFTER:
+            return True
+        return (self._launched_at > 0
+                and (time.monotonic() - self._launched_at) >= _RECYCLE_AFTER_S)
+
     async def _close_and_maybe_recycle(self, context) -> None:
         try:
             await asyncio.wait_for(context.close(), timeout=_CLOSE_TIMEOUT_S)
         except Exception:
             pass
-        # recycle-after-N: реальный browser.close только когда нет живых контекстов
-        # → in-flight задачи не рвём.
-        if self._task_count >= _RECYCLE_AFTER and self._active == 0:
+        # recycle (по N контекстов или возрасту): реальный browser.close только
+        # когда нет живых контекстов → in-flight задачи не рвём.
+        if self._should_recycle() and self._active == 0:
             async with self._lock:
-                if self._task_count >= _RECYCLE_AFTER and self._active == 0:
+                if self._should_recycle() and self._active == 0:
                     try:
                         await self._close_browser_locked()
                         await self._launch_locked()
