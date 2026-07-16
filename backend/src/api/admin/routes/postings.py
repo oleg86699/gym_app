@@ -1515,6 +1515,22 @@ async def start_run_endpoint(
         return {"ok": bool(res.get("ok")), "run_id": run_id,
                 "status": res.get("status", "queued")}
 
+    # gen_per_post: если «Старт постинга» нажали, а готовых текстов нет и генерация
+    # не идёт — запускаем генерацию ТОЖЕ (Старт = генерация→стрим-постинг). Иначе
+    # постинг не найдёт что постить, залогирует no_pending_left и молча уйдёт в DONE.
+    # gen_active ставим синхронно ДО enqueue постинга (как в generate-texts), чтобы
+    # постинг-таск гарантированно увидел идущую генерацию и не финишировал раньше.
+    if run.content_source == "csv_campaign" and run.content_mode == "gen_per_post":
+        ungenerated = await session.scalar(select(func.count(TextItem.id)).where(
+            TextItem.posting_run_id == run_id, TextItem.text_id.is_(None)))
+        if ungenerated and not bool((run.gen_params or {}).get("gen_active")):
+            from domain.content_engine import set_gen_active
+            from workers.taskiq.cron_tasks import generate_run_items_task
+            await set_gen_active(run_id, True)
+            await generate_run_items_task.kiq(run_id)
+            log.info("postings.start_autogen", run_id=run_id,
+                     ungenerated=int(ungenerated))
+
     await session.execute(
         update(PostingRun)
         .where(PostingRun.id == run_id)
