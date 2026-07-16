@@ -35,26 +35,204 @@ _LAUNCH_ARGS = [
     "--disable-blink-features=AutomationControlled",
 ]
 
-_sem = None
-_sem_size = 0
+# ─── Пул переиспользуемых браузеров (корневой фикс утечки, модель bap) ──
+# Раньше: launch(browser) на КАЖДЫЙ логин → при отмене per-cred wait_for или
+# краше драйвера (голодание FD/shm) chromium сиротел, накапливался до ~1000 → OOM.
+# Теперь: ОДИН долгоживущий браузер на процесс-воркер, на задачу — только
+# new_context() (свой proxy/UA/куки, чистая сессия), context.close() на выходе.
+# browser.close() — лишь на recycle-after-N. Контекст закрыть дёшево и безопасно
+# даже под отменой → прежний drive-to-completion больше не нужен. Анти-детект не
+# страдает: CF видит контекст (куки/IP/поведение), не PID процесса (callout bap).
+
+# Пересоздаём браузер каждые N выданных контекстов (память/фрагментация драйвера).
+_RECYCLE_AFTER = int(os.getenv("CF_BROWSER_RECYCLE_AFTER", "50"))
+# Сколько ждём слот семафора, прежде чем счесть контексты зомби и форс-рециклить.
+_ACQUIRE_TIMEOUT_S = int(os.getenv("CF_BROWSER_ACQUIRE_TIMEOUT_S", "120"))
+_CLOSE_TIMEOUT_S = 15
+
+# Подстроки «мёртвого транспорта» драйвера Playwright → браузер/драйвер надо
+# рециклить (иначе следующие вызовы висят/сиротят chromium).
+_DEAD_TRANSPORT = (
+    "writeunixtransport", "readunixtransport", "the handler is closed",
+    "connection closed", "target closed", "browser has been closed",
+    "browser has disconnected", "has been closed", "target page, context",
+)
 
 
-def _semaphore(concurrency: int | None = None):
-    """Ленивый общий семафор. concurrency задаётся один раз (из AppSettings/env).
-    concurrency=None → переиспользуем уже инициализированный (не сбрасываем в
-    дефолт): постинг праймит сем один раз на run, дальше дёргает с None."""
-    global _sem, _sem_size
-    if concurrency is None:
-        if _sem is not None:
-            return _sem
-        size = _DEFAULT_CONCURRENCY
-    else:
-        size = max(1, concurrency)
-    if _sem is None or size != _sem_size:
-        import asyncio
-        _sem = asyncio.Semaphore(size)
-        _sem_size = size
-    return _sem
+def _is_dead_transport(exc: BaseException) -> bool:
+    m = str(exc).lower()
+    return any(s in m for s in _DEAD_TRANSPORT)
+
+
+class _BrowserPool:
+    """Один long-lived браузер на процесс + контекст-на-задачу (модель bap).
+
+    Семафор ограничивает одновременные КОНТЕКСТЫ (не запуски браузера). Браузер
+    ленивый синглтон; на dead-transport/emergency — рецикл драйвера+браузера."""
+
+    def __init__(self) -> None:
+        self._pw = None            # async_playwright() manager
+        self._pw_ctx = None        # entered playwright (chromium.launch source)
+        self._browser = None
+        self._lock = asyncio.Lock()          # сериализует launch/recycle
+        self._sem: asyncio.Semaphore | None = None
+        self._sem_size = 0
+        self._active = 0           # живых контекстов сейчас
+        self._task_count = 0       # выдано контекстов с последнего recycle
+        self._bg_tasks: set = set()  # фоновые close/recycle (защита от GC)
+
+    def _ensure_sem(self, concurrency: int | None) -> asyncio.Semaphore:
+        """Размер задаётся один раз (из cf_browser_concurrency); None → как есть."""
+        if concurrency is None:
+            if self._sem is not None:
+                return self._sem
+            size = _DEFAULT_CONCURRENCY
+        else:
+            size = max(1, concurrency)
+        if self._sem is None or size != self._sem_size:
+            self._sem = asyncio.Semaphore(size)
+            self._sem_size = size
+        return self._sem
+
+    async def _stop_pw_locked(self) -> None:
+        """Полный teardown (browser + playwright). Под _lock. Для dead-transport."""
+        b, self._browser = self._browser, None
+        if b is not None:
+            try:
+                await asyncio.wait_for(b.close(), timeout=_CLOSE_TIMEOUT_S)
+            except Exception:
+                pass
+        pw, self._pw, self._pw_ctx = self._pw, None, None
+        if pw is not None:
+            try:
+                await asyncio.wait_for(pw.__aexit__(None, None, None), timeout=_CLOSE_TIMEOUT_S)
+            except Exception:
+                pass
+
+    async def _close_browser_locked(self) -> None:
+        """Закрыть только браузер, playwright оставить (для recycle-after-N)."""
+        b, self._browser = self._browser, None
+        if b is not None:
+            try:
+                await asyncio.wait_for(b.close(), timeout=_CLOSE_TIMEOUT_S)
+            except Exception:
+                pass
+
+    async def _launch_locked(self) -> None:
+        """Поднять браузер (и playwright, если надо). Под _lock. Ретрай через
+        полный teardown, если драйвер мёртв."""
+        from patchright.async_api import async_playwright
+        for attempt in (1, 2):
+            try:
+                if self._pw_ctx is None:
+                    self._pw = async_playwright()
+                    self._pw_ctx = await self._pw.__aenter__()
+                # headful (под Xvfb): CF Managed Challenge headless не проходит.
+                self._browser = await self._pw_ctx.chromium.launch(
+                    headless=False, args=_LAUNCH_ARGS)
+                self._task_count = 0
+                log.info("cf_browser.pool.launched", attempt=attempt)
+                return
+            except Exception as e:  # noqa: BLE001
+                log.warning("cf_browser.pool.launch_failed",
+                            attempt=attempt, error=str(e)[:150])
+                await self._stop_pw_locked()
+                if attempt == 2:
+                    raise
+
+    async def _ensure_browser(self):
+        b = self._browser
+        if b is not None:
+            try:
+                if b.is_connected():
+                    return b
+            except Exception:
+                pass
+        async with self._lock:
+            b = self._browser
+            if b is not None:
+                try:
+                    if b.is_connected():
+                        return b
+                except Exception:
+                    pass
+            await self._launch_locked()
+            return self._browser
+
+    async def acquire(self, ctx_kw: dict, concurrency: int | None):
+        """Занять слот и вернуть свежий context. sem держится до release()."""
+        sem = self._ensure_sem(concurrency)
+        try:
+            await asyncio.wait_for(sem.acquire(), timeout=_ACQUIRE_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            # Все слоты держат зомби-контексты → форс-закрываем браузер (закрытие
+            # добивает зомби, их задачи отвалятся и вернут слоты через release()).
+            log.warning("cf_browser.pool.acquire_timeout.recycle")
+            async with self._lock:
+                await self._stop_pw_locked()
+            await asyncio.wait_for(sem.acquire(), timeout=_ACQUIRE_TIMEOUT_S)
+        # Создать контекст, один ретрай на мёртвый браузер/драйвер.
+        for attempt in (1, 2):
+            try:
+                browser = await self._ensure_browser()
+                context = await browser.new_context(**ctx_kw)
+                self._active += 1
+                self._task_count += 1
+                return context
+            except Exception as e:  # noqa: BLE001
+                if attempt == 1 and _is_dead_transport(e):
+                    log.warning("cf_browser.pool.dead_transport.recycle",
+                                error=str(e)[:120])
+                    async with self._lock:
+                        await self._stop_pw_locked()
+                    continue
+                sem.release()
+                raise
+
+    def release_nowait(self, context) -> None:
+        """Вернуть слот НЕМЕДЛЕННО (sync) + закрыть context в фоне. Зовётся из
+        finally, в т.ч. под отменой — потому без await: sem.release() sync-гарантия,
+        а close/recycle уходят отдельной задачей, переживающей отмену вызывающего."""
+        self._active = max(0, self._active - 1)
+        if self._sem is not None:
+            self._sem.release()
+        t = asyncio.ensure_future(self._close_and_maybe_recycle(context))
+        self._bg_tasks.add(t)
+        t.add_done_callback(self._bg_tasks.discard)
+
+    async def _close_and_maybe_recycle(self, context) -> None:
+        try:
+            await asyncio.wait_for(context.close(), timeout=_CLOSE_TIMEOUT_S)
+        except Exception:
+            pass
+        # recycle-after-N: реальный browser.close только когда нет живых контекстов
+        # → in-flight задачи не рвём.
+        if self._task_count >= _RECYCLE_AFTER and self._active == 0:
+            async with self._lock:
+                if self._task_count >= _RECYCLE_AFTER and self._active == 0:
+                    try:
+                        await self._close_browser_locked()
+                        await self._launch_locked()
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("cf_browser.pool.recycle_failed", error=str(e)[:150])
+
+
+_pool: _BrowserPool | None = None
+
+
+def _get_pool() -> _BrowserPool:
+    """Ленивый синглтон пула на процесс (Lock/Semaphore создаются в live-loop)."""
+    global _pool
+    if _pool is None:
+        _pool = _BrowserPool()
+    return _pool
+
+
+def prime_concurrency(concurrency: int | None) -> None:
+    """Задать размер семафора контекстов один раз (из cf_browser_concurrency).
+    Постинг зовёт это один раз на run; дальше browser_login_session(concurrency=None)
+    переиспользует уже настроенный пул."""
+    _get_pool()._ensure_sem(concurrency)
 
 
 def is_browser_available() -> bool:
@@ -150,101 +328,80 @@ async def browser_login_session(
     Обрабатывает cookie-гонку WordPress (флапающий «cookies are blocked»):
     при неудаче — reload + повтор сабмита.
 
-    CANCELLATION-SAFE. Вся браузерная работа + закрытие вынесены в отдельную
-    задачу `_run`, а внешнее ожидание (см. ниже) НЕ даёт отмене оборвать cleanup
-    на полпути. Зачем: валидатор гоняет каждый cred под `asyncio.wait_for`
-    (per-cred timeout). CF managed-challenge headful-браузером может длиться
-    дольше этого таймаута → wait_for отменяет корутину ПРЯМО ВНУТРИ браузерной
-    сессии. Раньше отмена рвала `await browser.close()` в finally → headful-
-    chromium + node-драйвер утекали процессами (накопилось ~1.5k процессов,
-    load average сервера → 231, nginx 502). Теперь отмена гасит `_run`, но его
-    finally/`async with async_playwright` доводятся до конца → процессы не текут.
-    (Постинг вызывает эту же функцию без wait_for — там отмены и не было.)"""
+    Берёт контекст из общего пула (_BrowserPool): браузер переиспользуется, на
+    задачу — только свой new_context() (proxy/UA/куки, чистая сессия).
+
+    CANCELLATION-SAFE без трюков. Валидатор гоняет каждый cred под
+    `asyncio.wait_for` (per-cred timeout); CF managed-challenge headful-браузером
+    может длиться дольше → отмена рвёт нас на любом await. Но finally всегда
+    возвращает контекст в пул СИНХРОННО (release_nowait: sem.release + фоновое
+    context.close), а браузер живёт дальше для других задач. Раньше тут
+    закрывался ВЕСЬ браузер per-call → под отменой это текло процессами (копилось
+    ~1.5k, load average → 231, nginx 502); пул это устранил в корне.
+    (Постинг зовёт эту же функцию без wait_for — работает так же.)"""
     if not is_browser_available():
         return None
-    from patchright.async_api import async_playwright
 
     host = urlparse(base).netloc
     proxy_pw = _pw_proxy(proxy_url)
-    sem = _semaphore(concurrency)
+    pool = _get_pool()
+    ctx_kw: dict = {"ignore_https_errors": True}
+    if proxy_pw:
+        ctx_kw["proxy"] = proxy_pw
 
-    async def _run() -> dict | None:
-        async with async_playwright() as p:
-            # headful (под Xvfb): CF Managed Challenge ("Just a moment…")
-            # headless НЕ проходит (жёсткий 403); headful — проходит.
-            browser = await p.chromium.launch(headless=False, args=_LAUNCH_ARGS)
+    ctx = None
+    logged = False
+    cookies: list = []
+    ua = ""
+    try:
+        ctx = await pool.acquire(ctx_kw, concurrency)
+        # NB: НЕ перехватываем запросы (ctx.route) — patchright теряет stealth,
+        # и CF начинает блокировать. Картинки гасим launch-аргом браузера.
+        page = await ctx.new_page()
+        ua = await page.evaluate("() => navigator.userAgent")
+        for _ in range(2):  # cookie-гонка → reload + повтор
+            # domcontentloaded (не networkidle: CF-challenge держит соединения
+            # и networkidle висит до таймаута).
+            await page.goto(f"{base}/wp-login.php",
+                            wait_until="domcontentloaded", timeout=timeout_ms)
             try:
-                ctx_kw = {"ignore_https_errors": True}
-                if proxy_pw:
-                    ctx_kw["proxy"] = proxy_pw
-                ctx = await browser.new_context(**ctx_kw)
-                # NB: НЕ перехватываем запросы (ctx.route) — patchright теряет
-                # stealth, и CF начинает блокировать. Картинки гасим launch-аргом.
-                page = await ctx.new_page()
-                ua = await page.evaluate("() => navigator.userAgent")
-                logged = False
-                for _ in range(2):  # cookie-гонка → reload + повтор
-                    # domcontentloaded (не networkidle: CF-challenge держит
-                    # соединения и networkidle висит до таймаута).
-                    await page.goto(f"{base}/wp-login.php",
-                                    wait_until="domcontentloaded", timeout=timeout_ms)
-                    try:
-                        # ждём пока CF managed-challenge авто-решится → форма логина
-                        await page.wait_for_selector("#user_login", timeout=40000)
-                    except Exception:
-                        break
-                    await page.fill("#user_login", login)
-                    await page.fill("#user_pass", password)
-                    await page.click("#wp-submit")
-                    try:
-                        await page.wait_for_load_state("networkidle", timeout=30000)
-                    except Exception:
-                        pass
-                    cks = await ctx.cookies()
-                    if (any("wordpress_logged_in" in c["name"] for c in cks)
-                            or "/wp-admin" in page.url):
-                        logged = True
-                        break
-                cookies = await ctx.cookies()
-            finally:
-                # ВСЕГДА закрываем браузер. wait_for(20): не виснуть в finally на
-                # застрявшем graceful-close — драйвер всё равно добьёт chromium при
-                # выходе из `async with async_playwright` (stop() убивает node-
-                # процесс, а тот — своих детей-chromium).
-                try:
-                    await asyncio.wait_for(browser.close(), timeout=20)
-                except Exception:
-                    pass
-        if not logged:
-            log.info("cf_browser.login.failed", host=host)
-            return None
-        session = {"cookies": [{"name": c["name"], "value": c["value"],
-                                "domain": c.get("domain") or host, "path": c.get("path") or "/"}
-                               for c in cookies],
-                   "user_agent": ua}
-        await cache_session(host, proxy_url, session)
-        log.info("cf_browser.login.ok", host=host, cookies=len(session["cookies"]))
-        return session
+                # ждём пока CF managed-challenge авто-решится → форма логина
+                await page.wait_for_selector("#user_login", timeout=40000)
+            except Exception:
+                break
+            await page.fill("#user_login", login)
+            await page.fill("#user_pass", password)
+            await page.click("#wp-submit")
+            try:
+                await page.wait_for_load_state("networkidle", timeout=30000)
+            except Exception:
+                pass
+            cks = await ctx.cookies()
+            if (any("wordpress_logged_in" in c["name"] for c in cks)
+                    or "/wp-admin" in page.url):
+                logged = True
+                break
+        cookies = await ctx.cookies()
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        log.warning("cf_browser.login.error", host=host, error=str(e)[:200])
+        return None
+    finally:
+        # Синхронный возврат слота — переживает отмену (без await в finally).
+        if ctx is not None:
+            pool.release_nowait(ctx)
 
-    async with sem:
-        task = asyncio.ensure_future(_run())
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            # Внешняя отмена (per-cred wait_for валидатора). Просим _run
-            # завершиться и ДОЖИДАЕМСЯ его cleanup, не давая отмене оборвать
-            # закрытие браузера на полпути. task отменяем РОВНО раз → его finally
-            # (browser.close) и `async with` (stop драйвера) доигрывают штатно.
-            task.cancel()
-            while not task.done():
-                try:
-                    await asyncio.shield(task)
-                except asyncio.CancelledError:
-                    pass
-            raise
-        except Exception as e:  # noqa: BLE001
-            log.warning("cf_browser.login.error", host=host, error=str(e)[:200])
-            return None
+    if not logged:
+        log.info("cf_browser.login.failed", host=host)
+        return None
+    session = {"cookies": [{"name": c["name"], "value": c["value"],
+                            "domain": c.get("domain") or host, "path": c.get("path") or "/"}
+                           for c in cookies],
+               "user_agent": ua}
+    await cache_session(host, proxy_url, session)
+    log.info("cf_browser.login.ok", host=host, cookies=len(session["cookies"]))
+    return session
 
 
 # ─── curl_cffi-реплей запросом с сессией ──────────────────────────────

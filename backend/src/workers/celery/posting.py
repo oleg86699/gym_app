@@ -1742,13 +1742,13 @@ async def _run_posting_async(run_id: int) -> dict:
         # Перечитываем — нам нужны актуальные поля
         run = await s.scalar(select(PostingRun).where(PostingRun.id == run_id))
         assert run is not None
-        # CF Tier 3: праймим браузер-семафор один раз на run (из AppSettings).
-        # Дальше _post_via_cf_browser дёргает browser_login_session(concurrency=None)
-        # и переиспользует этот сем.
+        # CF Tier 3: праймим браузер-пул один раз на run (размер семафора контекстов
+        # из AppSettings). Дальше _post_via_cf_browser дёргает
+        # browser_login_session(concurrency=None) и переиспользует настроенный пул.
         try:
             from domain.app_settings.service import get_app_settings
-            from infrastructure.cf_browser.client import _semaphore as _cf_sem
-            _cf_sem((await get_app_settings(s)).cf_browser_concurrency)
+            from infrastructure.cf_browser.client import prime_concurrency
+            prime_concurrency((await get_app_settings(s)).cf_browser_concurrency)
         except Exception as e:  # noqa: BLE001
             log_ctx.debug("posting.cf_sem_prime.failed", error=str(e))
     await publish_run_event(run_id, "status", {"status": PostingRunStatus.RUNNING.value})
