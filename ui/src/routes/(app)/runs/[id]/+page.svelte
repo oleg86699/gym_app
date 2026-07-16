@@ -364,9 +364,48 @@
     } finally { nrBusy = '' }
   }
 
+  // ── Целевые домены прогона, которых ещё нет в проекте (явные ссылки CSV) ──
+  // Не добавляются автоматом → предлагаем добавить вручную, под раскрывающейся
+  // формой (доменов может быть много).
+  let missingDomains = $state<{ domain: string; count: number }[]>([])
+  let missingBusy = $state('')
+  let showMissing = $state(false)
+
+  async function loadMissingDomains() {
+    try {
+      missingDomains = await postingsApi.missingProjectDomains(runId)
+    } catch {
+      missingDomains = []
+    }
+  }
+
+  async function missingAddDomain(domain: string) {
+    if (missingBusy) return
+    missingBusy = `add:${domain}`
+    try {
+      await postingsApi.addProjectDomain(runId, domain)
+      showToast('success', `${domain} → в проекте`)
+      await loadMissingDomains()
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    } finally { missingBusy = '' }
+  }
+
+  async function missingAddAll() {
+    if (missingBusy) return
+    missingBusy = 'all'
+    try {
+      const res = await postingsApi.addProjectDomains(runId, missingDomains.map((d) => d.domain))
+      showToast('success', `Добавлено в проект: ${res.added.length}`)
+      await loadMissingDomains()
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    } finally { missingBusy = '' }
+  }
+
   async function refresh(initial = false) {
     if (initial) loading = true
-    await Promise.all([loadRun(), loadProgress(), loadItems(), loadNrDomains()])
+    await Promise.all([loadRun(), loadProgress(), loadItems(), loadNrDomains(), loadMissingDomains()])
     if (initial) loading = false
   }
 
@@ -1328,6 +1367,40 @@
             </div>
           {/each}
         </div>
+      </div>
+    {/if}
+    {#if missingDomains.length > 0}
+      <div class="mb-3 rounded-lg border border-sky-300 bg-sky-50 p-3">
+        <div class="flex flex-wrap items-center gap-2">
+          <button type="button" onclick={() => (showMissing = !showMissing)}
+                  class="flex items-center gap-1.5 text-left text-sm font-medium text-sky-900">
+            <span class="text-xs">{showMissing ? '▾' : '▸'}</span>
+            Целевые домены не в проекте — {missingDomains.length}
+          </button>
+          <span class="grow"></span>
+          <button type="button" onclick={missingAddAll} disabled={!!missingBusy}
+                  class="rounded bg-sky-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-sky-700 disabled:opacity-50">
+            {missingBusy === 'all' ? '…' : `Добавить все (${missingDomains.length})`}
+          </button>
+        </div>
+        {#if showMissing}
+          <p class="mt-1.5 text-[11px] text-sky-700">
+            Ссылки заданы явно (CSV) → в проект автоматически не добавляются. Добавь нужные домены в проект.
+          </p>
+          <div class="mt-2 flex flex-col gap-1.5">
+            {#each missingDomains as d}
+              <div class="flex flex-wrap items-center gap-2 rounded border border-sky-200 bg-white px-2 py-1.5">
+                <span class="font-mono text-xs text-slate-800">{d.domain}</span>
+                <span class="text-[11px] text-slate-500">{d.count} задач</span>
+                <span class="grow"></span>
+                <button type="button" onclick={() => missingAddDomain(d.domain)} disabled={!!missingBusy}
+                        class="rounded bg-emerald-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50">
+                  {missingBusy === `add:${d.domain}` ? '…' : '+ в проект'}
+                </button>
+              </div>
+            {/each}
+          </div>
+        {/if}
       </div>
     {/if}
     <div class="mb-3 flex flex-wrap items-center gap-2">

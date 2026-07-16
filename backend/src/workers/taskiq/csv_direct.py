@@ -119,9 +119,9 @@ async def process_csv_direct(run_id: int) -> dict:
         await s.execute(update(PostingRun).where(PostingRun.id == run_id)
                         .values(status=new_status, total_texts=total))
         await s.commit()
-        # Авто-привязка доменов явных ссылок к проекту («забыл добавить» safety-net).
-        from domain.project_domains import autobind_link_domains
-        await autobind_link_domains(s, project_id, [r.get("link") for r in rows])
+        # НЕ авто-биндим домены явных ссылок в проект: вместо этого страница прогона
+        # предлагает добавить недостающие (GET .../missing-project-domains) под
+        # раскрывающейся формой — пользователь решает сам, какие домены добавить.
 
     log_ctx.info("csv_direct.done", inserted=total, status=new_status)
     return {"ok": True, "inserted": total, "status": new_status}

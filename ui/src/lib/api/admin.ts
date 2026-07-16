@@ -675,6 +675,16 @@ export const postings = {
       `/admin/api/postings/${runId}/add-project-domain`,
       { domain },
     ),
+  // Целевые домены прогона (явные ссылки CSV), которых ещё нет в проекте.
+  missingProjectDomains: (runId: number) =>
+    api.get<{ domain: string; count: number }[]>(
+      `/admin/api/postings/${runId}/missing-project-domains`,
+    ),
+  addProjectDomains: (runId: number, domains: string[]) =>
+    api.post<{ added: string[]; duplicates: string[]; invalid: string[]; auto_resolved_runs: number }>(
+      `/admin/api/postings/${runId}/add-project-domains`,
+      { domains },
+    ),
   textItems: (
     runId: number,
     query?: { cursor?: string; limit?: number; status?: string },

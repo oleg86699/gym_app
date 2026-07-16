@@ -31,6 +31,7 @@ from sqlalchemy.orm import selectinload
 from core.realtime import subscribe_run_events
 
 from api.admin.middleware.auth import get_current_user, require_super_admin
+from api.admin.schemas.project_domains import BulkAddDomainsRequest
 from api.admin.schemas.postings import (
     CreateLinkRunFileParams,
     CreateRunParams,
@@ -850,6 +851,41 @@ async def add_project_domain_for_run_endpoint(
         session, actor=viewer, action="postings.add_project_domain",
         resource_type="posting_run", resource_id=run.id,
         changes={"domain": payload.domain, **res},
+    )
+    return res
+
+
+@postings_router.get("/{run_id}/missing-project-domains")
+async def missing_project_domains_endpoint(
+    run_id: int,
+    viewer: AdminUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_read),
+) -> list[dict]:
+    """Целевые домены прогона (явные ссылки CSV/link/campaign), которых ещё нет в
+    проекте — для предложения добавить на странице прогона. Пустой = все в проекте."""
+    run, _ = await _load_run_or_403(session, run_id, viewer)
+    from domain.project_domains import missing_project_domains
+
+    return await missing_project_domains(session, run.id)
+
+
+@postings_router.post("/{run_id}/add-project-domains", status_code=status.HTTP_200_OK)
+async def add_project_domains_for_run_endpoint(
+    run_id: int,
+    payload: BulkAddDomainsRequest,
+    viewer: AdminUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_write),
+) -> dict:
+    """Добавить СПИСОК доменов в проект прогона (кнопка «Добавить все» на странице
+    прогона). project_id берём с прогона — фронту передавать не нужно."""
+    run, _ = await _load_run_or_403(session, run_id, viewer, manage=True)
+    from domain.project_domains import add_domains
+
+    res = await add_domains(session, run.project_id, payload.domains)
+    await audit_record(
+        session, actor=viewer, action="postings.add_project_domains",
+        resource_type="posting_run", resource_id=run.id,
+        changes={"requested": len(payload.domains), "added": res.get("added")},
     )
     return res
 

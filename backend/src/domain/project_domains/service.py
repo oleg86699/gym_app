@@ -357,6 +357,38 @@ async def needs_review_domains(session: AsyncSession, run_id: int) -> list[dict]
     return out
 
 
+async def missing_project_domains(session: AsyncSession, run_id: int) -> list[dict]:
+    """Целевые домены прогона (target_domain ЯВНЫХ ссылок), которых ещё НЕТ в
+    проекте. Для CSV/link/campaign-прогонов ссылка задана явно (→ не needs_review),
+    поэтому предлагаем добавить недостающие домены в проект вручную на странице
+    прогона. Пустой список = все целевые домены прогона уже в проекте."""
+    project_id = await session.scalar(
+        select(PostingRun.project_id).where(PostingRun.id == run_id))
+    pset: set[str] = set()
+    if project_id is not None:
+        pset = {d for d in (
+            normalize_domain(x) for x in (await session.scalars(
+                select(ProjectDomain.domain).where(
+                ProjectDomain.project_id == project_id,
+                ProjectDomain.deleted_at.is_(None))
+            )).all()
+        ) if d}
+    rows = (await session.execute(
+        select(TextItem.target_domain, func.count(TextItem.id))
+        .where(TextItem.posting_run_id == run_id,
+               TextItem.target_domain.is_not(None))
+        .group_by(TextItem.target_domain)
+    )).all()
+    counts: dict[str, int] = {}
+    for dom, n in rows:
+        nd = normalize_domain(dom or "")
+        if nd and nd not in pset:
+            counts[nd] = counts.get(nd, 0) + int(n)
+    out = [{"domain": d, "count": n} for d, n in counts.items()]
+    out.sort(key=lambda r: (-r["count"], r["domain"]))
+    return out
+
+
 async def domain_analytics(session: AsyncSession, project_id: int) -> list[dict]:
     """Аналитика по целевым доменам проекта: сколько задач/опубликовано на каждый
     target_domain."""
