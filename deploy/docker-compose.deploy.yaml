@@ -37,12 +37,21 @@ services:
     build: !reset null
     volumes:
       - ./.env:/app/.env:ro
+    # Потолок памяти на браузерный воркер (постинг гоняет CF-браузеры). Если
+    # что-то потечёт — OOM убьёт ТОЛЬКО этот контейнер (авто-рестарт), а не весь
+    # shared-хост и не соседа. memswap=mem → без свопа, падаем быстро, без thrash.
+    mem_limit: 4g
+    memswap_limit: 4g
 
   taskiq-worker:
     image: ${APP_IMAGE_REF:?APP_IMAGE_REF is required for deploy}
     build: !reset null
     volumes:
       - ./.env:/app/.env:ro
+    # Потолок памяти на браузерный воркер (валидация гоняет CF-браузеры). См.
+    # celery-worker. Reaper держит число браузеров ~20-40; 4g — потолок с запасом.
+    mem_limit: 4g
+    memswap_limit: 4g
 
   taskiq-scheduler:
     image: ${APP_IMAGE_REF:?APP_IMAGE_REF is required for deploy}

@@ -43,6 +43,59 @@ HEARTBEAT_STALE_S = 90
 # 24h с запасом — даже большие zip распаковываются за минуты.
 TMP_UPLOAD_TTL_HOURS = 24
 
+# Reaper осиротевших CF-браузеров. browser_login_session иногда не дорезает
+# chromium при driver.stop() → процесс сиротеет (cgroup остаётся воркерский,
+# родитель отваливается) → по одному на логин копится под тысячу → OOM хоста.
+# Порог 5 мин с запасом > максимального легального времени жизни браузера:
+# логин живёт < VALIDATE_PER_CRED_TIMEOUT_S (180с) + cleanup. Всё старше — сирота.
+# Временный safety-net до перехода на пул переиспользуемых браузеров (модель bap).
+_CHROME_MAX_AGE_S = 300
+
+
+def _reap_stale_chromium(max_age_s: int = _CHROME_MAX_AGE_S) -> int:
+    """SIGKILL chromium-процессам старше max_age_s. Чистый /proc (без psutil/pkill,
+    которых в контейнере нет). Запускается В контейнере воркера → видит его
+    PID-namespace, т.е. все браузеры этого воркера, включая осиротевшие."""
+    import os
+    import signal
+    try:
+        hz = os.sysconf("SC_CLK_TCK")
+        with open("/proc/uptime") as f:
+            uptime = float(f.read().split()[0])
+    except Exception:
+        return 0
+    killed = 0
+    for d in os.listdir("/proc"):
+        if not d.isdigit():
+            continue
+        try:
+            with open(f"/proc/{d}/comm") as f:
+                comm = f.read().strip().lower()
+            if not ("chrom" in comm or "headless" in comm or "camoufox" in comm):
+                continue
+            # /proc/pid/stat: "pid (comm) state ppid ... starttime(22-е поле) ...".
+            # comm может содержать ')' → режем по ПОСЛЕДНЕЙ. После среза [0]=state,
+            # значит starttime — индекс 19. Возраст = uptime - starttime/HZ.
+            with open(f"/proc/{d}/stat") as f:
+                after = f.read().rsplit(")", 1)[1].split()
+            age = uptime - (float(after[19]) / hz)
+            if age > max_age_s:
+                os.kill(int(d), signal.SIGKILL)
+                killed += 1
+        except (FileNotFoundError, ProcessLookupError, PermissionError, ValueError, IndexError):
+            continue
+    return killed
+
+
+@broker.task(task_name="wp.reap_stale_browsers", schedule=[{"cron": "*/2 * * * *"}])
+async def reap_stale_browsers() -> dict:
+    """Каждые 2 мин добиваем осиротевшие CF-браузеры (см. _reap_stale_chromium)."""
+    import asyncio
+    killed = await asyncio.to_thread(_reap_stale_chromium)
+    if killed:
+        log.warning("browser_reaper.killed_stale", count=killed)
+    return {"killed": killed}
+
 
 @broker.task(
     task_name="postings.dispatch_scheduled_runs",
