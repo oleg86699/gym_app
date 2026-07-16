@@ -49,7 +49,8 @@ services:
     volumes:
       - ./.env:/app/.env:ro
     # Потолок памяти на браузерный воркер (валидация гоняет CF-браузеры). См.
-    # celery-worker. Reaper держит число браузеров ~20-40; 4g — потолок с запасом.
+    # celery-worker. Reaper + cf_browser_concurrency сдерживают рост; 4g — жёсткий
+    # потолок: если reaper не догонит, OOM убьёт воркер (~420 браузеров) вместо хоста.
     mem_limit: 4g
     memswap_limit: 4g
 

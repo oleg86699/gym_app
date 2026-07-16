@@ -46,10 +46,11 @@ TMP_UPLOAD_TTL_HOURS = 24
 # Reaper осиротевших CF-браузеров. browser_login_session иногда не дорезает
 # chromium при driver.stop() → процесс сиротеет (cgroup остаётся воркерский,
 # родитель отваливается) → по одному на логин копится под тысячу → OOM хоста.
-# Порог 5 мин с запасом > максимального легального времени жизни браузера:
-# логин живёт < VALIDATE_PER_CRED_TIMEOUT_S (180с) + cleanup. Всё старше — сирота.
+# Порог 4 мин > максимального легального времени жизни браузера: логин живёт
+# < VALIDATE_PER_CRED_TIMEOUT_S (180с) + cleanup (~20с) ≈ 200с. 240с даёт ~40с
+# запаса и косит сирот быстрее, чем 5-мин окно (при котором они обгоняли reaper).
 # Временный safety-net до перехода на пул переиспользуемых браузеров (модель bap).
-_CHROME_MAX_AGE_S = 300
+_CHROME_MAX_AGE_S = 240
 
 
 def _reap_stale_chromium(max_age_s: int = _CHROME_MAX_AGE_S) -> int:
@@ -87,9 +88,9 @@ def _reap_stale_chromium(max_age_s: int = _CHROME_MAX_AGE_S) -> int:
     return killed
 
 
-@broker.task(task_name="wp.reap_stale_browsers", schedule=[{"cron": "*/2 * * * *"}])
+@broker.task(task_name="wp.reap_stale_browsers", schedule=[{"cron": "* * * * *"}])
 async def reap_stale_browsers() -> dict:
-    """Каждые 2 мин добиваем осиротевшие CF-браузеры (см. _reap_stale_chromium)."""
+    """Каждую минуту добиваем осиротевшие CF-браузеры (см. _reap_stale_chromium)."""
     import asyncio
     killed = await asyncio.to_thread(_reap_stale_chromium)
     if killed:
