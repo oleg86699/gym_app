@@ -1646,6 +1646,15 @@ async def _run_link_async(run_id: int, concurrency: int) -> dict:
             except Exception as e:
                 log_ctx.warning("link.item.exception", item_id=item_id, error=str(e))
                 res = {"status": "error"}
+                # process_link_item мог упасть ПОСЛЕ пометки айтема 'posting' (посреди
+                # перебора) → без сброса он залипнет, а ран уйдёт в done с in-flight.
+                async with WriteSession() as s:
+                    await s.execute(update(TextItem).where(
+                        TextItem.id == item_id,
+                        TextItem.status == TextItemStatus.POSTING.value,
+                    ).values(status=TextItemStatus.FAILED.value,
+                             last_error=f"exception: {str(e)[:150]}"))
+                    await s.commit()
             field = {"placed": "posted_count",
                      "skip_exists": "skipped_count"}.get(res.get("status"), "failed_count")
             async with WriteSession() as s:
@@ -1694,6 +1703,17 @@ async def _run_link_async(run_id: int, concurrency: int) -> dict:
             pass
 
     async with WriteSession() as s:
+        if final_status != PostingRunStatus.SCHEDULED:
+            # Защита от «done с 76 in-flight»: любой залипший в 'posting' айтем
+            # (упавшее/оборванное process_link_item, не дорезолвившееся) добиваем в
+            # failed — иначе ран уходит в done с posting-айтемами. Retry failed их поднимет.
+            stuck = await s.execute(update(TextItem).where(
+                TextItem.posting_run_id == run_id,
+                TextItem.status == TextItemStatus.POSTING.value,
+            ).values(status=TextItemStatus.FAILED.value,
+                     last_error="orphaned posting at run finish"))
+            if stuck.rowcount:
+                log_ctx.warning("link.run.orphaned_posting_failed", count=int(stuck.rowcount))
         await _reconcile_run_counters(s, run_id)
         if final_status == PostingRunStatus.SCHEDULED:
             # drip re-arm: не финишируем, спим до следующей порции (cron поднимет)
