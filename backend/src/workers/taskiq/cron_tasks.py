@@ -182,6 +182,8 @@ async def recover_stalled_runs() -> dict:
                     PostingRun.priority,
                     PostingRun.pause_requested,
                     PostingRun.cancel_requested,
+                    PostingRun.content_source,
+                    PostingRun.content_mode,
                 ).where(
                     PostingRun.status == PostingRunStatus.RUNNING.value,
                     PostingRun.deleted_at.is_(None),
@@ -195,11 +197,18 @@ async def recover_stalled_runs() -> dict:
         if not rows:
             return {"ok": True, "resumed": 0, "interrupted": 0}
 
-        for rid, prio, paused, cancelled in rows:
+        # gen_per_post-раны, которым надо воскресить ещё и ГЕНЕРАЦИЮ (не только
+        # постинг): recover_stalled_runs исторически перезапускал только постинг,
+        # из-за чего после деплоя генерация умирала, gen_active висел, а постинг
+        # допощивал готовое и уходил в done с кучей негенерированных айтемов.
+        gen_resume: list[int] = []
+        for rid, prio, paused, cancelled, csrc, cmode in rows:
             if paused or cancelled:
                 interrupted.append(int(rid))
             else:
                 resume.append((int(rid), str(prio or "normal")))
+                if csrc == "csv_campaign" and cmode == "gen_per_post":
+                    gen_resume.append(int(rid))
         resume_ids = [rid for rid, _ in resume]
 
         if interrupted:
@@ -246,10 +255,36 @@ async def recover_stalled_runs() -> dict:
             except Exception as e:
                 log.warning("recover.celery_enqueue_failed", run_id=rid, error=str(e))
 
+    # Воскрешаем ГЕНЕРАЦИЮ для gen_per_post-ранов, у кого остались негенерированные
+    # айтемы: ставим gen_active=True синхронно (чтобы стрим-постинг не финишировал
+    # раньше) и перезапускаем generate_run_items_task. Без этого генерация после
+    # деплоя не поднималась и ран уходил в done с pending-айтемами.
+    gen_resumed: list[int] = []
+    if gen_resume:
+        from domain.content_engine import set_gen_active
+        for rid in gen_resume:
+            async with WriteSession() as s:
+                ungenerated = await s.scalar(
+                    select(func.count(TextItem.id)).where(
+                        TextItem.posting_run_id == rid,
+                        TextItem.text_id.is_(None),
+                        TextItem.status == TextItemStatus.PENDING.value,
+                    )
+                )
+            if not ungenerated:
+                continue
+            try:
+                await set_gen_active(rid, True)
+                await generate_run_items_task.kiq(rid)
+                gen_resumed.append(rid)
+            except Exception as e:
+                log.warning("recover.gen_enqueue_failed", run_id=rid, error=str(e))
+
     log.warning(
         "scheduler.recovered_runs",
         resumed=resume_ids,
         interrupted=interrupted,
+        gen_resumed=gen_resumed,
         text_items_reset=int(reset_result.rowcount or 0),
     )
     return {
