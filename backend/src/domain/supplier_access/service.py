@@ -110,6 +110,9 @@ async def create_supplier_access(
     else:  # link
         login_token_plain = secrets.token_urlsafe(32)
         user.login_token_hash = _hash_token(login_token_plain)
+        # Обратимо шифруем токен, чтобы ссылку можно было скопировать позже
+        # (иначе она терялась — хранился лишь hash). super_admin-only показ.
+        user.login_token_enc = encrypt_password(login_token_plain)
 
     user.roles.append(role)
     session.add(user)
@@ -156,8 +159,33 @@ async def revoke_supplier_access(session: AsyncSession, user_id: int) -> bool:
         return False
     user.is_active = False
     user.login_token_hash = None
+    user.login_token_enc = None
     await session.commit()
     return True
+
+
+async def regenerate_supplier_link(
+    session: AsyncSession, user_id: int
+) -> str | None:
+    """Сгенерировать НОВЫЙ magic-токен доступу (старая ссылка перестаёт работать),
+    сохранить hash+enc, вернуть plain-токен (caller строит URL). Для получения
+    ссылки к существующим доступам, чей исходный токен невосстановим. Возвращает
+    None если доступ не найден/деактивирован/истёк."""
+    user = (await session.execute(
+        select(AdminUser).where(
+            AdminUser.id == user_id,
+            AdminUser.is_temporary.is_(True),
+            AdminUser.is_active.is_(True),
+            AdminUser.deleted_at.is_(None),
+        )
+    )).scalar_one_or_none()
+    if user is None or user.is_expired:
+        return None
+    token = secrets.token_urlsafe(32)
+    user.login_token_hash = _hash_token(token)
+    user.login_token_enc = encrypt_password(token)
+    await session.commit()
+    return token
 
 
 async def login_by_magic_token(session: AsyncSession, token: str) -> AdminUser | None:

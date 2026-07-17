@@ -45,7 +45,16 @@ class SupplierAccessItem(BaseModel):
     # Расшифрованный пароль supplier-аккаунта (эндпоинт только для super_admin).
     # None у старых аккаунтов, созданных до фичи (пароль был только в hash).
     password: str | None = None
+    # Magic-ссылка для входа (handover="link"). None у link-доступов, созданных до
+    # фичи 0061 (токен был только в hash) — их ссылку можно получить «Обновить».
+    magic_url: str | None = None
 
 
 class SupplierAccessListResponse(BaseModel):
     items: list[SupplierAccessItem]
+
+
+class RegenerateLinkResponse(BaseModel):
+    """Свежая magic-ссылка после «Обновить ссылку» (старая перестаёт работать)."""
+    user_id: int
+    magic_url: str

@@ -229,6 +229,10 @@ class AdminUser(Base, SoftDeletableMixin):
     login_token_hash: Mapped[str | None] = mapped_column(
         String(64), nullable=True, index=True
     )
+    # Обратимо зашифрованный magic-токен (парой к login_token_hash) — чтобы
+    # super_admin мог скопировать/обновить ссылку позже в «Доступах поставщиков».
+    # Только для временных supplier-аккаунтов; иначе NULL. См. 0061.
+    login_token_enc: Mapped[str | None] = mapped_column(String(512), nullable=True)
     # Обратимо зашифрованный пароль ТОЛЬКО для временных supplier-аккаунтов —
     # чтобы super_admin мог посмотреть/скопировать его позже на странице
     # «Доступы поставщиков». Для обычных юзеров NULL (хранится лишь hash). См. 0049.

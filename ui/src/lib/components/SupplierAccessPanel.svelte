@@ -35,6 +35,7 @@
 
   let created = $state<SupplierAccessCreated | null>(null)
   let copied = $state<string | null>(null)
+  let regenBusy = $state<number | null>(null)
 
   async function refresh() {
     loading = true
@@ -88,6 +89,21 @@
       await refresh()
     } catch (e) {
       showToast('error', e instanceof ApiError ? e.message : String(e))
+    }
+  }
+
+  async function regenerateLink(userId: number) {
+    if (!confirm('Сгенерировать НОВУЮ ссылку? Старая перестанет работать.')) return
+    regenBusy = userId
+    try {
+      const res = await supplierAccess.regenerateLink(userId)
+      await copyText(res.magic_url)
+      showToast('success', 'Новая ссылка скопирована в буфер')
+      await refresh()
+    } catch (e) {
+      showToast('error', e instanceof ApiError ? e.message : String(e))
+    } finally {
+      regenBusy = null
     }
   }
 
@@ -164,7 +180,28 @@
                 {/if}
               </td>
               <td class="py-2 pr-3 text-slate-600">{it.note ?? '—'}</td>
-              <td class="py-2 pr-3 text-slate-500">{it.handover === 'link' ? 'ссылка' : 'логин+пароль'}</td>
+              <td class="py-2 pr-3 text-slate-500">
+                {#if it.handover === 'link'}
+                  <div class="flex items-center gap-1.5">
+                    <span>ссылка</span>
+                    {#if it.magic_url}
+                      <button type="button" onclick={() => copy(it.magic_url ?? '', `ml-${it.user_id}`)}
+                              class="text-brand-600 hover:text-brand-700" title="копировать ссылку">
+                        {#if copied === `ml-${it.user_id}`}<Check size={13} />{:else}<Copy size={13} />{/if}
+                      </button>
+                    {/if}
+                    {#if it.is_active && !it.is_expired}
+                      <button type="button" onclick={() => regenerateLink(it.user_id)} disabled={regenBusy === it.user_id}
+                              class="text-[11px] text-slate-400 hover:text-slate-600 disabled:opacity-50"
+                              title={it.magic_url ? 'Новая ссылка (старая перестанет работать)' : 'Получить ссылку (старый доступ — исходная невосстановима)'}>
+                        {regenBusy === it.user_id ? '…' : 'обновить'}
+                      </button>
+                    {/if}
+                  </div>
+                {:else}
+                  логин+пароль
+                {/if}
+              </td>
               <td class="py-2 pr-3"><span class="rounded px-1.5 py-0.5 text-[11px] font-medium {st.cls}">{st.text}</span></td>
               <td class="py-2 pr-3 text-slate-500">{fmt(it.expires_at)}</td>
               <td class="py-2 pr-3 text-slate-500">{it.last_login_at ? fmt(it.last_login_at) : 'не входил'}</td>

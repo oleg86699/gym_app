@@ -285,6 +285,7 @@ export interface SupplierAccessItem {
   last_login_at: string | null
   handover: 'password' | 'link'
   password: string | null   // расшифрованный пароль (super_admin-only эндпоинт)
+  magic_url: string | null  // ссылка (link-режим, создан после 0061); иначе null → «Обновить»
 }
 
 export const supplierAccess = {
@@ -296,6 +297,9 @@ export const supplierAccess = {
     batch_ids?: number[]
   }) => api.post<SupplierAccessCreated>('/admin/api/supplier-access', payload),
   revoke: (userId: number) => api.post(`/admin/api/supplier-access/${userId}/revoke`),
+  regenerateLink: (userId: number) =>
+    api.post<{ user_id: number; magic_url: string }>(
+      `/admin/api/supplier-access/${userId}/regenerate-link`),
 }
 
 // Public — magic-login поставщика (страница /portal-login → редирект на /batches)
