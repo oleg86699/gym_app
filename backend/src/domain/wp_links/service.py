@@ -276,15 +276,21 @@ async def create_link_run(
     return run
 
 
-async def site_has_verified_link(session: AsyncSession, site_id: int) -> bool:
-    """Уже стоит наша verified-сквозная на этом сайте? (для skip на повторе)."""
-    return bool(await session.scalar(
-        select(exists().where(
-            TextItem.site_id == site_id,
-            TextItem.placed_via.isnot(None),
-            TextItem.verified_at.isnot(None),
-        ))
-    ))
+async def site_has_verified_link(
+    session: AsyncSession, site_id: int, target_domain: str | None = None
+) -> bool:
+    """Уже стоит наша verified-сквозная на этом сайте? (для skip на повторе.)
+    С target_domain — проверяем ссылку ИМЕННО на это казино (per-target): донор
+    можно переиспользовать под другие целевые домены, поэтому skip только если у
+    него уже стоит verified-ссылка на ТОТ ЖЕ target_domain."""
+    conds = [
+        TextItem.site_id == site_id,
+        TextItem.placed_via.isnot(None),
+        TextItem.verified_at.isnot(None),
+    ]
+    if target_domain:
+        conds.append(TextItem.target_domain == target_domain)
+    return bool(await session.scalar(select(exists().where(*conds))))
 
 
 # ─── Place ───────────────────────────────────────────────────────────
@@ -307,8 +313,9 @@ async def _place_on_site(item_id: int, site_id: int, task_type: str | None,
     from domain.wp_batches.service import _build_http_client_url
 
     async with WriteSession() as s:
-        # идемпотентность — сайт уже с нашей verified-ссылкой
-        if await site_has_verified_link(s, site_id):
+        # идемпотентность — сайт уже с нашей verified-ссылкой НА ЭТО ЖЕ казино
+        # (per-target: под другие целевые домены донор переиспользуется).
+        if await site_has_verified_link(s, site_id, normalize_domain(url or "") or None):
             return {"ok": True, "status": "skip_exists", "site_id": site_id}
         admin = await pick_admin_cred(s, site_id)
         if admin is None or admin.site is None:
@@ -426,7 +433,13 @@ async def process_link_item(
         res = await _place_on_site(item_id, site_id, task_type, url, anchor, proxy_urls,
                                    html=html, hide_methods=hide_methods)
         last_status, last_domain = res.get("status", "error"), res.get("domain")
-        if res.get("status") in ("placed", "skip_exists"):
+        if res.get("status") == "placed":
+            return res
+        if res.get("status") == "skip_exists":
+            # сайт уже с нашей ссылкой на это казино → помечаем айтем skipped, иначе он
+            # остаётся 'posting' и счётчик skip крутится без резолва статуса.
+            async with WriteSession() as s:
+                await _mark_item(s, item_id, TextItemStatus.SKIPPED)
             return res
         # фейл (login/place/verify/no_admin) → следующий сайт; site_id остаётся занят
 
