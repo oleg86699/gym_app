@@ -18,6 +18,7 @@ from sqlalchemy.orm import selectinload
 
 from core.crypto import decrypt_password
 from core.db import WriteSession
+from domain.text_links import normalize_domain
 from infrastructure.db.models.posting import (
     PostingRun,
     PostingRunStatus,
@@ -62,12 +63,18 @@ async def candidate_link_sites(
     session: AsyncSession, *, exclude_existing: bool = True, limit: int | None = None,
     site_langs: list[str] | None = None, site_tlds: list[str] | None = None,
     site_tags: list[str] | None = None, site_domains: list[str] | None = None,
-    exclude_site_ids: set[int] | None = None,
+    exclude_site_ids: set[int] | None = None, target_domain: str | None = None,
 ) -> list[int]:
     """Сайты-кандидаты под сквозную ссылку: активные, с валидным administrator,
-    у кого нашей verified-ссылки ещё нет. Опц. фильтр по language/TLD сайта +
+    у кого нашей verified-ссылки ЕЩЁ НЕТ. Опц. фильтр по language/TLD сайта +
     in-memory exclude (уже занятые/перепробованные в текущем прогоне). Порядок
-    случайный — чтобы параллельные айтемы/раны не лезли в одни и те же сайты."""
+    случайный — чтобы параллельные айтемы/раны не лезли в одни и те же сайты.
+
+    exclude_existing привязано к target_domain: сайт выпадает только если на нём
+    УЖЕ стоит наша verified-ссылка НА ЭТО ЖЕ казино (target_domain). На другие
+    целевые домены донор остаётся доступен (один сайт → по ссылке на казино).
+    target_domain=None → глобальное исключение (любая verified-ссылка) — для
+    консервативного счётчика."""
     from sqlalchemy import or_
     # GROUP BY (не SELECT DISTINCT): иначе PG ругается на ORDER BY random()
     # «must appear in select list». GROUP BY site_id == дедуп по сайту.
@@ -105,6 +112,10 @@ async def candidate_link_sites(
         already = select(distinct(TextItem.site_id)).where(
             TextItem.placed_via.isnot(None), TextItem.verified_at.isnot(None),
         )
+        # Привязка к целевому домену: донор занят ТОЛЬКО для того казино, на которое
+        # уже ссылается. Для других target_domain он свободен → переиспользование пула.
+        if target_domain:
+            already = already.where(TextItem.target_domain == target_domain)
         q = q.where(WpCredential.site_id.notin_(already))
     ids = list((await session.execute(
         q.group_by(WpCredential.site_id).order_by(func.random())
@@ -113,7 +124,12 @@ async def candidate_link_sites(
 
 
 async def count_candidate_link_sites(session: AsyncSession) -> int:
-    return len(await candidate_link_sites(session))
+    """Всего пригодных доноров (valid administrator + can_admin_login). Это потолок
+    размещений НА КАЖДОЕ казино: под per-target модель любой донор доступен новому
+    целевому домену (exclude_existing привязано к target_domain, здесь без него —
+    показываем полный пул). Реальная ёмкость под конкретное казино = это минус уже
+    занятые ИМ доноры."""
+    return len(await candidate_link_sites(session, exclude_existing=False))
 
 
 def _link_count(link: dict) -> int:
@@ -234,6 +250,8 @@ async def create_link_run(
                 status=TextItemStatus.PENDING.value,
                 link_url=url or None, link_anchor=(anchor[:500] if anchor else None),
                 link_html=(html or None),  # site_id — на Start
+                # Целевой домен ссылки — ключ per-target исключения доноров.
+                target_domain=(normalize_domain(url or "") or None),
             ))
     session.add_all(items)
     run.total_texts = len(items)
@@ -336,6 +354,9 @@ async def _place_on_site(item_id: int, site_id: int, task_type: str | None,
             status=TextItemStatus.POSTED.value, site_id=site_id, credential_id=admin_id,
             placed_via=outcome.placed_via, placement_ref=outcome.placement_ref,
             verified_at=now, verified_urls=outcome.verified_urls,
+            # target_domain — ключ per-target исключения (safety-net для айтемов,
+            # созданных до фичи; у новых он ставится при создании).
+            target_domain=(normalize_domain(url or "") or None),
             posted_url=(outcome.verified_urls or [None])[0], posted_at=now, last_error=None,
         ))
         await s.commit()
@@ -371,6 +392,9 @@ async def process_link_item(
         html = item.link_html
         anchor = item.link_anchor or url or "link"
         gp = (run.gen_params if run else None) or {}
+        # Целевой домен ссылки — для per-target исключения доноров (донор занят
+        # только для СВОЕГО казино, свободен для других).
+        target_dom = item.target_domain or normalize_domain(url or "") or None
     if not url and not html:
         async with WriteSession() as s:
             await _mark_item(s, item_id, TextItemStatus.FAILED, last_error="no url")
@@ -388,7 +412,8 @@ async def process_link_item(
             candidates = await candidate_link_sites(
                 s, exclude_existing=True, exclude_site_ids=set(used_sites),
                 site_langs=site_langs, site_tlds=site_tlds,
-                site_tags=site_tags, site_domains=site_domains, limit=30)
+                site_tags=site_tags, site_domains=site_domains,
+                target_domain=target_dom, limit=30)
         # синхронный pick + claim: между next() и add() нет await → атомарно
         site_id = next((c for c in candidates if c not in used_sites), None)
         if site_id is None:
