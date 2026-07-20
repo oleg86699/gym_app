@@ -1632,6 +1632,11 @@ async def _run_link_async(run_id: int, concurrency: int) -> dict:
     # Общий registry занятых/перепробованных сайтов прогона — координация
     # конкуренси, чтобы параллельные айтемы не целили в один сайт.
     used_sites: set[int] = set()
+    # site_id → число транзиентных фейлов через прогон. Транзиент (CF/rate-limit/
+    # сеть/5xx) НЕ выжигает донора сразу — process_link_item освобождает его в пул
+    # до cap попыток, чтобы соседние айтемы могли взять его позже (иначе один
+    # троттлинг-блип навсегда выбивал донора → no_sites на хвосте прогона).
+    transient_tries: dict[int, int] = {}
     # Пул прокси задачи (proxy_selector) — резолвим один раз, дальше random per attempt.
     async with WriteSession() as s:
         _run = await s.scalar(select(PostingRun).where(PostingRun.id == run_id))
@@ -1642,7 +1647,8 @@ async def _run_link_async(run_id: int, concurrency: int) -> dict:
         async with sem, posting_limiter.slot(limit=global_limit):
             try:
                 res = await process_link_item(
-                    item_id, used_sites=used_sites, actor_id=None, proxy_urls=proxy_urls)
+                    item_id, used_sites=used_sites, actor_id=None, proxy_urls=proxy_urls,
+                    transient_tries=transient_tries)
             except Exception as e:
                 log_ctx.warning("link.item.exception", item_id=item_id, error=str(e))
                 res = {"status": "error"}

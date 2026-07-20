@@ -377,6 +377,7 @@ async def _place_on_site(item_id: int, site_id: int, task_type: str | None,
 async def process_link_item(
     item_id: int, *, used_sites: set[int] | None = None, actor_id: int | None = None,
     proxy_urls: list[str | None] | None = None,
+    transient_tries: dict[int, int] | None = None,
 ) -> dict:
     """Поставить ссылку для TextItem с ПЕРЕБОРОМ сайтов (как постинг): крутим
     кандидатов из пула, пока не разместим (тогда пишем site_id/результат) или
@@ -388,6 +389,8 @@ async def process_link_item(
     """
     if used_sites is None:
         used_sites = set()
+    if transient_tries is None:
+        transient_tries = {}
     async with WriteSession() as s:
         item = await s.scalar(select(TextItem).where(TextItem.id == item_id))
         if item is None:
@@ -413,23 +416,37 @@ async def process_link_item(
     site_tags = gp.get("site_tags")
     site_domains = resolve_site_domains(gp)
     hide_methods = gp.get("hide_methods")
+    # Транзиентные статусы _place_on_site: сайт ЖИВОЙ, но сейчас недоступен
+    # (CF-челлендж / rate-limit / сеть / 5xx). Такой донор НЕ выжигаем навсегда —
+    # освобождаем обратно в пул, чтобы позже (когда троттлинг спадёт) его взял
+    # другой айтем. Cap на попытки через прогон, иначе стабильно-битый молотится.
+    # Постоянные (login_auth_invalid / permission_denied / login_disabled /
+    # no_method / no_admin …) выжигаем как раньше — донор реально непригоден.
+    _TRANSIENT_STATUSES = {
+        "login_cf_challenge", "login_rate_limited", "login_network",
+        "login_server_error", "error",
+    }
+    _MAX_TRANSIENT_TRIES = 3
+
+    tried: set[int] = set()  # доноры, что ЭТОТ айтем уже пробовал (не зацикливаться)
     last_status, last_domain = "no_sites", None
     while True:
         async with WriteSession() as s:
             candidates = await candidate_link_sites(
-                s, exclude_existing=True, exclude_site_ids=set(used_sites),
+                s, exclude_existing=True, exclude_site_ids=used_sites | tried,
                 site_langs=site_langs, site_tlds=site_tlds,
                 site_tags=site_tags, site_domains=site_domains,
                 target_domain=target_dom, limit=30)
         # синхронный pick + claim: между next() и add() нет await → атомарно
-        site_id = next((c for c in candidates if c not in used_sites), None)
+        site_id = next((c for c in candidates if c not in used_sites and c not in tried), None)
         if site_id is None:
             async with WriteSession() as s:
                 await _mark_item(s, item_id, TextItemStatus.FAILED,
                                  last_error=f"перебрали все сайты (last: {last_status})")
             return {"ok": False, "status": last_status, "item_id": item_id,
                     "domain": last_domain}
-        used_sites.add(site_id)  # claim
+        used_sites.add(site_id)  # claim (in-flight)
+        tried.add(site_id)       # этот айтем больше его не берёт
         res = await _place_on_site(item_id, site_id, task_type, url, anchor, proxy_urls,
                                    html=html, hide_methods=hide_methods)
         last_status, last_domain = res.get("status", "error"), res.get("domain")
@@ -441,7 +458,14 @@ async def process_link_item(
             async with WriteSession() as s:
                 await _mark_item(s, item_id, TextItemStatus.SKIPPED)
             return res
-        # фейл (login/place/verify/no_admin) → следующий сайт; site_id остаётся занят
+        # Фейл. Транзиент (сайт живой, троттлинг/CF/сеть) → освобождаем донора обратно
+        # в пул (до cap попыток), чтобы его взял другой айтем позже. Постоянный фейл →
+        # site_id остаётся в used_sites (выжжен, как раньше).
+        if res.get("status") in _TRANSIENT_STATUSES:
+            n = transient_tries.get(site_id, 0) + 1
+            transient_tries[site_id] = n
+            if n < _MAX_TRANSIENT_TRIES:
+                used_sites.discard(site_id)  # release: другой айтем/позже сможет взять
 
 
 # ─── Remove ──────────────────────────────────────────────────────────
