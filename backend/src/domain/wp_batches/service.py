@@ -1151,7 +1151,22 @@ async def run_batch_validation(
                     AdminLoginKind.UNKNOWN,      # HTML 403/Access Denied/JS-redirect
                     AdminLoginKind.SERVER_ERROR, # 503 часто = CF rate limit
                 }
-                if login_res.error in _TIER3_BROWSER_TRIGGERS:
+                # Расширенный триггер ТОЛЬКО при живом сайте: если Tier 1 XML-RPC
+                # дал OK, сайт точно доступен и cred реальный — тогда NETWORK
+                # (timeout/connection error) на wp-login это почти всегда анти-бот/
+                # медленная login-страница именно под HTTP-клиентом, а не мёртвый
+                # сайт. Браузер (Patchright) такие проходит и подтверждает
+                # can_admin_login → cred входит в пул ссылок «с главной». Без гейта
+                # на tier1=OK НЕ расширяем — иначе палим браузер на дохлых/медленных
+                # сайтах. RATE_LIMITED намеренно НЕ включаем: браузерный ре-логин по
+                # 429 может добить security-plugin и залочить аккаунт.
+                _TIER3_IF_SITE_ALIVE = {AdminLoginKind.NETWORK}
+                should_browser = (
+                    login_res.error in _TIER3_BROWSER_TRIGGERS
+                    or (login_res.error in _TIER3_IF_SITE_ALIVE
+                        and tier1_outcome.error == ErrorKind.OK)
+                )
+                if should_browser:
                     if await _cf_browser_login(cred, pw, purl):
                         via_browser = True
                         login_res = LoginOutcome(
