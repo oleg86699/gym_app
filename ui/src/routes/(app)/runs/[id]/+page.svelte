@@ -1315,11 +1315,14 @@
           <div class="h-full bg-amber-400" style="width: {skippedPct}%"></div>
         </div>
       {/if}
-      <!-- Карточки кликабельны: фильтруют таблицу текстов по статусу (как теги) -->
-      <div class="mt-4 grid grid-cols-2 gap-3 text-center sm:grid-cols-5">
+      <!-- Статус-карточки кликабельны (фильтр таблицы). Генерация и «ссылки живы»
+           — информационные, показываются ТОЛЬКО где применимы (gen-ран / была
+           проверка ссылок). Skipped — только если > 0 (у link-ранов). flex-wrap:
+           число карточек переменное (4-6) в зависимости от типа задачи. -->
+      <div class="mt-4 flex flex-wrap gap-3 text-center">
         {#snippet statCard(key: TextItemStatus | 'all' | 'in_progress', value: number, label: string, color: string, sub = '')}
           <button type="button" onclick={() => changeStatusFilter(key)}
-                  class="rounded-lg border p-2 transition hover:bg-slate-50"
+                  class="min-w-[130px] flex-1 rounded-lg border p-2 transition hover:bg-slate-50"
                   class:border-brand-400={filterStatus === key}
                   class:bg-brand-50={filterStatus === key}
                   class:border-slate-200={filterStatus !== key}>
@@ -1330,10 +1333,28 @@
           </button>
         {/snippet}
         {@render statCard('all', progress.total, 'Total', 'text-slate-900')}
+        {#if isGenRun}
+          <div class="min-w-[130px] flex-1 rounded-lg border border-orange-200 bg-orange-50/40 p-2"
+               title="Сгенерировано текстов из общего числа (нужна только для gen-задач)">
+            <div class="text-2xl font-semibold text-orange-600">{progress.generated}</div>
+            <div class="text-[11px] uppercase tracking-wider text-slate-500">
+              Генерация{#if progress.total} · <span class="normal-case text-slate-400">{genPct}%</span>{/if}
+            </div>
+          </div>
+        {/if}
         {@render statCard('posted', progress.posted, 'Posted', 'text-emerald-600', progress.total ? `${postedPct}%` : '')}
         {@render statCard('failed', progress.failed, 'Failed', 'text-red-600', progress.total ? `${failedPct}%` : '')}
-        {@render statCard('skipped', progress.skipped, 'Skipped', 'text-amber-600', progress.total ? `${skippedPct}%` : '')}
+        {#if progress.skipped > 0}
+          {@render statCard('skipped', progress.skipped, 'Skipped', 'text-amber-600', progress.total ? `${skippedPct}%` : '')}
+        {/if}
         {@render statCard('in_progress', progress.pending + progress.posting, 'Pending', 'text-brand-700', progress.posting > 0 ? `${progress.posting} in-flight` : '')}
+        {#if (run.link_check_total ?? 0) > 0}
+          <div class="min-w-[130px] flex-1 rounded-lg border border-violet-200 bg-violet-50/40 p-2"
+               title={run.link_check_at ? `Проверка ссылок: ${new Date(run.link_check_at).toLocaleString()}` : 'Проверка ссылок'}>
+            <div class="text-2xl font-semibold text-violet-700">{run.link_check_valid}<span class="text-base text-slate-400">/{run.link_check_total}</span></div>
+            <div class="text-[11px] uppercase tracking-wider text-slate-500">Ссылки живы</div>
+          </div>
+        {/if}
       </div>
     </div>
   {/if}
