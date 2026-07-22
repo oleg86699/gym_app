@@ -890,7 +890,7 @@
   // (расширить пул/окно и нажать Restart). Согласовано с бэкендом.
   let canEditParams = $derived(
     !!run &&
-      ['ready', 'scheduled', 'need_more_admins', 'interrupted', 'cancelled', 'failed', 'done'].includes(
+      ['ready', 'scheduled', 'need_more_admins', 'interrupted', 'cancelled', 'failed'].includes(
         run.status,
       ),
   )
@@ -1521,7 +1521,13 @@
                       <div class="text-slate-700">{item.site.domain}</div>
                       <div class="mt-0.5 flex items-center gap-1.5">
                         {#if item.placed_via}<span class="rounded-full bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">{item.placed_via}</span>{/if}
-                        {#if item.verified_at}<span class="text-[11px] text-emerald-600" title="Ссылка подтверждена анонимно">verified ✓</span>{/if}
+                        {#if item.link_verified === true}
+                          <span class="text-[11px] font-medium text-violet-700" title="Проверка ссылок подтвердила: ссылка есть на странице">✓ на странице</span>
+                        {:else if item.link_verified === false}
+                          <span class="text-[11px] font-medium text-red-500" title="Проверка ссылок: ссылки НЕТ на странице">✗ снята</span>
+                        {:else if item.verified_at}
+                          <span class="text-[11px] text-emerald-600" title="Подтверждена при размещении (проверь актуальность кнопкой «Проверить ссылки»)">verified ✓</span>
+                        {/if}
                         {#if item.status === 'posted'}
                           <button onclick={() => removeLink(item.id)} disabled={removingItem === item.id}
                                   class="text-[11px] text-red-600 hover:underline disabled:opacity-50">

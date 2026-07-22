@@ -1749,13 +1749,11 @@ async def update_run_endpoint(
     }
     deep_sent = deep_fields & sent
     if deep_sent:
-        # Правка параметров разрешена: до старта (READY/SCHEDULED), в
-        # «остановленных, но перезапускаемых» статусах И в завершённых (DONE) —
-        # чтобы можно было расширить пул (TLD/язык/теги)/сменить прокси и т.п.,
-        # затем Restart/Retry (напр. link-ран с all-failed уходит в DONE, и его
-        # надо было доработать параметрами и перезапустить). Изменения вступают
-        # в силу на следующем старте, так что для DONE это безопасно. Активный
-        # постинг (running/queued/unpacking/paused) не трогаем — воркер в полёте.
+        # Правка параметров разрешена: до старта (READY/SCHEDULED) И в
+        # «остановленных, но перезапускаемых» статусах — чтобы расширить пул
+        # (TLD/язык/теги)/сменить прокси и т.п., затем Restart. Активный постинг
+        # (running/queued/unpacking/paused) и завершённые (done) не трогаем —
+        # для done оператор пользуется Restart/Retry, отдельная правка не нужна.
         _EDITABLE_STATUSES = {
             PostingRunStatus.READY.value,
             PostingRunStatus.SCHEDULED.value,
@@ -1763,13 +1761,12 @@ async def update_run_endpoint(
             PostingRunStatus.INTERRUPTED.value,
             PostingRunStatus.CANCELLED.value,
             PostingRunStatus.FAILED.value,
-            PostingRunStatus.DONE.value,
         }
         if run.status not in _EDITABLE_STATUSES:
             raise HTTPException(
                 status_code=409,
-                detail="Параметры можно менять до старта, в остановленной или "
-                       "завершённой задаче (не в активном постинге)",
+                detail="Параметры можно менять до старта или в остановленной задаче "
+                       "(READY / SCHEDULED / NEED_MORE_ADMINS / INTERRUPTED / CANCELLED / FAILED)",
             )
         for f in ("priority", "spread_days", "posting_method", "post_verify",
                   "proxy_selector", "publish_from", "publish_to", "pool_fallback"):
