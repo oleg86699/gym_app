@@ -1970,6 +1970,8 @@ async def _run_posting_async(run_id: int) -> dict:
             # внутри _post_one_item остаётся жёстким cross-run потолком.
             gen_wait_stalls = 0       # стрим: подряд-итераций ожидания без прогресса генерации
             last_ext_ungen = -1
+            due_gen_stalls = 0        # drip(B): подряд-итераций догенерации созревшего без прогресса
+            last_due_ungen = -1
             target = conc_ceiling
             last_target_at = 0.0
             need_more_admins = False
@@ -2096,6 +2098,38 @@ async def _run_posting_async(run_id: int) -> dict:
                             await asyncio.sleep(2)
                             continue
                         log_ctx.warning("posting.ext_gen_stalled", ungenerated=ext_ungen)
+                    # Drip (B): пока есть СОЗРЕВШИЙ (not_before <= now) НЕсгенерированный
+                    # бэклог — НЕ паркуемся на завтра, а догенерируем его СЕГОДНЯ. gen_task
+                    # мог завершить свой цикл (todo снимался снапшотом раньше — до того как
+                    # эти айтемы «созрели» / были ре-размазаны по дням apply_drip_not_before),
+                    # из-за чего ран уходил в scheduled с сотнями несгенерированных на текущий
+                    # день. Пересоздаём генерацию и ждём. Stall-guard (300×2с ≈ 10 мин без
+                    # уменьшения бэклога) — на случай битой генерации, чтобы не крутиться вечно.
+                    async with WriteSession() as s:
+                        due_ungen = await s.scalar(
+                            select(func.count(TextItem.id)).where(
+                                TextItem.posting_run_id == run_id,
+                                TextItem.status == TextItemStatus.PENDING.value,
+                                TextItem.text_id.is_(None),
+                                or_(
+                                    TextItem.not_before.is_(None),
+                                    TextItem.not_before <= datetime.now(UTC),
+                                ),
+                            )
+                        )
+                    if due_ungen and due_ungen > 0:
+                        due_gen_stalls = (due_gen_stalls + 1
+                                          if 0 <= last_due_ungen <= due_ungen else 0)
+                        last_due_ungen = due_ungen
+                        if due_gen_stalls <= 300:
+                            if gen_task is None or gen_task.done():
+                                from domain.content_engine import generate_run_items
+                                gen_task = asyncio.create_task(
+                                    generate_run_items(run_id, finalize=True))
+                                log_ctx.info("posting.drip.regen_due", due=int(due_ungen))
+                            await asyncio.sleep(2)
+                            continue
+                        log_ctx.warning("posting.drip.due_gen_stalled", due=int(due_ungen))
                     # Drip-feed: остались pending с будущим not_before? Перевзводим
                     # run в scheduled на момент ближайшей порции (cron поднимет).
                     async with WriteSession() as s:
