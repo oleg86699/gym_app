@@ -804,13 +804,16 @@ async def apply_drip_not_before(run_id: int, spread_days: int,
 
     if mode == "gen_per_row" and groups:
         # День на ГРУППУ: оригинал + все его спины → один случайный день.
-        day0 = ws.replace(hour=0, minute=0, second=0, microsecond=0)
         by_day: dict[int, list[int]] = {}
         for g in groups:
             d = random.randrange(spread_days)
             ids = [g.get("original_item_id"), *(g.get("spin_item_ids") or [])]
             by_day.setdefault(d, []).extend(i for i in ids if i is not None)
         async with WriteSession() as s:
+            # day0 = ТА ЖЕ граница дня, что у per-item ветки (date_trunc в tz сессии,
+            # не UTC-полночь) — чтобы созревание и группировка func.date в UI совпадали.
+            day0 = await s.scalar(sql("SELECT date_trunc('day', (:ws)::timestamptz)"),
+                                  {"ws": ws})
             for d, ids in by_day.items():
                 nb = day0 + timedelta(days=d)
                 for i in range(0, len(ids), 1000):  # PG bind-param safety
