@@ -776,7 +776,12 @@ _STREAM_GEN_HORIZON = timedelta(hours=6)
 
 async def apply_drip_not_before(run_id: int, spread_days: int,
                                 scheduled_for=None) -> None:
-    """Размазать not_before айтемов рана по окну spread_days (random per item).
+    """Размазать not_before айтемов рана по ДНЯМ окна spread_days: каждый айтем →
+    полночь СЛУЧАЙНОГО дня из [день старта .. +spread_days). Тогда весь дневной
+    пул «созревает» разом в его полночь → постинг гонит дневную пачку и паркуется
+    до следующего дня (без поминутного churn'а, который душил параллельную
+    генерацию). Просроченные дни (not_before в прошлом — старт-день или
+    пропущенные из-за сбоя/зависания) всегда «созревшие» → догоняются, не теряются.
     Идемпотентно — трогает только айтемы без not_before. Окно стартует от
     scheduled_for (если в будущем) либо now. spread_days<=0 → no-op."""
     if not spread_days or spread_days <= 0:
@@ -785,10 +790,10 @@ async def apply_drip_not_before(run_id: int, spread_days: int,
     ws = scheduled_for if (scheduled_for and scheduled_for > now_ts) else now_ts
     async with WriteSession() as s:
         await s.execute(sql("""
-            UPDATE text_items SET not_before = (:ws)::timestamptz
-                + (random() * make_interval(secs => :win))
+            UPDATE text_items SET not_before = date_trunc('day', (:ws)::timestamptz)
+                + (floor(random() * :days) * interval '1 day')
             WHERE posting_run_id = :rid AND not_before IS NULL
-        """), {"rid": run_id, "ws": ws, "win": spread_days * 86400})
+        """), {"rid": run_id, "ws": ws, "days": spread_days})
         await s.commit()
 
 
@@ -905,12 +910,17 @@ async def generate_run_items(run_id: int, *, finalize: bool = False) -> dict:
                 spin_model = await pick_model(s, purpose="spin")
             horizon = datetime.now(UTC) + _STREAM_GEN_HORIZON
             async with WriteSession() as s:
-                empty_origs = set((await s.execute(select(TextItem.id).where(
+                # ORDER BY not_before ASC: сначала самые «просроченные» (бэклог
+                # прошлых дней), потом ближайшие. Иначе генерация гонит будущее, а
+                # вчерашний недобор висит несгенерённым и постить нечего.
+                ordered_origs = (await s.execute(select(TextItem.id).where(
                     TextItem.posting_run_id == run_id, TextItem.text_id.is_(None),
                     TextItem.status == TextItemStatus.PENDING.value,
                     or_(TextItem.not_before.is_(None),  # drip: только «созревшие» оригиналы
-                        TextItem.not_before <= horizon)))).scalars().all())
-            todo = [g for g in groups if g.get("original_item_id") in empty_origs]
+                        TextItem.not_before <= horizon))
+                    .order_by(TextItem.not_before.asc().nulls_first()))).scalars().all()
+            _g_by_orig = {g.get("original_item_id"): g for g in groups}
+            todo = [_g_by_orig[oid] for oid in ordered_origs if oid in _g_by_orig]
             await _gen_progress(run_id, done=0, total=len(todo))
             done = 0
             for g in todo:
@@ -932,11 +942,15 @@ async def generate_run_items(run_id: int, *, finalize: bool = False) -> dict:
             if finalize:  # стриминг (auto): только «созревшие» в горизонте (drip-генерация)
                 horizon = datetime.now(UTC) + _STREAM_GEN_HORIZON
                 conds.append(or_(TextItem.not_before.is_(None), TextItem.not_before <= horizon))
-            empty_ids = set((await s.execute(select(TextItem.id).where(*conds))).scalars().all())
+            # ORDER BY not_before ASC — просроченный бэклог генерим первым.
+            empty_ids_ordered = list((await s.execute(select(TextItem.id).where(*conds)
+                .order_by(TextItem.not_before.asc().nulls_first()))).scalars().all())
+            empty_ids = set(empty_ids_ordered)
         if mode == "gen_per_row":
-            ordered = [g["original_item_id"] for g in groups if g.get("original_item_id") in empty_ids]
+            _origs = {g["original_item_id"] for g in groups}
+            ordered = [iid for iid in empty_ids_ordered if iid in _origs]
         else:
-            ordered = sorted(empty_ids)
+            ordered = empty_ids_ordered
         await _gen_progress(run_id, done=0, total=len(ordered))
         # Параллельно: до content_gen_concurrency айтемов одновременно (generate_item
         # независим — своя сессия/claim). Глобальный потолок LLM держит gen_limiter,
