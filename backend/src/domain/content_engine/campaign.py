@@ -17,6 +17,7 @@ import asyncio
 import hashlib
 import json
 import os
+import random
 import re
 import time
 from datetime import UTC, datetime, timedelta
@@ -782,12 +783,45 @@ async def apply_drip_not_before(run_id: int, spread_days: int,
     до следующего дня (без поминутного churn'а, который душил параллельную
     генерацию). Просроченные дни (not_before в прошлом — старт-день или
     пропущенные из-за сбоя/зависания) всегда «созревшие» → догоняются, не теряются.
+
+    gen_per_row: день назначается ПО ГРУППЕ (оригинал + все его спины = ОДИН день).
+    Иначе спины разлетаются по дням отдельно от своего оригинала, а генерация
+    атомарна по группе (спин нельзя сгенерить, не сгенерив сперва оригинал) →
+    созревший спин, чей оригинал ещё в будущем-за-горизонтом, застревает
+    несгенерированным (и непостабельным) до дня оригинала. На домен velocity та же:
+    ~groups/days групп в день × count сайтов.
+
     Идемпотентно — трогает только айтемы без not_before. Окно стартует от
     scheduled_for (если в будущем) либо now. spread_days<=0 → no-op."""
     if not spread_days or spread_days <= 0:
         return
     now_ts = datetime.now(UTC)
     ws = scheduled_for if (scheduled_for and scheduled_for > now_ts) else now_ts
+    async with WriteSession() as s:
+        run = await s.scalar(select(PostingRun).where(PostingRun.id == run_id))
+        mode = run.content_mode if run else None
+        groups = ((run.gen_params or {}).get("fanout_groups") or []) if run else []
+
+    if mode == "gen_per_row" and groups:
+        # День на ГРУППУ: оригинал + все его спины → один случайный день.
+        day0 = ws.replace(hour=0, minute=0, second=0, microsecond=0)
+        by_day: dict[int, list[int]] = {}
+        for g in groups:
+            d = random.randrange(spread_days)
+            ids = [g.get("original_item_id"), *(g.get("spin_item_ids") or [])]
+            by_day.setdefault(d, []).extend(i for i in ids if i is not None)
+        async with WriteSession() as s:
+            for d, ids in by_day.items():
+                nb = day0 + timedelta(days=d)
+                for i in range(0, len(ids), 1000):  # PG bind-param safety
+                    await s.execute(update(TextItem).where(
+                        TextItem.id.in_(ids[i:i + 1000]),
+                        TextItem.not_before.is_(None),
+                    ).values(not_before=nb))
+            await s.commit()
+        return
+
+    # gen_per_post / без групп: групповой атомарности нет → день на АЙТЕМ.
     async with WriteSession() as s:
         await s.execute(sql("""
             UPDATE text_items SET not_before = date_trunc('day', (:ws)::timestamptz)
