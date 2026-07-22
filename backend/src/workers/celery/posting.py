@@ -1785,15 +1785,20 @@ async def _run_link_async(run_id: int, concurrency: int) -> dict:
             if stuck.rowcount:
                 log_ctx.warning("link.run.orphaned_posting_failed", count=int(stuck.rowcount))
         await _reconcile_run_counters(s, run_id)
-        # Полностью провалившийся ран (0 posted + были failed) → FAILED, а не DONE
-        # (честный статус + доступны Edit/Restart, Edit гейтится по статусу). Только
-        # для DONE — cancelled/scheduled не трогаем.
+        # Ран не доразместился полностью — статус честный, не «done». Только для
+        # DONE (cancelled/scheduled не трогаем):
+        #   0 posted + были failed        → FAILED (полный провал);
+        #   part posted + были failed      → NEED_MORE_ADMINS (обычно кончились
+        #     доноры — «перебрали все сайты»). Оба редактируемы + Restart/Retry, а
+        #     не прячутся под зелёным «100% done».
         if final_status == PostingRunStatus.DONE:
             _cnt = (await s.execute(select(
                 PostingRun.posted_count, PostingRun.failed_count,
             ).where(PostingRun.id == run_id))).one()
-            if int(_cnt[0] or 0) == 0 and int(_cnt[1] or 0) > 0:
-                final_status = PostingRunStatus.FAILED
+            _posted, _failed = int(_cnt[0] or 0), int(_cnt[1] or 0)
+            if _failed > 0:
+                final_status = (PostingRunStatus.FAILED if _posted == 0
+                                else PostingRunStatus.NEED_MORE_ADMINS)
         if final_status == PostingRunStatus.SCHEDULED:
             # drip re-arm: не финишируем, спим до следующей порции (cron поднимет)
             await s.execute(update(PostingRun).where(PostingRun.id == run_id).values(
@@ -2227,16 +2232,19 @@ async def _run_posting_async(run_id: int) -> dict:
     async with WriteSession() as s:
         # привести счётчики к фактическим терминальным статусам (убрать раздув ретраями)
         await _reconcile_run_counters(s, run_id)
-        # Полностью провалившийся ран (0 posted + были failed) → FAILED, а не DONE:
-        # честный статус, и правка параметров/перезапуск снова доступны (Edit
-        # гейтится по статусу — на DONE его нет). Только для DONE; scheduled/
-        # needs_review/need_more_admins/cancelled и пр. не трогаем.
+        # Ран не доразместился полностью → честный статус, не «done». Только для
+        # DONE (scheduled/needs_review/need_more_admins/cancelled не трогаем):
+        #   0 posted + были failed   → FAILED (полный провал);
+        #   part posted + были failed → NEED_MORE_ADMINS (обычно кончились доноры).
+        # Оба редактируемы + Restart/Retry, а не прячутся под зелёным «100% done».
         if final_status == PostingRunStatus.DONE:
             _cnt = (await s.execute(select(
                 PostingRun.posted_count, PostingRun.failed_count,
             ).where(PostingRun.id == run_id))).one()
-            if int(_cnt[0] or 0) == 0 and int(_cnt[1] or 0) > 0:
-                final_status = PostingRunStatus.FAILED
+            _posted, _failed = int(_cnt[0] or 0), int(_cnt[1] or 0)
+            if _failed > 0:
+                final_status = (PostingRunStatus.FAILED if _posted == 0
+                                else PostingRunStatus.NEED_MORE_ADMINS)
         # drip-feed re-arm: run не закончен — спит до следующей порции (scheduled),
         # finished_at не ставим, прописываем scheduled_for=rearm_at (cron поднимет).
         if final_status == PostingRunStatus.SCHEDULED:
