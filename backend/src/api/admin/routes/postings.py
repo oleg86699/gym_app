@@ -24,7 +24,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -1580,7 +1580,12 @@ async def validate_links_endpoint(
         select(func.count(TextItem.id)).where(
             TextItem.posting_run_id == run_id,
             TextItem.status == TextItemStatus.POSTED.value,
-            TextItem.link_verified.is_(True),
+            # Признак «уже размещённой verified-ссылки»: у пост-ранов это
+            # link_verified=True; у link-ранов (homepage/sitewide) verify идёт при
+            # размещении и пишется в placed_via/verified_at (link_verified не
+            # трогается) — поэтому для них признак = placed_via IS NOT NULL. Без
+            # этой ветки check-links находил 0 айтемов на всех link-ранах.
+            or_(TextItem.link_verified.is_(True), TextItem.placed_via.isnot(None)),
             TextItem.posted_url.isnot(None),
             TextItem.target_domain.isnot(None),
         )
@@ -1744,10 +1749,13 @@ async def update_run_endpoint(
     }
     deep_sent = deep_fields & sent
     if deep_sent:
-        # Правка параметров разрешена: до старта (READY/SCHEDULED) И в
-        # «остановленных, но перезапускаемых» статусах — чтобы можно было
-        # расширить пул (TLD/язык/теги) и т.п., затем Restart. Активный постинг
-        # (running/queued/unpacking/paused) и завершённые (done) не трогаем.
+        # Правка параметров разрешена: до старта (READY/SCHEDULED), в
+        # «остановленных, но перезапускаемых» статусах И в завершённых (DONE) —
+        # чтобы можно было расширить пул (TLD/язык/теги)/сменить прокси и т.п.,
+        # затем Restart/Retry (напр. link-ран с all-failed уходит в DONE, и его
+        # надо было доработать параметрами и перезапустить). Изменения вступают
+        # в силу на следующем старте, так что для DONE это безопасно. Активный
+        # постинг (running/queued/unpacking/paused) не трогаем — воркер в полёте.
         _EDITABLE_STATUSES = {
             PostingRunStatus.READY.value,
             PostingRunStatus.SCHEDULED.value,
@@ -1755,12 +1763,13 @@ async def update_run_endpoint(
             PostingRunStatus.INTERRUPTED.value,
             PostingRunStatus.CANCELLED.value,
             PostingRunStatus.FAILED.value,
+            PostingRunStatus.DONE.value,
         }
         if run.status not in _EDITABLE_STATUSES:
             raise HTTPException(
                 status_code=409,
-                detail="Параметры можно менять до старта или в остановленной задаче "
-                       "(READY / SCHEDULED / NEED_MORE_ADMINS / INTERRUPTED / CANCELLED / FAILED)",
+                detail="Параметры можно менять до старта, в остановленной или "
+                       "завершённой задаче (не в активном постинге)",
             )
         for f in ("priority", "spread_days", "posting_method", "post_verify",
                   "proxy_selector", "publish_from", "publish_to", "pool_fallback"):

@@ -890,7 +890,7 @@
   // (расширить пул/окно и нажать Restart). Согласовано с бэкендом.
   let canEditParams = $derived(
     !!run &&
-      ['ready', 'scheduled', 'need_more_admins', 'interrupted', 'cancelled', 'failed'].includes(
+      ['ready', 'scheduled', 'need_more_admins', 'interrupted', 'cancelled', 'failed', 'done'].includes(
         run.status,
       ),
   )

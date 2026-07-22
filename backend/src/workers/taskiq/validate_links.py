@@ -20,7 +20,7 @@ import random
 from datetime import UTC, datetime
 
 import structlog
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 
 from core.db import WriteSession
 from core.taskiq_app import broker
@@ -46,7 +46,10 @@ async def _load_targets(run_id: int) -> list[tuple[int, str, str]]:
             .where(
                 TextItem.posting_run_id == run_id,
                 TextItem.status == TextItemStatus.POSTED.value,
-                TextItem.link_verified.is_(True),
+                # пост-раны: link_verified=True; link-раны (homepage/sitewide):
+                # verify при размещении → placed_via/verified_at (link_verified не
+                # ставится) → для них признак = placed_via IS NOT NULL.
+                or_(TextItem.link_verified.is_(True), TextItem.placed_via.isnot(None)),
                 TextItem.posted_url.isnot(None),
                 TextItem.target_domain.isnot(None),
             )
