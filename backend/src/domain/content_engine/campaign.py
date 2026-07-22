@@ -922,16 +922,39 @@ async def generate_run_items(run_id: int, *, finalize: bool = False) -> dict:
             _g_by_orig = {g.get("original_item_id"): g for g in groups}
             todo = [_g_by_orig[oid] for oid in ordered_origs if oid in _g_by_orig]
             await _gen_progress(run_id, done=0, total=len(todo))
+            # Параллельно: до content_gen_concurrency ГРУПП одновременно. Каждая
+            # группа независима (свой оригинал+fanout, свои сессии, свои text/items),
+            # а gen_limiter держит глобальный потолок LLM-вызовов. Раньше здесь был
+            # последовательный `for` → эффективная конкуренция ≈1 (gen_slots=1) и весь
+            # drip-стрим упирался в ~1 вызов за раз (узкое место темпа). Порядок
+            # not_before ASC (просрочка первой) сохраняется: gather стартует корутины
+            # в порядке todo, sem держит окно ширины conc.
+            conc = await _gen_concurrency()
+            sem = asyncio.Semaphore(conc)
             done = 0
-            for g in todo:
-                if await _stop():
-                    break
-                if await _gen_group_original(g, gp):
-                    async with WriteSession() as s:  # атомарно финализируем группу
-                        await _fanout_one_group(s, g, spin_model)
-                        await s.commit()
-                done += 1
-                await _gen_progress(run_id, done=done)
+            stopped = False
+
+            async def _gen_group(g: dict) -> None:
+                nonlocal done, stopped
+                async with sem:
+                    if stopped:
+                        return
+                    try:
+                        if await _gen_group_original(g, gp):
+                            async with WriteSession() as s:  # атомарно финализируем группу
+                                await _fanout_one_group(s, g, spin_model)
+                                await s.commit()
+                    except Exception as e:  # одна группа не валит весь стрим
+                        log.warning("content_engine.stream_gen.group_failed",
+                                    run_id=run_id, error=str(e))
+                    done += 1
+                    if done % conc == 0 or done >= len(todo):
+                        await _gen_progress(run_id, done=done)
+                        if await _stop():
+                            stopped = True
+
+            await asyncio.gather(*(_gen_group(g) for g in todo))
+            await _gen_progress(run_id, done=done)
             log.info("content_engine.stream_gen.done", run_id=run_id, groups=done)
             return {"ok": True, "generated": done}
 
