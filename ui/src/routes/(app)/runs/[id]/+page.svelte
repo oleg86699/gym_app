@@ -41,6 +41,10 @@
 
   // 'in_progress' — виртуальный фильтр карточки Pending (pending + posting in-flight)
   let filterStatus = $state<TextItemStatus | 'all' | 'in_progress'>('all')
+  // График по дням (drip): день-агрегат + выбранный день-фильтр (клик по столбцу).
+  type DayStat = { day: string; total: number; posted: number; pending: number; failed: number; generated: number }
+  let dayStats = $state<DayStat[]>([])
+  let dayFilter = $state<string | null>(null)
   let busyAction = $state<'pause' | 'resume' | 'cancel' | 'retry' | 'delete' | null>(null)
 
   // ─── Inline-edit max_posts_per_site (лимит повторов сайта в задаче) ──
@@ -296,7 +300,7 @@
       let more = false
       let last: string | null = null
       for (let p = 0; p < loadedPages; p++) {
-        const res = await postingsApi.textItems(runId, { limit: PER_PAGE, status: statusParam, cursor })
+        const res = await postingsApi.textItems(runId, { limit: PER_PAGE, status: statusParam, cursor, day: dayFilter ?? undefined })
         if (token !== itemsReqToken) return  // пришёл устаревший ответ — игнорируем
         acc.push(...res.items)
         more = res.has_more
@@ -317,7 +321,7 @@
     loadingMore = true
     const token = itemsReqToken
     try {
-      const res = await postingsApi.textItems(runId, { limit: PER_PAGE, status: currentStatusParam(), cursor: nextCursor })
+      const res = await postingsApi.textItems(runId, { limit: PER_PAGE, status: currentStatusParam(), cursor: nextCursor, day: dayFilter ?? undefined })
       if (token !== itemsReqToken) return  // пока грузили — был реролл, игнорируем
       items = [...items, ...res.items]
       nextCursor = res.next_cursor
@@ -405,7 +409,7 @@
 
   async function refresh(initial = false) {
     if (initial) loading = true
-    await Promise.all([loadRun(), loadProgress(), loadItems(), loadNrDomains(), loadMissingDomains()])
+    await Promise.all([loadRun(), loadProgress(), loadItems(), loadNrDomains(), loadMissingDomains(), loadDayStats()])
     if (initial) loading = false
   }
 
@@ -566,6 +570,7 @@
       refresh(false)
     } else {
       loadProgress()
+      loadDayStats()  // график по дням — live во время активного рана
       // Фаза генерации/расшивки (UNPACKING): SSE не шлёт смену статусов айтемов —
       // подтягиваем строки, чтобы было видно построчное наполнение текстов/спинов.
       if (run.status === 'unpacking') loadItems()
@@ -640,6 +645,23 @@
     nextCursor = null
     hasMore = false
     loadItems()
+  }
+
+  // Клик по столбцу графика по дням → серверный фильтр таблицы на этот день
+  // (повторный клик — сброс). Сбрасываем пагинацию, как в changeStatusFilter.
+  function changeDayFilter(day: string | null) {
+    dayFilter = dayFilter === day ? null : day
+    loadedPages = 1
+    nextCursor = null
+    hasMore = false
+    loadItems()
+  }
+  async function loadDayStats() {
+    try {
+      dayStats = (await postingsApi.dayStats(runId)).days
+    } catch {
+      dayStats = []
+    }
   }
 
   // ─── Сортировка колонок таблицы текстов ──
@@ -1366,6 +1388,47 @@
             <div class="text-[11px] uppercase tracking-wider text-slate-500">Ссылки живы</div>
           </button>
         {/if}
+      </div>
+    </div>
+  {/if}
+
+  <!-- График по дням (drip): столбец на день, клик — фильтр таблицы на этот день -->
+  {#if dayStats.length > 0}
+    <div class="mb-4 rounded-lg border border-slate-200 bg-white p-3">
+      <div class="mb-2 flex items-center justify-between">
+        <h3 class="text-sm font-medium text-slate-700">По дням · размазка на {dayStats.length} дн.</h3>
+        {#if dayFilter}
+          <button type="button" onclick={() => changeDayFilter(null)}
+                  class="text-[11px] text-brand-600 hover:underline">сбросить фильтр дня ({dayFilter.slice(5)})</button>
+        {/if}
+      </div>
+      <div class="flex flex-wrap gap-2">
+        {#each dayStats as d (d.day)}
+          {@const isToday = d.day === new Date().toISOString().slice(0, 10)}
+          {@const isActive = dayFilter === d.day}
+          {@const postedW = d.total ? (d.posted / d.total) * 100 : 0}
+          {@const failedW = d.total ? (d.failed / d.total) * 100 : 0}
+          {@const pendingW = Math.max(0, 100 - postedW - failedW)}
+          <button type="button" onclick={() => changeDayFilter(d.day)}
+                  class="min-w-[92px] flex-1 rounded-md border p-2 text-left transition hover:bg-slate-50"
+                  class:border-brand-400={isActive}
+                  class:bg-brand-50={isActive}
+                  class:border-slate-200={!isActive}
+                  title={`${d.day} · размещено ${d.posted}/${d.total} · fail ${d.failed} · сгенерировано ${d.generated}`}>
+            <div class="flex items-center justify-between text-[11px]">
+              <span class="font-medium text-slate-700">{d.day.slice(5)}</span>
+              {#if isToday}<span class="rounded bg-emerald-100 px-1 text-[9px] font-medium text-emerald-700">сегодня</span>{/if}
+            </div>
+            <div class="mt-1 flex h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
+              <div class="h-full bg-emerald-500" style="width:{postedW}%"></div>
+              <div class="h-full bg-red-500" style="width:{failedW}%"></div>
+              <div class="h-full bg-slate-300" style="width:{pendingW}%"></div>
+            </div>
+            <div class="mt-1 text-[11px] text-slate-500">
+              <span class="font-semibold text-emerald-600">{d.posted}</span>/{d.total}
+            </div>
+          </button>
+        {/each}
       </div>
     </div>
   {/if}

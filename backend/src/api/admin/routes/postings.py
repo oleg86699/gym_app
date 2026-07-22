@@ -10,6 +10,7 @@ import zipfile
 import json
 import uuid
 from collections.abc import AsyncIterator
+from datetime import date
 
 import structlog
 from fastapi import (
@@ -70,6 +71,7 @@ from domain.postings.service import (
     request_resume,
     restore_run,
     retry_failed_items,
+    run_day_stats,
     run_progress_counts,
     soft_delete_run,
 )
@@ -1442,13 +1444,15 @@ async def list_run_text_items(
     cursor: str | None = Query(default=None),
     limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
     status_filter: str | None = Query(default=None, alias="status"),
+    day: date | None = Query(default=None),
     viewer: AdminUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_read),
 ) -> PaginatedResponse[TextItemResponse]:
     await _load_run_or_403(session, run_id, viewer)
     after = _decode_cursor(cursor)
     rows = await list_text_items_for_run(
-        session, run_id=run_id, status=status_filter, after_id=after, limit=limit
+        session, run_id=run_id, status=status_filter, after_id=after, limit=limit,
+        day=day,
     )
     has_more = len(rows) > limit
     if has_more:
@@ -1459,6 +1463,18 @@ async def list_run_text_items(
     return PaginatedResponse[TextItemResponse](
         items=items, next_cursor=next_cursor, has_more=has_more
     )
+
+
+@postings_router.get("/{run_id}/day-stats")
+async def run_day_stats_endpoint(
+    run_id: int,
+    viewer: AdminUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_read),
+) -> dict:
+    """Агрегат айтемов рана по дням drip-размазки (для графика по дням в UI).
+    Пусто, если not_before нигде не проставлен (не drip)."""
+    await _load_run_or_403(session, run_id, viewer)
+    return {"days": await run_day_stats(session, run_id)}
 
 
 # ─── Run control actions ────────────────────────────────────────────

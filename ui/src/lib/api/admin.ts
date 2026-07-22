@@ -692,12 +692,23 @@ export const postings = {
     ),
   textItems: (
     runId: number,
-    query?: { cursor?: string; limit?: number; status?: string },
+    query?: { cursor?: string; limit?: number; status?: string; day?: string },
   ) =>
     api.get<Paginated<TextItem>>(
       `/admin/api/postings/${runId}/text-items`,
       query as Record<string, string | number | undefined>,
     ),
+  dayStats: (runId: number) =>
+    api.get<{
+      days: Array<{
+        day: string
+        total: number
+        posted: number
+        pending: number
+        failed: number
+        generated: number
+      }>
+    }>(`/admin/api/postings/${runId}/day-stats`),
   deleteTextItem: (runId: number, itemId: number) =>
     api.post<{ ok: boolean; deleted_status: string; run_status: string | null }>(
       `/admin/api/postings/${runId}/text-items/${itemId}/delete`,

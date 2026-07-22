@@ -307,9 +307,11 @@ async def list_text_items_for_run(
     status: str | None = None,
     after_id: int | None = None,
     limit: int = 50,
+    day: "date | None" = None,
 ) -> list[TextItem]:
     """Список text_items с подгруженными site/credential для UI таблицы.
-    Айтемы с текстом — вверху (см. _ITEM_SORT_KEY). `after_id` тут = sort_key-курсор."""
+    Айтемы с текстом — вверху (см. _ITEM_SORT_KEY). `after_id` тут = sort_key-курсор.
+    `day` — фильтр по дню drip-размазки (date(not_before) == day)."""
     stmt = (
         select(TextItem)
         .where(TextItem.posting_run_id == run_id)
@@ -320,6 +322,8 @@ async def list_text_items_for_run(
         .order_by(_ITEM_SORT_KEY)
         .limit(limit + 1)
     )
+    if day is not None:
+        stmt = stmt.where(func.date(TextItem.not_before) == day)
     if status:
         # поддержка нескольких статусов через запятую («in-progress» = pending,posting)
         statuses = [s for s in status.split(",") if s]
@@ -328,6 +332,37 @@ async def list_text_items_for_run(
     if after_id:
         stmt = stmt.where(_ITEM_SORT_KEY > after_id)
     return list((await session.execute(stmt)).scalars().all())
+
+
+async def run_day_stats(session: AsyncSession, run_id: int) -> list[dict]:
+    """Агрегат айтемов рана по дням drip-размазки (date(not_before)):
+    [{day, total, posted, pending, failed, generated}], по возрастанию дня. Для
+    графика по дням в UI (только у drip-ранов — где not_before проставлен)."""
+    day_col = func.date(TextItem.not_before)
+    rows = (await session.execute(
+        select(
+            day_col.label("day"),
+            func.count().label("total"),
+            func.count().filter(
+                TextItem.status == TextItemStatus.POSTED.value).label("posted"),
+            func.count().filter(
+                TextItem.status == TextItemStatus.FAILED.value).label("failed"),
+            func.count().filter(TextItem.status.in_((
+                TextItemStatus.PENDING.value, TextItemStatus.POSTING.value,
+            ))).label("pending"),
+            func.count().filter(
+                TextItem.text_id.isnot(None)).label("generated"),
+        ).where(
+            TextItem.posting_run_id == run_id,
+            TextItem.not_before.isnot(None),
+        ).group_by(day_col).order_by(day_col)
+    )).all()
+    return [
+        {"day": r.day.isoformat(), "total": int(r.total), "posted": int(r.posted),
+         "failed": int(r.failed), "pending": int(r.pending),
+         "generated": int(r.generated)}
+        for r in rows
+    ]
 
 
 async def get_text_item(session: AsyncSession, item_id: int) -> TextItem | None:
