@@ -695,7 +695,7 @@
 
   // Контент-фильтр (только gen-задачи, клиентский по загруженным): по наличию
   // текста и спинам. Спин-айтемы помечены original_filename='(спин)'.
-  let contentFilter = $state<'all' | 'with_text' | 'no_text' | 'spin'>('all')
+  let contentFilter = $state<'all' | 'with_text' | 'no_text' | 'spin' | 'links_live'>('all')
   function isSpin(it: TextItem): boolean {
     return it.original_filename === '(спин)'
   }
@@ -704,6 +704,7 @@
     return sortedItems.filter((it) =>
       contentFilter === 'with_text' ? it.text_id != null
       : contentFilter === 'no_text' ? it.text_id == null
+      : contentFilter === 'links_live' ? it.link_verified === true
       : isSpin(it))
   })
 
@@ -1334,13 +1335,18 @@
         {/snippet}
         {@render statCard('all', progress.total, 'Total', 'text-slate-900')}
         {#if isGenRun}
-          <div class="min-w-[130px] flex-1 rounded-lg border border-orange-200 bg-orange-50/40 p-2"
-               title="Сгенерировано текстов из общего числа (нужна только для gen-задач)">
+          <button type="button"
+                  onclick={() => (contentFilter = contentFilter === 'with_text' ? 'all' : 'with_text')}
+                  class="min-w-[130px] flex-1 rounded-lg border p-2 text-center transition hover:bg-orange-50"
+                  class:border-orange-400={contentFilter === 'with_text'}
+                  class:bg-orange-50={contentFilter === 'with_text'}
+                  class:border-orange-200={contentFilter !== 'with_text'}
+                  title="Сгенерировано текстов. Клик — показать сгенерированные (с текстом).">
             <div class="text-2xl font-semibold text-orange-600">{progress.generated}</div>
             <div class="text-[11px] uppercase tracking-wider text-slate-500">
               Генерация{#if progress.total} · <span class="normal-case text-slate-400">{genPct}%</span>{/if}
             </div>
-          </div>
+          </button>
         {/if}
         {@render statCard('posted', progress.posted, 'Posted', 'text-emerald-600', progress.total ? `${postedPct}%` : '')}
         {@render statCard('failed', progress.failed, 'Failed', 'text-red-600', progress.total ? `${failedPct}%` : '')}
@@ -1349,11 +1355,16 @@
         {/if}
         {@render statCard('in_progress', progress.pending + progress.posting, 'Pending', 'text-brand-700', progress.posting > 0 ? `${progress.posting} in-flight` : '')}
         {#if (run.link_check_total ?? 0) > 0}
-          <div class="min-w-[130px] flex-1 rounded-lg border border-violet-200 bg-violet-50/40 p-2"
-               title={run.link_check_at ? `Проверка ссылок: ${new Date(run.link_check_at).toLocaleString()}` : 'Проверка ссылок'}>
+          <button type="button"
+                  onclick={() => (contentFilter = contentFilter === 'links_live' ? 'all' : 'links_live')}
+                  class="min-w-[130px] flex-1 rounded-lg border p-2 text-center transition hover:bg-violet-50"
+                  class:border-violet-400={contentFilter === 'links_live'}
+                  class:bg-violet-50={contentFilter === 'links_live'}
+                  class:border-violet-200={contentFilter !== 'links_live'}
+                  title={run.link_check_at ? `Проверка ссылок: ${new Date(run.link_check_at).toLocaleString()}. Клик — показать живые ссылки.` : 'Клик — показать живые ссылки'}>
             <div class="text-2xl font-semibold text-violet-700">{run.link_check_valid}<span class="text-base text-slate-400">/{run.link_check_total}</span></div>
             <div class="text-[11px] uppercase tracking-wider text-slate-500">Ссылки живы</div>
-          </div>
+          </button>
         {/if}
       </div>
     </div>
