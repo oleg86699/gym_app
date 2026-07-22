@@ -22,6 +22,7 @@ Celery task для самого постинга прогона.
 from __future__ import annotations
 
 import asyncio
+import os
 import random
 import time
 from collections import defaultdict
@@ -132,6 +133,12 @@ HEARTBEAT_INTERVAL_S = 10       # как часто пишем worker_heartbeat_
 # (inflight не дренился), а heartbeat жил → recover_stalled_runs не вмешивался.
 ITEM_TIMEOUT_S = 900.0          # 15 мин — жёсткий потолок обработки айтема
 _MAX_ITEM_TIMEOUTS = 3
+# Потолок ПОПЫТОК размещения на один айтем (ретрай-возвраты в pending). Айтем,
+# которому стабильно некуда встать (пул домена выжат / сайты не верифаятся, а
+# «перепост до подтверждения» гоняет по кругу), иначе крутится тысячами попыток
+# (run 180: fivebet-айтем — 2527 attempts) и монополизирует окно. После потолка →
+# FAILED (восстановимо через Retry failed, когда появятся сайты/доступы).
+_MAX_ITEM_ATTEMPTS = int(os.getenv("MAX_ITEM_ATTEMPTS", "40"))
 CONTROL_POLL_INTERVAL_S = 5     # как часто проверяем pause/cancel
 PAUSE_SLEEP_S = 5               # пауза между пере-проверками pause_requested
 MAX_CREDS_PER_SITE = 5          # сколько credential перебираем на одном site
@@ -208,7 +215,14 @@ async def _pick_pending_batch(
     pick = (
         select(TextItem.id)
         .where(*conds)
-        .order_by(TextItem.id)
+        # attempts ASC, id ASC — свежие (ни разу не пробованные) айтемы вперёд,
+        # многократно-провальные в конец. Иначе застрявший хвост одного домена
+        # (низкие id, но attempts в тысячи — сайты не верифаятся, «перепост до
+        # подтверждения» гоняет их назад в pending) монополизирует окно постинга
+        # по строгому FIFO и НАВСЕГДА блокирует остальные домены задачи (у которых
+        # attempts=0 и полно свежих сайтов). Побочно даёт fair-share: айтемы всех
+        # доменов набирают attempts синхронно, ни один не убегает вперёд.
+        .order_by(TextItem.attempts, TextItem.id)
         .limit(limit)
         .with_for_update(skip_locked=True)
     )
@@ -649,12 +663,25 @@ async def _mark_text_failed(
 
 
 async def _release_text_back_to_pending(
-    session: AsyncSession, *, item_id: int, error_message: str | None = None
+    session: AsyncSession, *, item_id: int, error_message: str | None = None,
+    cap: bool = True,
 ) -> None:
-    """Вернуть text_item в pending (например, не нашли свободный сайт)."""
+    """Вернуть text_item в pending (например, не нашли свободный сайт).
+
+    cap=True (ретрай-путь): после _MAX_ITEM_ATTEMPTS попыток НЕ возвращаем в
+    pending, а помечаем FAILED — иначе айтем, которому стабильно некуда встать
+    (пул выжат / сайты не верифаятся), крутится тысячами попыток и монополизирует
+    окно постинга. FAILED восстановимо через Retry failed. cap=False — служебная
+    парковка (pause/cancel), НЕ считаем за провал."""
+    new_attempts = int(await session.scalar(
+        select(TextItem.attempts).where(TextItem.id == item_id)) or 0) + 1
+    terminal = cap and new_attempts >= _MAX_ITEM_ATTEMPTS
+    if terminal and not error_message:
+        error_message = f"no placeable site after {new_attempts} attempts"
     values: dict = {
-        "status": TextItemStatus.PENDING.value,
-        "attempts": TextItem.attempts + 1,
+        "status": (TextItemStatus.FAILED.value if terminal
+                   else TextItemStatus.PENDING.value),
+        "attempts": new_attempts,
     }
     if error_message:
         values["last_error"] = error_message[:1000]
@@ -1252,7 +1279,9 @@ async def _post_one_item(
                     _paused, _cancelled = await _read_control_flags(run.id)
                     if _paused or _cancelled:
                         async with WriteSession() as s:
-                            await _release_text_back_to_pending(s, item_id=item.id)
+                            # служебная парковка — не считаем за провальную попытку
+                            await _release_text_back_to_pending(
+                                s, item_id=item.id, cap=False)
                         return
                 if registry.is_exhausted(site.id):
                     tried_sites.add(site.id)
