@@ -40,6 +40,11 @@ log = structlog.get_logger(__name__)
 # Абсолютный жёсткий потолок одновременных LLM-вызовов (защита от кривой настройки).
 # Реальная конц*  берётся из AppSettings.content_gen_concurrency (рантайм-тюнинг).
 GEN_MAX_CONCURRENCY = int(os.getenv("GEN_MAX_CONCURRENCY", "50"))
+# Жёсткий per-item таймаут на генерацию (AI-вызов). Зависший запрос к модели без
+# своего таймаута иначе вешает _gen_one → gather ждёт вечно → генерация «встаёт»
+# (gen_active висит, ран не добирает тексты). При таймауте айтем остаётся
+# несгенерированным (text_id NULL) → перегенерится на следующем проходе.
+GEN_ITEM_TIMEOUT_S = float(os.getenv("GEN_ITEM_TIMEOUT_S", "180"))
 gen_limiter = RedisConcurrencyLimiter("generation", stale_ttl_s=300.0)
 
 # content_gen_concurrency читается на КАЖДЫЙ LLM-вызов (_gen) и на старте bulk —
@@ -948,8 +953,13 @@ async def generate_run_items(run_id: int, *, finalize: bool = False) -> dict:
                 if stopped:
                     return
                 try:
-                    await generate_item(iid, regenerate=False)
-                except Exception as e:  # один айтем не валит весь bulk
+                    # per-item таймаут: зависший AI-вызов отменяем, айтем остаётся
+                    # несгенерированным (text_id NULL) → перегенерится позже, а не
+                    # вешает весь gather → всю генерацию.
+                    await asyncio.wait_for(
+                        generate_item(iid, regenerate=False),
+                        timeout=GEN_ITEM_TIMEOUT_S)
+                except Exception as e:  # один айтем не валит весь bulk (вкл. TimeoutError)
                     log.warning("content_engine.bulk_gen.item_failed",
                                 item_id=iid, error=str(e))
                 done += 1

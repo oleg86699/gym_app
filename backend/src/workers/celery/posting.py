@@ -125,6 +125,13 @@ async def _effective_concurrency(*, global_limit: int, ceiling: int, floor: int)
 
 BATCH_SIZE = 50                 # сколько text_items берём за раз из PG
 HEARTBEAT_INTERVAL_S = 10       # как часто пишем worker_heartbeat_at
+# Жёсткий per-item таймаут на обработку одного айтема (постинг/линк). Если сетевой
+# вызов внутри завис без своего таймаута — обёртка отменяет его и ВОЗВРАЩАЕТ айтем
+# в pending (ретрай, не failed); после _MAX_ITEM_TIMEOUTS таймаутов → failed
+# (иначе вечный ретрай). Без этого один зависший айтем вешал весь стрим-цикл
+# (inflight не дренился), а heartbeat жил → recover_stalled_runs не вмешивался.
+ITEM_TIMEOUT_S = 900.0          # 15 мин — жёсткий потолок обработки айтема
+_MAX_ITEM_TIMEOUTS = 3
 CONTROL_POLL_INTERVAL_S = 5     # как часто проверяем pause/cancel
 PAUSE_SLEEP_S = 5               # пауза между пере-проверками pause_requested
 MAX_CREDS_PER_SITE = 5          # сколько credential перебираем на одном site
@@ -1094,6 +1101,39 @@ def _compute_post_date(publish_from, publish_to, now: datetime) -> datetime:
     return window_start + timedelta(seconds=random.uniform(0, span))
 
 
+async def _guard_item_timeout(item_id: int, run_id: int, coro) -> None:
+    """Обёртка per-item с жёстким таймаутом ITEM_TIMEOUT_S. Зависшую обработку
+    (сетевой вызов без своего таймаута) отменяем и ВОЗВРАЩАЕМ айтем в pending
+    (ретрай, не failed) с bump attempts; после _MAX_ITEM_TIMEOUTS таймаутов →
+    failed. Штатный результат/ошибку внутренняя корутина обрабатывает сама —
+    сюда попадаем только при реальном зависании. Cancellation-safe: reset идёт
+    в WHERE status='posting', так что если айтем УЖЕ дорезолвился (posted/failed)
+    на границе таймаута — reset no-op (нет двойного постинга)."""
+    try:
+        await asyncio.wait_for(coro, timeout=ITEM_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        async with WriteSession() as s:
+            attempts = int(await s.scalar(
+                select(TextItem.attempts).where(TextItem.id == item_id)) or 0) + 1
+            if attempts >= _MAX_ITEM_TIMEOUTS:
+                res = await s.execute(update(TextItem).where(
+                    TextItem.id == item_id,
+                    TextItem.status == TextItemStatus.POSTING.value,
+                ).values(status=TextItemStatus.FAILED.value, attempts=attempts,
+                         last_error=f"item timeout x{attempts} (>{int(ITEM_TIMEOUT_S)}s)"))
+                if res.rowcount:
+                    await _bump_run_counter(s, run_id, "failed_count")
+            else:
+                await s.execute(update(TextItem).where(
+                    TextItem.id == item_id,
+                    TextItem.status == TextItemStatus.POSTING.value,
+                ).values(status=TextItemStatus.PENDING.value, attempts=attempts,
+                         last_error=f"item timeout x{attempts}, requeued"))
+            await s.commit()
+        log.warning("posting.item.timeout", item_id=item_id, run_id=run_id,
+                    timeout_s=ITEM_TIMEOUT_S, attempts=attempts)
+
+
 async def _post_one_item(
     *,
     item: TextItem,
@@ -1646,9 +1686,33 @@ async def _run_link_async(run_id: int, concurrency: int) -> dict:
     async def _one(item_id: int):
         async with sem, posting_limiter.slot(limit=global_limit):
             try:
-                res = await process_link_item(
+                res = await asyncio.wait_for(process_link_item(
                     item_id, used_sites=used_sites, actor_id=None, proxy_urls=proxy_urls,
-                    transient_tries=transient_tries)
+                    transient_tries=transient_tries), timeout=ITEM_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                # Завис (перебор доноров упёрся в сетевой вызов без таймаута) →
+                # ВОЗВРАЩАЕМ в pending (ретрай, не failed), счётчик не трогаем;
+                # после _MAX_ITEM_TIMEOUTS таймаутов → failed (иначе вечный ретрай).
+                async with WriteSession() as s:
+                    attempts = int(await s.scalar(
+                        select(TextItem.attempts).where(TextItem.id == item_id)) or 0) + 1
+                    to_fail = attempts >= _MAX_ITEM_TIMEOUTS
+                    r = await s.execute(update(TextItem).where(
+                        TextItem.id == item_id,
+                        TextItem.status == TextItemStatus.POSTING.value,
+                    ).values(
+                        status=(TextItemStatus.FAILED.value if to_fail
+                                else TextItemStatus.PENDING.value),
+                        attempts=attempts,
+                        last_error=f"link item timeout x{attempts}"
+                                   + ("" if to_fail else ", requeued")))
+                    await s.commit()
+                log_ctx.warning("link.item.timeout", item_id=item_id,
+                                timeout_s=ITEM_TIMEOUT_S, attempts=attempts, failed=to_fail)
+                if to_fail and r.rowcount:
+                    async with WriteSession() as s:
+                        await _bump_run_counter(s, run_id, "failed_count")
+                return
             except Exception as e:
                 log_ctx.warning("link.item.exception", item_id=item_id, error=str(e))
                 res = {"status": "error"}
@@ -1985,13 +2049,14 @@ async def _run_posting_async(run_id: int) -> dict:
                                 need_more_admins = True
                         else:
                             for item in batch:
-                                t = asyncio.create_task(_post_one_item(
-                                    item=item, run=run, poster=poster,
-                                    client_pool=client_pool, registry=registry,
-                                    semaphore=semaphore, global_limit=global_limit,
-                                    site_disable=site_disable,
-                                    creator_allowed_tags=creator_tags,
-                                ))
+                                t = asyncio.create_task(_guard_item_timeout(
+                                    item.id, run.id, _post_one_item(
+                                        item=item, run=run, poster=poster,
+                                        client_pool=client_pool, registry=registry,
+                                        semaphore=semaphore, global_limit=global_limit,
+                                        site_disable=site_disable,
+                                        creator_allowed_tags=creator_tags,
+                                    )))
                                 inflight.add(t)
 
                 # Ничего в полёте — разбираемся с финальным состоянием.
