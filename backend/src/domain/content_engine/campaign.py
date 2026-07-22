@@ -908,16 +908,17 @@ async def generate_run_items(run_id: int, *, finalize: bool = False) -> dict:
         if mode == "gen_per_row" and finalize:
             async with WriteSession() as s:
                 spin_model = await pick_model(s, purpose="spin")
-            horizon = datetime.now(UTC) + _STREAM_GEN_HORIZON
             async with WriteSession() as s:
-                # ORDER BY not_before ASC: сначала самые «просроченные» (бэклог
-                # прошлых дней), потом ближайшие. Иначе генерация гонит будущее, а
-                # вчерашний недобор висит несгенерённым и постить нечего.
+                # Генерируем ВСЕ несгенерированные СРАЗУ (drip НЕ гейтим горизонтом):
+                # тексты готовятся наперёд → постинг «капает» их по дням, никогда не
+                # упираясь в «нечего постить» и не паркуясь с несгенерированным
+                # созревшим бэклогом. ORDER BY not_before ASC — просроченное первым
+                # (на случай, если генерация всё же отстаёт — сначала догоняем
+                # прошлые дни). gen_active держится True всю генерацию → постинг
+                # ждёт, а не паркуется.
                 ordered_origs = (await s.execute(select(TextItem.id).where(
                     TextItem.posting_run_id == run_id, TextItem.text_id.is_(None),
-                    TextItem.status == TextItemStatus.PENDING.value,
-                    or_(TextItem.not_before.is_(None),  # drip: только «созревшие» оригиналы
-                        TextItem.not_before <= horizon))
+                    TextItem.status == TextItemStatus.PENDING.value)
                     .order_by(TextItem.not_before.asc().nulls_first()))).scalars().all()
             _g_by_orig = {g.get("original_item_id"): g for g in groups}
             todo = [_g_by_orig[oid] for oid in ordered_origs if oid in _g_by_orig]
@@ -939,9 +940,9 @@ async def generate_run_items(run_id: int, *, finalize: bool = False) -> dict:
         async with WriteSession() as s:
             conds = [TextItem.posting_run_id == run_id, TextItem.text_id.is_(None),
                      TextItem.status == TextItemStatus.PENDING.value]
-            if finalize:  # стриминг (auto): только «созревшие» в горизонте (drip-генерация)
-                horizon = datetime.now(UTC) + _STREAM_GEN_HORIZON
-                conds.append(or_(TextItem.not_before.is_(None), TextItem.not_before <= horizon))
+            # Стриминг/drip: генерируем ВСЕ несгенерированные сразу (без горизонта) —
+            # тексты готовятся наперёд, постинг капает по дням. (Раньше finalize
+            # гейтил горизонтом → бэклог и парковка посреди дня.)
             # ORDER BY not_before ASC — просроченный бэклог генерим первым.
             empty_ids_ordered = list((await s.execute(select(TextItem.id).where(*conds)
                 .order_by(TextItem.not_before.asc().nulls_first()))).scalars().all())
