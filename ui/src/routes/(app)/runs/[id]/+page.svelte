@@ -764,6 +764,11 @@
 
   // ─── Пер-айтем действия (generate/regenerate/post/repost) ──────────
   const isGenRun = $derived(run?.content_source === 'csv_campaign')
+  // Прогонялась ли кнопка «Проверить ссылки». Пост-раны ставят link_verified ещё
+  // при постинге, поэтому «свежесть» подтверждения по item не отличить — сигнал
+  // берём на уровне рана. Если да → подтверждённые подсвечиваем цветом кнопки
+  // (violet «на странице»), иначе — зелёным «link ✓» (проверка при постинге).
+  const linkChecked = $derived((run?.link_check_total ?? 0) > 0)
   let itemBusy = $state<number | null>(null)
 
   // Поллим конкретный айтем, пока он не «осядет»: для генерации — пока не уйдёт
@@ -1603,9 +1608,10 @@
                   </span>
                   {#if !isLinkRun && item.status === 'posted' && item.link_verified != null}
                     {#if item.link_verified}
-                      <span class="ml-1 font-semibold text-emerald-600" title="Ссылка подтверждена на странице поста">✓</span>
+                      <span class="ml-1 font-semibold {linkChecked ? 'text-violet-700' : 'text-emerald-600'}"
+                            title={linkChecked ? 'Проверка ссылок: бэклинк на странице' : 'Ссылка подтверждена при постинге'}>✓</span>
                     {:else}
-                      <span class="ml-1 font-semibold text-red-500" title="Ссылка НЕ найдена на странице поста">✗</span>
+                      <span class="ml-1 font-semibold text-red-500" title="Бэклинк НЕ найден на странице поста">✗</span>
                     {/if}
                   {/if}
                 </td>
@@ -1639,8 +1645,19 @@
                        class="break-all text-brand-600 hover:underline">{prettyUrl(item.posted_url)}</a>
                     <div class="mt-0.5 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
                       {#if item.post_id}<span>post_id: {item.post_id}</span>{/if}
-                      {#if item.link_verified === true}<span class="text-emerald-600" title="Ссылка подтверждена на странице">link ✓</span>
-                      {:else if item.link_verified === false}<span class="text-red-500" title="Ссылка не найдена на странице">link ✗</span>{/if}
+                      {#if item.link_verified === true}
+                        {#if linkChecked}
+                          <span class="font-medium text-violet-700" title="Проверка ссылок подтвердила: бэклинк на странице">✓ на странице</span>
+                        {:else}
+                          <span class="text-emerald-600" title="Ссылка подтверждена при постинге (проверь актуальность кнопкой «Проверить ссылки»)">link ✓</span>
+                        {/if}
+                      {:else if item.link_verified === false}
+                        {#if linkChecked}
+                          <span class="font-medium text-red-500" title="Проверка ссылок: бэклинка НЕТ на странице">✗ снята</span>
+                        {:else}
+                          <span class="text-red-500" title="Ссылка не найдена на странице">link ✗</span>
+                        {/if}
+                      {/if}
                     </div>
                   {:else if item.last_error}
                     <span class="text-red-600" title={item.last_error}>{item.last_error.slice(0, 120)}</span>
