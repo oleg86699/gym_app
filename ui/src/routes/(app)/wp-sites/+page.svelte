@@ -776,12 +776,16 @@
     </button>
 
     <button type="button" onclick={() => pickFilter('usable')}
-            title="Готовы к постингу: домен жив + есть рабочий cred"
+            title="Usable = логин валиден (домен жив + ≥1 valid cred). НО постить можно только там, где подтверждён канал (XML-RPC или wp-admin) — это «postable». Валидный вход ≠ постинг."
             class="rounded-lg border border-emerald-200 bg-emerald-50/50 p-4 text-left transition hover:bg-emerald-50 {filterStatus === 'usable' || filterStatus === 'cred_valid' ? 'ring-2 ring-emerald-400' : ''}">
-      <div class="text-xs uppercase tracking-wider text-emerald-700">Usable</div>
+      <div class="text-xs uppercase tracking-wider text-emerald-700">Usable <span class="font-normal text-slate-400">(логин)</span></div>
       <div class="mt-1 flex items-baseline gap-2">
         <span class="text-2xl font-semibold text-emerald-700">{summary.sites_usable ?? 0}</span>
         <span class="text-xs text-slate-500">sites · <span class="font-medium text-emerald-600">{summary.credentials_valid}</span> creds</span>
+      </div>
+      <div class="mt-0.5 text-[11px] text-slate-500">
+        <span class="font-semibold text-emerald-700">{summary.sites_postable ?? 0}</span> postable
+        <span class="text-slate-400">· подтверждён канал постинга</span>
       </div>
     </button>
 

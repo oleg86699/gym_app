@@ -192,7 +192,8 @@ class SiteAnalyticsResponse(BaseModel):
 class PoolSummaryResponse(BaseModel):
     sites_total: int
     sites_active: int        # legacy: domain alive only
-    sites_usable: int = 0    # is_active + есть ≥1 valid cred (постить можно)
+    sites_usable: int = 0    # is_active + есть ≥1 valid cred (ЛОГИН удался)
+    sites_postable: int = 0  # из usable — где ПОДТВЕРЖДЁН канал (xmlrpc/admin) = реально постить
     sites_unusable: int = 0  # domain off ИЛИ все cred invalid (постить нельзя)
     credentials_valid_rpc: int = 0    # valid через XML-RPC (Tier 1)
     credentials_valid_admin: int = 0  # valid через admin login (Tier 2)

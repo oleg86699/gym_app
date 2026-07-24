@@ -697,6 +697,23 @@ async def pool_summary(session: AsyncSession) -> dict[str, int]:
             valid_cred_exists,
         )
     )).scalar_one()
+    # POSTABLE = из usable, но с ПОДТВЕРЖДЁННЫМ каналом (тот же предикат, что берёт
+    # _pick_candidate_sites). Валидный логин без канала (xmlrpc off + admin не
+    # подтверждён) постить не может — не путаем пользователя.
+    postable_cred_exists = exists().where(
+        WpCredential.site_id == WpSite.id,
+        WpCredential.deleted_at.is_(None),
+        WpCredential.cred_status == "valid",
+        or_(WpCredential.can_post_via_xmlrpc.is_(True),
+            WpCredential.can_post_via_admin.is_(True)),
+    )
+    sites_postable = (await session.execute(
+        select(func.count(WpSite.id)).where(
+            WpSite.deleted_at.is_(None),
+            WpSite.is_active.is_(True),
+            postable_cred_exists,
+        )
+    )).scalar_one()
     sites_unusable = (await session.execute(
         select(func.count(WpSite.id)).where(
             WpSite.deleted_at.is_(None),
@@ -711,6 +728,7 @@ async def pool_summary(session: AsyncSession) -> dict[str, int]:
         "sites_total": sites_total,
         "sites_active": sites_active,   # legacy: domain alive only
         "sites_usable": int(sites_usable),
+        "sites_postable": int(sites_postable),
         "sites_unusable": int(sites_unusable),
         "credentials_total": creds.total,
         "credentials_valid": creds.valid,
@@ -734,7 +752,7 @@ async def pool_summary_cached(session: AsyncSession) -> dict[str, int]:
 
     try:
         row = (await session.execute(text(
-            "SELECT sites_total, sites_active, sites_usable, sites_unusable, "
+            "SELECT sites_total, sites_active, sites_usable, sites_postable, sites_unusable, "
             "credentials_total, credentials_valid, credentials_valid_rpc, "
             "credentials_valid_admin, credentials_invalid, "
             "credentials_pending, credentials_transient, "
@@ -753,6 +771,7 @@ async def pool_summary_cached(session: AsyncSession) -> dict[str, int]:
         "sites_total": int(row.sites_total),
         "sites_active": int(row.sites_active),
         "sites_usable": int(row.sites_usable),
+        "sites_postable": int(row.sites_postable),
         "sites_unusable": int(row.sites_unusable),
         "credentials_total": int(row.credentials_total),
         "credentials_valid": int(row.credentials_valid),

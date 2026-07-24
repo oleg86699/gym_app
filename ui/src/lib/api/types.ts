@@ -213,6 +213,7 @@ export interface WpPoolSummary {
   sites_total: number
   sites_active: number
   sites_usable?: number
+  sites_postable?: number
   sites_unusable?: number
   credentials_valid_rpc?: number
   credentials_valid_admin?: number
